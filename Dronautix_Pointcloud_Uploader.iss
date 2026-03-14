@@ -1,11 +1,8 @@
-#define AppName "Dronautix Pointcloud Uploader"
-#define AppVersion "1.1"
-#define AppPublisher "Dronautix"
-#define AppExeName "Dronautix_Pointcloud_Uploader.exe"
+#include "installer_version.iss"
 #define SourceExe "dist\\Dronautix_Pointcloud_Uploader.exe"
 
 [Setup]
-AppId={{8F213FA6-9C7D-4CD6-BB1E-48E2B09587D8}
+AppId={#AppId}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
@@ -20,6 +17,10 @@ WizardStyle=modern
 SetupIconFile=icon.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 ArchitecturesInstallIn64BitMode=x64compatible
+PrivilegesRequired=admin
+CloseApplications=yes
+CloseApplicationsFilter={#AppExeName}
+RestartApplications=no
 
 [Languages]
 Name: "german"; MessagesFile: "compiler:Languages\German.isl"
@@ -36,3 +37,54 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: deskto
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "{#AppName} starten"; Flags: nowait postinstall skipifsilent
+
+[Code]
+function GetUninstallString(): string;
+var
+  uninstallKey: string;
+  uninstallString: string;
+begin
+  uninstallKey := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\' + '{#AppId}_is1';
+  uninstallString := '';
+
+  if not RegQueryStringValue(HKLM64, uninstallKey, 'UninstallString', uninstallString) then
+    if not RegQueryStringValue(HKLM, uninstallKey, 'UninstallString', uninstallString) then
+      RegQueryStringValue(HKCU, uninstallKey, 'UninstallString', uninstallString);
+
+  Result := uninstallString;
+end;
+
+function UnInstallOldVersion(): Integer;
+var
+  uninstallString: string;
+  resultCode: Integer;
+begin
+  Result := 0;
+  uninstallString := RemoveQuotes(GetUninstallString());
+
+  if uninstallString <> '' then
+  begin
+    if Exec(
+      uninstallString,
+      '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS',
+      '',
+      SW_HIDE,
+      ewWaitUntilTerminated,
+      resultCode
+    ) then
+      Result := resultCode
+    else
+      Result := -1;
+  end;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  uninstallResult: Integer;
+begin
+  Result := '';
+  uninstallResult := UnInstallOldVersion();
+
+  if (uninstallResult <> 0) and (uninstallResult <> 1) and (uninstallResult <> 3010) then
+    Result := 'Vorherige Version konnte nicht deinstalliert werden. Fehlercode: ' + IntToStr(uninstallResult);
+end;

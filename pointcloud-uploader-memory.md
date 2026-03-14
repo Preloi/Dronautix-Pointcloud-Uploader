@@ -6,7 +6,7 @@ Stand: 2026-03-14
 
 - Repo: `Preloi/Pointcloud-Uploader`
 - Aktueller Branch: `develop`
-- Ziel-Release: `1.1`
+- Ziel-Release: `1.2`
 
 ## Aktueller Stand
 
@@ -17,8 +17,10 @@ Stand: 2026-03-14
 - Der Potree Converter ist in die App integriert (`bundled_tools/PotreeConverter`).
 - Die App prüft beim Start `Z:\03 Apps\Pointcloud uploader\latest-release.json` auf neuere Versionen.
 - Wenn eine neuere Version gefunden wird, fragt die App per Ja/Nein-Dialog, ob das Update jetzt installiert werden soll.
-- EXE und Windows-Setup für Version `1.1` wurden gebaut und nach `Z:\03 Apps\Pointcloud uploader` kopiert.
+- EXE und Windows-Setup für Version `1.2` sind der aktuelle Release-Stand.
 - Künftige Versionen werden in `0.1`-Schritten erhöht (`1.0`, `1.1`, `1.2`, ...).
+- Die Versionsnummer steht unten in der Statusleiste der App.
+- Setup und App-Version werden aus derselben zentralen Versionsquelle abgeleitet.
 
 ## Wichtige Viewer-Details
 
@@ -37,20 +39,21 @@ Stand: 2026-03-14
   - `deleted_projects.json` wird dedupliziert aktualisiert
   - `projects_index.json` wird separat nachgezogen
   - Teilfehler werden explizit gemeldet
-- Die Versionsanzeige in der App steht auf `1.1`.
+- Die Versionsanzeige in der App steht auf `1.2`.
 
 ## Release-Dateien
 
 - `dist/Dronautix_Pointcloud_Uploader.exe`
-- `Output/Dronautix_Pointcloud_Uploader_Setup_1.1.exe`
+- `Output/Dronautix_Pointcloud_Uploader_Setup_1.2.exe`
 - `Z:\03 Apps\Pointcloud uploader\latest-release.json`
-- `Z:\03 Apps\Pointcloud uploader\Dronautix_Pointcloud_Uploader_1.1.exe`
-- `Z:\03 Apps\Pointcloud uploader\Dronautix_Pointcloud_Uploader_Setup_1.1.exe`
+- `Z:\03 Apps\Pointcloud uploader\Dronautix_Pointcloud_Uploader_1.2.exe`
+- `Z:\03 Apps\Pointcloud uploader\Dronautix_Pointcloud_Uploader_Setup_1.2.exe`
 
 ## Git-relevante Dateien für das Release
 
 - `app_version.py`
 - `version_info.txt`
+- `installer_version.iss`
 - `Dronautix_Pointcloud_Uploader.iss`
 - `bundled_tools/PotreeConverter/`
 - `.gitignore`
@@ -59,4 +62,5 @@ Stand: 2026-03-14
 
 - Falls CloudFront noch alte Assets liefert, gezielt invalidieren.
 - Für Live-Viewer-Änderungen ist `server_viewer/index.html` die maßgebliche Datei.
-- Nach `1.1` weiter nur in `0.1`-Schritten erhöhen, nicht in Patch-Versionen wie `1.1.1`.
+- Nach `1.2` weiter nur in `0.1`-Schritten erhöhen, nicht in Patch-Versionen wie `1.2.1`.
+- Setup nutzt jetzt `CloseApplications` und deinstalliert ältere Versionen vor der Neuinstallation.

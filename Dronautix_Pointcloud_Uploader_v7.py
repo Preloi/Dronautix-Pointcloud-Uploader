@@ -227,7 +227,7 @@ def check_for_available_update():
             return
 
         try:
-            subprocess.Popen([installer_path], shell=False)
+            subprocess.Popen([installer_path, "/CLOSEAPPLICATIONS"], shell=False)
             log(f"[UPDATE] Installer gestartet: {installer_path}")
             root.after(200, root.destroy)
         except Exception as install_error:
@@ -1535,6 +1535,18 @@ try:
     root.iconbitmap(get_bundled_resource_path("icon.ico"))
 except:
     pass
+
+# Statusleiste
+status_bar = ctk.CTkFrame(root, fg_color=COLOR_CARD, corner_radius=0, height=28)
+status_bar.pack(side="bottom", fill="x")
+status_bar.pack_propagate(False)
+
+ctk.CTkLabel(
+    status_bar,
+    text=f"Version {APP_VERSION}",
+    font=ctk.CTkFont(size=11),
+    text_color=COLOR_TEXT_DIM
+).pack(side="right", padx=12, pady=4)
 
 # Scrollbarer Hauptbereich
 main_scroll = ctk.CTkScrollableFrame(root, fg_color=COLOR_SURFACE, corner_radius=0)
