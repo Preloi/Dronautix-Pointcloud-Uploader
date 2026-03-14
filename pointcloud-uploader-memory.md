@@ -7,6 +7,8 @@ Stand: 2026-03-14
 - Repo: `Preloi/Pointcloud-Uploader`
 - Aktueller Branch: `develop`
 - Ziel-Release: `1.0`
+- Release-Commit: `7db57d1`
+- Git-Tag: `v1.0`
 
 ## Aktueller Stand
 
@@ -18,6 +20,7 @@ Stand: 2026-03-14
 - Die App prüft beim Start `Z:\03 Apps\Pointcloud uploader\latest-release.json` auf neuere Versionen.
 - EXE und Windows-Setup für Version `1.0` wurden lokal gebaut.
 - Release-Dateien wurden nach `Z:\03 Apps\Pointcloud uploader` kopiert.
+- Künftige Versionen werden in `0.1`-Schritten erhöht (`1.0`, `1.1`, `1.2`, ...).
 
 ## Wichtige Viewer-Details
 
@@ -43,6 +46,8 @@ Stand: 2026-03-14
 - `dist/Dronautix_Pointcloud_Uploader.exe`
 - `Output/Dronautix_Pointcloud_Uploader_Setup_1.0.exe`
 - `Z:\03 Apps\Pointcloud uploader\latest-release.json`
+- `Z:\03 Apps\Pointcloud uploader\Dronautix_Pointcloud_Uploader_1.0.exe`
+- `Z:\03 Apps\Pointcloud uploader\Dronautix_Pointcloud_Uploader_Setup_1.0.exe`
 
 ## Git-relevante Dateien für das Release
 
@@ -56,3 +61,4 @@ Stand: 2026-03-14
 
 - Falls CloudFront noch alte Assets liefert, gezielt invalidieren.
 - Für Live-Viewer-Änderungen ist `server_viewer/index.html` die maßgebliche Datei.
+- Beim nächsten Release Versionssprung auf `1.1`, nicht auf Patch-Versionen wie `1.0.1`.
