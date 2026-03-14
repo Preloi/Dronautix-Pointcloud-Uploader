@@ -108,13 +108,22 @@ def load_config():
 
 
 def validate_file(filepath):
-    """Prüft ob die Datei eine gültige LAZ oder LAS Datei ist"""
+    """Prüft ob die Datei eine gültige LAS/LAZ oder COPC Datei ist"""
     if not os.path.exists(filepath):
         return False, "Datei existiert nicht"
+    filename = os.path.basename(filepath).lower()
     ext = os.path.splitext(filepath)[1].lower()
     if ext not in ['.laz', '.las']:
-        return False, "Nur .laz und .las Dateien werden unterstützt"
+        return False, "Nur .copc.laz, .laz und .las Dateien werden unterstützt"
+    if filename.endswith('.copc.laz'):
+        return True, "COPC"
     return True, "OK"
+
+
+def detect_input_format(filepath):
+    """Ermittelt ob eine Datei direkt als COPC hochgeladen werden kann."""
+    filename = os.path.basename(filepath).lower()
+    return "copc" if filename.endswith(".copc.laz") else "potree"
 
 
 def cleanup_local_files(output_path):
@@ -307,17 +316,26 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret):
             messagebox.showerror("Fehler", msg)
             return
 
+        input_format = detect_input_format(laz_file)
+        is_copc = input_format == "copc"
+
         if not aws_access or not aws_secret:
             log("[FEHLER] Bitte AWS Keys in den Einstellungen eingeben!")
             messagebox.showwarning("Fehler", "Bitte AWS Zugangsdaten in den Einstellungen eingeben!")
             return
 
-        if not converter_path or not os.path.exists(converter_path):
+        if not is_copc and (not converter_path or not os.path.exists(converter_path)):
             log("[FEHLER] Potree Converter Pfad nicht konfiguriert!")
             messagebox.showwarning("Fehler", "Bitte Potree Converter Pfad in den Einstellungen angeben!")
             return
 
+        if not is_copc and not output_base_dir:
+            log("[FEHLER] Output-Ordner nicht konfiguriert!")
+            messagebox.showwarning("Fehler", "Bitte einen Output-Ordner in den Einstellungen angeben!")
+            return
+
         log(f"[DATEI] ✓ Datei ist gültig: {os.path.basename(laz_file)}")
+        log(f"[FORMAT] {'COPC Direkt-Upload' if is_copc else 'LAS/LAZ mit Potree Converter'}")
         log(f"[KUNDE] {kunde}")
         log(f"[PROJEKT] {projekt}")
 
@@ -328,49 +346,56 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret):
 
         log(f"[ID] {folder_id}")
 
-        # 2. Potree Konvertierung
-        root.after(0, lambda: update_step("Konvertiere mit Potree...", 2))
-        root.after(0, lambda: progress_bar.set(0))
+        output_dir = None
 
-        # Temporärer Output-Ordner: kunde/id/projekt
-        output_dir = os.path.join(output_base_dir, folder_kunde, folder_id, folder_projekt)
-        os.makedirs(output_dir, exist_ok=True)
+        # 2. Dateien vorbereiten
+        if is_copc:
+            root.after(0, lambda: update_step("Bereite COPC für Upload vor...", 2))
+            root.after(0, lambda: progress_bar.set(1))
+            log("[COPC] Direkter Upload ohne Potree Converter")
+        else:
+            root.after(0, lambda: update_step("Konvertiere mit Potree...", 2))
+            root.after(0, lambda: progress_bar.set(0))
 
-        log(f"[KONVERTIERUNG] Starte Potree Converter...")
-        log(f"[OUTPUT] {output_dir}")
+            # Temporärer Output-Ordner: kunde/id/projekt
+            output_dir = os.path.join(output_base_dir, folder_kunde, folder_id, folder_projekt)
+            os.makedirs(output_dir, exist_ok=True)
 
-        cmd = [converter_path, laz_file, "-o", output_dir, "--overwrite"]
-        
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-            bufsize=1
-        )
+            log(f"[KONVERTIERUNG] Starte Potree Converter...")
+            log(f"[OUTPUT] {output_dir}")
 
-        for line in process.stdout:
-            line = line.strip()
-            if line:
-                log(f"[POTREE] {line}")
-                if "%" in line:
-                    try:
-                        percent_str = re.search(r'(\d+)%', line)
-                        if percent_str:
-                            percent = int(percent_str.group(1))
-                            root.after(0, lambda p=percent: progress_bar.set(p / 100))
-                    except:
-                        pass
+            cmd = [converter_path, laz_file, "-o", output_dir, "--overwrite"]
+            
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+                bufsize=1
+            )
 
-        process.wait()
+            for line in process.stdout:
+                line = line.strip()
+                if line:
+                    log(f"[POTREE] {line}")
+                    if "%" in line:
+                        try:
+                            percent_str = re.search(r'(\d+)%', line)
+                            if percent_str:
+                                percent = int(percent_str.group(1))
+                                root.after(0, lambda p=percent: progress_bar.set(p / 100))
+                        except:
+                            pass
 
-        if process.returncode != 0:
-            log(f"[FEHLER] Potree Converter fehlgeschlagen (Exit Code: {process.returncode})")
-            messagebox.showerror("Fehler", "Potree Konvertierung fehlgeschlagen!")
-            return
+            process.wait()
 
-        log("[KONVERTIERUNG] ✓ Potree Konvertierung abgeschlossen")
-        root.after(0, lambda: progress_bar.set(1))
+            if process.returncode != 0:
+                log(f"[FEHLER] Potree Converter fehlgeschlagen (Exit Code: {process.returncode})")
+                messagebox.showerror("Fehler", "Potree Konvertierung fehlgeschlagen!")
+                return
+
+            log("[KONVERTIERUNG] ✓ Potree Konvertierung abgeschlossen")
+            root.after(0, lambda: progress_bar.set(1))
 
         # 3. S3 Upload
         root.after(0, lambda: update_step("Lade zu S3 hoch...", 3))
@@ -395,12 +420,15 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret):
 
         # Sammle alle Dateien
         files_to_upload = []
-        for root_dir, dirs, files in os.walk(output_dir):
-            for file in files:
-                local_path = os.path.join(root_dir, file)
-                rel_path = os.path.relpath(local_path, output_dir)
-                s3_key = f"{s3_prefix}/{rel_path}".replace("\\", "/")
-                files_to_upload.append((local_path, s3_key))
+        if is_copc:
+            files_to_upload.append((laz_file, f"{s3_prefix}/source.copc.laz"))
+        else:
+            for root_dir, dirs, files in os.walk(output_dir):
+                for file in files:
+                    local_path = os.path.join(root_dir, file)
+                    rel_path = os.path.relpath(local_path, output_dir)
+                    s3_key = f"{s3_prefix}/{rel_path}".replace("\\", "/")
+                    files_to_upload.append((local_path, s3_key))
 
         if not files_to_upload:
             log("[FEHLER] Keine Dateien zum Upload gefunden!")
@@ -451,8 +479,12 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret):
 
         timestamp = datetime.now().isoformat()
 
-        # Link erstellen (Format: ?id={kunde}/{id}/{projekt}&name={displayname})
-        path_param = f"{folder_kunde}/{folder_id}/{folder_projekt}"
+        # Link erstellen. COPC-Projekte verlinken direkt auf die Datei,
+        # klassische Projekte bleiben bei der bisherigen metadata.json Logik.
+        if is_copc:
+            path_param = f"{folder_kunde}/{folder_id}/{folder_projekt}/source.copc.laz"
+        else:
+            path_param = f"{folder_kunde}/{folder_id}/{folder_projekt}"
         display_name = f"{kunde} - {projekt}"
         safe_name = urllib.parse.quote(display_name)
         project_url = f"{DOMAIN_URL}?id={path_param}&name={safe_name}"
@@ -464,7 +496,9 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret):
             "kunde": kunde,
             "id": folder_id,
             "projekt": projekt,
+            "format": input_format,
             "link": project_url,
+            "viewer_path": path_param,
             "s3_path": s3_prefix
         }
         index_data["projects"].insert(0, new_project)
@@ -486,13 +520,16 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret):
 
         # 5. Cleanup - Temporäre Dateien löschen
         root.after(0, lambda: update_step("Räume auf...", 5))
-        log("[CLEANUP] Lösche temporäre Dateien...")
-        
-        cleanup_success = cleanup_local_files(output_dir)
-        if cleanup_success:
-            log("[CLEANUP] ✓ Temporärer Ordner erfolgreich gelöscht")
+        if is_copc:
+            log("[CLEANUP] Kein lokaler Cleanup nötig für COPC Upload")
         else:
-            log("[CLEANUP] ⚠ Temporärer Ordner konnte nicht vollständig gelöscht werden")
+            log("[CLEANUP] Lösche temporäre Dateien...")
+            
+            cleanup_success = cleanup_local_files(output_dir)
+            if cleanup_success:
+                log("[CLEANUP] ✓ Temporärer Ordner erfolgreich gelöscht")
+            else:
+                log("[CLEANUP] ⚠ Temporärer Ordner konnte nicht vollständig gelöscht werden")
 
         # Fertig
         root.after(0, lambda: update_step("✓ Fertig!", 5))
@@ -525,8 +562,8 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret):
 
 def select_file():
     file = filedialog.askopenfilename(
-        title="LAZ/LAS Datei auswählen",
-        filetypes=[("Point Cloud", "*.laz *.las"), ("Alle Dateien", "*.*")]
+        title="LAS/LAZ/COPC Datei auswählen",
+        filetypes=[("Point Cloud", "*.copc.laz *.laz *.las"), ("Alle Dateien", "*.*")]
     )
     if file:
         entry_file.delete(0, tk.END)
@@ -1068,6 +1105,14 @@ def open_settings_window(first_run=False):
 
     ctk.CTkLabel(
         converter_card,
+        text="Optional für COPC Uploads, erforderlich für klassische LAS/LAZ Konvertierung.",
+        font=ctk.CTkFont(size=10),
+        text_color=COLOR_TEXT_DIM,
+        wraplength=540
+    ).pack(anchor="w", padx=16, pady=(0, 8))
+
+    ctk.CTkLabel(
+        converter_card,
         text="Pfad zur PotreeConverter.exe:",
         font=ctk.CTkFont(size=11),
         text_color=COLOR_TEXT_DIM
@@ -1154,16 +1199,12 @@ def open_settings_window(first_run=False):
             messagebox.showwarning("Fehler", "Bitte AWS Zugangsdaten eingeben!")
             return
 
-        if not converter_path or not os.path.exists(converter_path):
+        if converter_path and not os.path.exists(converter_path):
             messagebox.showwarning("Fehler", "Bitte einen gültigen Pfad zum Potree Converter angeben!")
             return
 
-        if not output_dir:
-            messagebox.showwarning("Fehler", "Bitte einen Output-Ordner angeben!")
-            return
-
-        # Output Ordner erstellen falls nicht vorhanden
-        os.makedirs(output_dir, exist_ok=True)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
 
         if save_config(
             aws_access=aws_access,
