@@ -77,8 +77,10 @@
                 const projectFolderPath = `pointclouds/${idParts.slice(0, 3).join('/')}`;
                 const projectShortId = idParts[1];
 
-                // Lade Liste der gelöschten Projekte von S3 (mit Cache-Buster)
-                const response = await fetch('https://potreedronautix.s3.eu-central-1.amazonaws.com/deleted_projects.json?' + Date.now());
+                // Lade die Löschliste von derselben Origin, damit kein CORS-Fehler entsteht.
+                const deletedProjectsUrl = new URL('./deleted_projects.json', window.location.href);
+                deletedProjectsUrl.searchParams.set('t', Date.now());
+                const response = await fetch(deletedProjectsUrl.toString(), { cache: 'no-store' });
 
                 if (!response.ok) {
                     return false; // Liste nicht gefunden, zeige Viewer normal
@@ -128,18 +130,23 @@
                                     Dieses Projekt wurde gelöscht und ist nicht mehr verfügbar.<br>
                                     Der Link ist nicht mehr gültig.
                                 </p>
-                                <a href="https://pointcloud.dronautix.at" style="
-                                    display: inline-block;
-                                    padding: 12px 24px;
-                                    background: #3b82f6;
-                                    color: white;
-                                    text-decoration: none;
-                                    border-radius: 6px;
-                                    font-weight: 600;
-                                    transition: background 0.2s;
-                                " onmouseover="this.style.background='#2563eb'"
-                                   onmouseout="this.style.background='#3b82f6'">
-                                    Zur Startseite
+                                <a
+                                    href="https://dronautix.at"
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    style="display: inline-block;"
+                                >
+                                    <img
+                                        src="./libs/potree/resources/images/dronautix_logo.png"
+                                        alt="Dronautix"
+                                        style="
+                                            display: block;
+                                            width: 180px;
+                                            max-width: 100%;
+                                            height: auto;
+                                            margin: 0 auto;
+                                        "
+                                    >
                                 </a>
                             </div>
                         </div>

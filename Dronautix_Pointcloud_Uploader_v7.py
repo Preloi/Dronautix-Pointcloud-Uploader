@@ -34,6 +34,7 @@ DOMAIN_URL = "https://pointcloud.dronautix.at/index.html"
 # S3 Pfad für Index-Dateien
 S3_INDEX_JSON = "projects_index.json"
 S3_DELETED_JSON = "deleted_projects.json"
+S3_DELETE_BATCH_SIZE = 1000
 
 # --- CUSTOMTKINTER EINSTELLUNGEN ---
 ctk.set_appearance_mode("dark")
@@ -225,51 +226,147 @@ def save_deleted_projects(s3_client, deleted_data):
         return False
 
 
-def delete_project_from_s3(s3_client, s3_path, project_info):
-    """Löscht alle Dateien eines Projekts aus S3 und markiert es als gelöscht"""
-    try:
-        # 1. Füge Projekt zur Gelöscht-Liste hinzu
-        log(f"[LÖSCHEN] Markiere Projekt als gelöscht...")
-        deleted_data = load_deleted_projects(s3_client)
+def build_deleted_project_entry(project_info, s3_path):
+    """Erstellt einen standardisierten Eintrag für deleted_projects.json"""
+    return {
+        "id": project_info.get("id", ""),
+        "kunde": project_info.get("kunde", ""),
+        "projekt": project_info.get("projekt", ""),
+        "s3_path": s3_path,
+        "deleted_at": datetime.now().isoformat(),
+        "original_link": project_info.get("link", "")
+    }
 
-        deleted_entry = {
-            "id": project_info.get("id", ""),
-            "kunde": project_info.get("kunde", ""),
-            "projekt": project_info.get("projekt", ""),
-            "s3_path": s3_path,
-            "deleted_at": datetime.now().isoformat(),
-            "original_link": project_info.get("link", "")
+
+def upsert_deleted_project(deleted_data, deleted_entry):
+    """Aktualisiert einen bestehenden Deleted-Eintrag oder fügt ihn vorne ein."""
+    deleted_projects = deleted_data.get("deleted_projects", [])
+    filtered_projects = [
+        proj for proj in deleted_projects
+        if proj.get("s3_path") != deleted_entry["s3_path"]
+        and proj.get("id") != deleted_entry["id"]
+    ]
+    filtered_projects.insert(0, deleted_entry)
+    deleted_data["deleted_projects"] = filtered_projects
+    return deleted_data
+
+
+def remove_project_from_index(index_data, project_id):
+    """Entfernt ein Projekt aus dem Index und gibt True zurück, wenn sich der Index geändert hat."""
+    original_count = len(index_data.get("projects", []))
+    index_data["projects"] = [
+        project for project in index_data.get("projects", [])
+        if project.get("id") != project_id
+    ]
+    return len(index_data["projects"]) != original_count
+
+
+def collect_project_objects(s3_client, s3_path):
+    """Sammelt alle S3-Objekte unter einem Projektpräfix."""
+    paginator = s3_client.get_paginator('list_objects_v2')
+    pages = paginator.paginate(Bucket=BUCKET_NAME, Prefix=s3_path)
+
+    object_keys = []
+    for page in pages:
+        for obj in page.get('Contents', []):
+            object_keys.append(obj['Key'])
+
+    return object_keys
+
+
+def delete_s3_objects(s3_client, object_keys):
+    """Löscht S3-Objekte in Batches und bricht bei partiellen Fehlern ab."""
+    if not object_keys:
+        return 0
+
+    deleted_count = 0
+    for start_index in range(0, len(object_keys), S3_DELETE_BATCH_SIZE):
+        batch_keys = object_keys[start_index:start_index + S3_DELETE_BATCH_SIZE]
+        response = s3_client.delete_objects(
+            Bucket=BUCKET_NAME,
+            Delete={'Objects': [{'Key': key} for key in batch_keys]}
+        )
+
+        errors = response.get("Errors", [])
+        if errors:
+            first_error = errors[0]
+            raise RuntimeError(
+                f"S3 DeleteObjects Fehler für {first_error.get('Key', 'unbekannt')}: "
+                f"{first_error.get('Code', 'Unknown')} - {first_error.get('Message', '')}"
+            )
+
+        deleted_count += len(batch_keys)
+
+    return deleted_count
+
+
+def delete_project_transaction(s3_client, project_info):
+    """Löscht Projektdaten und aktualisiert die Metadaten so robust wie möglich."""
+    s3_path = project_info.get("s3_path", "")
+    project_id = project_info.get("id", "")
+
+    if not s3_path:
+        return {
+            "success": False,
+            "partial": False,
+            "message": "S3-Pfad nicht gefunden."
         }
 
-        deleted_data["deleted_projects"].insert(0, deleted_entry)
-        save_deleted_projects(s3_client, deleted_data)
-        log(f"[LÖSCHEN] ✓ Projekt zur Gelöscht-Liste hinzugefügt")
-
-        # 2. Lösche alle Dateien von S3
-        log(f"[LÖSCHEN] Lösche S3 Ordner: {s3_path}")
-        paginator = s3_client.get_paginator('list_objects_v2')
-        pages = paginator.paginate(Bucket=BUCKET_NAME, Prefix=s3_path)
-
-        objects_to_delete = []
-        for page in pages:
-            if 'Contents' in page:
-                for obj in page['Contents']:
-                    objects_to_delete.append({'Key': obj['Key']})
-
-        if not objects_to_delete:
+    try:
+        log(f"[LÖSCHEN] Sammle Dateien unter: {s3_path}")
+        object_keys = collect_project_objects(s3_client, s3_path)
+        if object_keys:
+            log(f"[LÖSCHEN] Lösche {len(object_keys)} Dateien aus S3...")
+            deleted_count = delete_s3_objects(s3_client, object_keys)
+            log(f"[LÖSCHEN] ✓ {deleted_count} Dateien gelöscht")
+        else:
             log(f"[LÖSCHEN] Keine Dateien gefunden unter: {s3_path}")
-            return True
 
-        log(f"[LÖSCHEN] Lösche {len(objects_to_delete)} Dateien...")
-        s3_client.delete_objects(
-            Bucket=BUCKET_NAME,
-            Delete={'Objects': objects_to_delete}
-        )
-        log(f"[LÖSCHEN] ✓ {len(objects_to_delete)} Dateien gelöscht")
-        return True
+        metadata_errors = []
+
+        log("[LÖSCHEN] Aktualisiere Gelöscht-Liste...")
+        deleted_data = load_deleted_projects(s3_client)
+        deleted_entry = build_deleted_project_entry(project_info, s3_path)
+        deleted_data = upsert_deleted_project(deleted_data, deleted_entry)
+        if save_deleted_projects(s3_client, deleted_data):
+            log("[LÖSCHEN] ✓ Gelöscht-Liste aktualisiert")
+        else:
+            metadata_errors.append("deleted_projects.json")
+
+        log("[LÖSCHEN] Aktualisiere Projekt-Index...")
+        index_data = load_projects_index(s3_client)
+        removed_from_index = remove_project_from_index(index_data, project_id)
+        if removed_from_index:
+            if save_projects_index(s3_client, index_data):
+                log("[LÖSCHEN] ✓ Projekt-Index aktualisiert")
+            else:
+                metadata_errors.append("projects_index.json")
+        else:
+            log("[LÖSCHEN] Projekt war bereits nicht mehr im Index")
+
+        if metadata_errors:
+            files = ", ".join(metadata_errors)
+            return {
+                "success": False,
+                "partial": True,
+                "message": (
+                    "Projektdaten wurden in S3 gelöscht, aber folgende Metadaten "
+                    f"konnten nicht vollständig aktualisiert werden: {files}"
+                )
+            }
+
+        return {
+            "success": True,
+            "partial": False,
+            "message": "Projekt wurde gelöscht und alle Metadaten wurden aktualisiert."
+        }
     except Exception as e:
         log(f"[FEHLER] Löschen fehlgeschlagen: {e}")
-        return False
+        return {
+            "success": False,
+            "partial": False,
+            "message": f"Löschen fehlgeschlagen: {e}"
+        }
 
 
 # ============================================================
@@ -868,21 +965,16 @@ def open_projects_window():
                 messagebox.showerror("Fehler", "Projekt nicht im Index gefunden!")
                 return
 
-            # Lösche von S3
-            s3_path = project_to_delete.get("s3_path", "")
-            if not s3_path:
-                messagebox.showerror("Fehler", "S3-Pfad nicht gefunden!")
-                return
+            delete_result = delete_project_transaction(s3_client, project_to_delete)
 
-            if delete_project_from_s3(s3_client, s3_path, project_to_delete):
-                # Entferne aus Index
-                index_data["projects"] = [p for p in index_data["projects"] if p["id"] != projekt_id]
-                save_projects_index(s3_client, index_data)
-
+            if delete_result["success"]:
                 messagebox.showinfo("Erfolg", "Projekt wurde gelöscht und Link deaktiviert!")
                 load_projects()
+            elif delete_result.get("partial"):
+                messagebox.showwarning("Teilweise gelöscht", delete_result["message"])
+                load_projects()
             else:
-                messagebox.showerror("Fehler", "Löschen fehlgeschlagen!")
+                messagebox.showerror("Fehler", delete_result["message"])
 
         except Exception as e:
             messagebox.showerror("Fehler", f"Fehler beim Löschen:\n{e}")
