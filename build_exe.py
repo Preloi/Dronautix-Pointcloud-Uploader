@@ -17,9 +17,10 @@
 import subprocess
 import sys
 import os
+from app_version import APP_NAME, APP_VERSION
 
 print("=" * 70)
-print("  Dronautix Pointcloud Uploader - EXE Builder")
+print(f"  {APP_NAME} {APP_VERSION} - EXE Builder")
 print("=" * 70)
 print()
 
@@ -38,7 +39,10 @@ except ImportError:
 # Prüfe ob alle erforderlichen Dateien vorhanden sind
 required_files = [
     "Dronautix_Pointcloud_Uploader_v7.py",
-    "icon.ico"
+    "icon.ico",
+    "version_info.txt",
+    os.path.join("bundled_tools", "PotreeConverter", "PotreeConverter.exe"),
+    os.path.join("bundled_tools", "PotreeConverter", "laszip.dll"),
 ]
 
 missing_files = []
@@ -65,15 +69,19 @@ cmd = [
     "--onefile",                              # Eine einzelne .exe Datei
     "--windowed",                             # Kein Konsolen-Fenster (GUI-App)
     "--icon=icon.ico",                        # Icon einbinden
+    "--version-file=version_info.txt",        # Windows-Dateiversion
     "--add-data=icon.ico;.",                  # Icon als Ressource
+    "--add-data=bundled_tools;bundled_tools", # Integrierten PotreeConverter mitnehmen
     "Dronautix_Pointcloud_Uploader_v7.py"
 ]
 
 # Für Windows muss das add-data Format angepasst werden
 if sys.platform == "win32":
-    cmd[5] = "--add-data=icon.ico;."
+    cmd[6] = "--add-data=icon.ico;."
+    cmd[7] = "--add-data=bundled_tools;bundled_tools"
 else:
-    cmd[5] = "--add-data=icon.ico:."
+    cmd[6] = "--add-data=icon.ico:."
+    cmd[7] = "--add-data=bundled_tools:bundled_tools"
 
 print("Befehl:", " ".join(cmd))
 print()

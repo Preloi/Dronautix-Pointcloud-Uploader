@@ -6,7 +6,7 @@ Stand: 2026-03-14
 
 - Repo: `Preloi/Pointcloud-Uploader`
 - Aktueller Branch: `develop`
-- Letzter gepushter Commit: `bd479d5` (`Add COPC upload and viewer support`)
+- Ziel-Release: `1.0`
 
 ## Aktueller Stand
 
@@ -14,6 +14,10 @@ Stand: 2026-03-14
 - Klassischer Potree-Converter-Workflow bleibt parallel erhalten.
 - Viewer 1.8.2 kann Potree-Projekte und COPC-Dateien laden.
 - Live-`index.html` wurde ins Bucket `potreedronautix` hochgeladen.
+- Der Potree Converter ist in die App integriert (`bundled_tools/PotreeConverter`).
+- Die App prüft beim Start `Z:\03 Apps\Pointcloud uploader\latest-release.json` auf neuere Versionen.
+- EXE und Windows-Setup für Version `1.0` wurden lokal gebaut.
+- Release-Dateien wurden nach `Z:\03 Apps\Pointcloud uploader` kopiert.
 
 ## Wichtige Viewer-Details
 
@@ -21,6 +25,7 @@ Stand: 2026-03-14
 - `deleted_projects.json` wird im Viewer jetzt von derselben Origin geladen, nicht mehr direkt von S3.
 - Auf der "Projekt nicht verfügbar"-Seite wurde der Button entfernt.
 - Stattdessen wird das Dronautix-Logo angezeigt und verlinkt auf `https://dronautix.at`.
+- Nach 30 Tagen wird nicht mehr die explizite Löschmeldung gezeigt, sondern bei fehlenden Dateien eine allgemeine Nicht-verfügbar-Seite.
 
 ## Wichtige Uploader-Details
 
@@ -31,16 +36,21 @@ Stand: 2026-03-14
   - `deleted_projects.json` wird dedupliziert aktualisiert
   - `projects_index.json` wird separat nachgezogen
   - Teilfehler werden explizit gemeldet
+- Die Versionsanzeige in der App steht auf `1.0`.
 
-## Lokal geänderte, noch nicht gepushte Dateien
+## Release-Dateien
 
-- `Dronautix_Pointcloud_Uploader_v7.py`
-- `server_viewer/index.html`
+- `dist/Dronautix_Pointcloud_Uploader.exe`
+- `Output/Dronautix_Pointcloud_Uploader_Setup_1.0.exe`
+- `Z:\03 Apps\Pointcloud uploader\latest-release.json`
 
-## Temporäre lokale Dateien
+## Git-relevante Dateien für das Release
 
-- `bucket-cors.json` wurde für die S3-CORS-Konfiguration erzeugt
-- `__pycache__/` ist lokal vorhanden
+- `app_version.py`
+- `version_info.txt`
+- `Dronautix_Pointcloud_Uploader.iss`
+- `bundled_tools/PotreeConverter/`
+- `.gitignore`
 
 ## Offene Hinweise
 

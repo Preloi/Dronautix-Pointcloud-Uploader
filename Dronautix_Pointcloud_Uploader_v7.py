@@ -7,7 +7,7 @@ import subprocess
 import uuid
 import csv
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 import boto3
 import mimetypes
@@ -16,6 +16,8 @@ import json
 import shutil
 import webbrowser
 import time
+import sys
+from app_version import APP_NAME, APP_VERSION, APP_FILE_VERSION
 
 # --- KONFIGURATION (PFADE WERDEN IN EINSTELLUNGEN GESETZT) ---
 # Neue: Config in AppData speichern
@@ -30,11 +32,17 @@ os.makedirs(APPDATA_DIR, exist_ok=True)
 BUCKET_NAME = "potreedronautix"
 REGION_NAME = "eu-central-1"
 DOMAIN_URL = "https://pointcloud.dronautix.at/index.html"
+UPDATE_SHARE_DIR = r"Z:\03 Apps\Pointcloud uploader"
+UPDATE_MANIFEST_FILE = os.path.join(UPDATE_SHARE_DIR, "latest-release.json")
 
 # S3 Pfad für Index-Dateien
 S3_INDEX_JSON = "projects_index.json"
 S3_DELETED_JSON = "deleted_projects.json"
 S3_DELETE_BATCH_SIZE = 1000
+DELETED_PROJECT_RETENTION_DAYS = 30
+BUNDLED_CONVERTER_DIR = os.path.join("bundled_tools", "PotreeConverter")
+BUNDLED_CONVERTER_EXE = "PotreeConverter.exe"
+BUNDLED_CONVERTER_DLL = "laszip.dll"
 
 # --- CUSTOMTKINTER EINSTELLUNGEN ---
 ctk.set_appearance_mode("dark")
@@ -108,6 +116,105 @@ def load_config():
     return {"first_run": True}
 
 
+def get_app_base_dir():
+    """Ermittelt das Basisverzeichnis für Quellcode und PyInstaller-Builds."""
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return sys._MEIPASS
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def get_bundled_resource_path(*path_parts):
+    """Pfad zu mitgelieferten Ressourcen im Quellcode- und EXE-Modus."""
+    return os.path.join(get_app_base_dir(), *path_parts)
+
+
+def get_bundled_converter_dir():
+    """Pfad zum mitgelieferten PotreeConverter-Ordner."""
+    return os.path.join(get_app_base_dir(), BUNDLED_CONVERTER_DIR)
+
+
+def get_bundled_converter_path():
+    """Pfad zur mitgelieferten PotreeConverter.exe."""
+    return os.path.join(get_bundled_converter_dir(), BUNDLED_CONVERTER_EXE)
+
+
+def is_converter_bundle_available():
+    """Prüft ob der mitgelieferte Converter vollständig vorhanden ist."""
+    converter_path = get_bundled_converter_path()
+    converter_dll = os.path.join(get_bundled_converter_dir(), BUNDLED_CONVERTER_DLL)
+    return os.path.exists(converter_path) and os.path.exists(converter_dll)
+
+
+def resolve_converter_path(configured_path=""):
+    """Nutze optional einen Override-Pfad, sonst den mitgelieferten Converter."""
+    if configured_path and os.path.exists(configured_path):
+        return configured_path
+
+    if is_converter_bundle_available():
+        return get_bundled_converter_path()
+
+    return ""
+
+
+def parse_version_tuple(version_value):
+    """Wandelt Versionen wie 1.0.3 in vergleichbare Tupel um."""
+    if not version_value:
+        return tuple()
+
+    parts = re.findall(r'\d+', str(version_value))
+    return tuple(int(part) for part in parts)
+
+
+def is_remote_version_newer(remote_version, local_version):
+    """Vergleicht zwei Versionsstrings numerisch."""
+    remote_tuple = parse_version_tuple(remote_version)
+    local_tuple = parse_version_tuple(local_version)
+
+    max_length = max(len(remote_tuple), len(local_tuple))
+    remote_tuple += (0,) * (max_length - len(remote_tuple))
+    local_tuple += (0,) * (max_length - len(local_tuple))
+
+    return remote_tuple > local_tuple
+
+
+def load_update_manifest():
+    """Lädt das Update-Manifest aus dem Netzwerkverzeichnis."""
+    if not os.path.exists(UPDATE_MANIFEST_FILE):
+        return None
+
+    try:
+        with open(UPDATE_MANIFEST_FILE, "r", encoding="utf-8") as manifest_file:
+            return json.load(manifest_file)
+    except Exception as e:
+        log(f"[UPDATE] Manifest konnte nicht geladen werden: {e}")
+        return None
+
+
+def check_for_available_update():
+    """Prüft beim Start, ob im Netzwerkverzeichnis eine neuere Version bereitliegt."""
+    try:
+        manifest = load_update_manifest()
+        if not manifest:
+            return
+
+        remote_version = manifest.get("version", "").strip()
+        if not remote_version or not is_remote_version_newer(remote_version, APP_VERSION):
+            return
+
+        installer_name = manifest.get("installer_name", "")
+        installer_path = os.path.join(UPDATE_SHARE_DIR, installer_name) if installer_name else UPDATE_SHARE_DIR
+        messagebox.showinfo(
+            "Update verfügbar",
+            f"Es ist eine neue Version verfügbar.\n\n"
+            f"Installierte Version: {APP_VERSION}\n"
+            f"Verfügbare Version: {remote_version}\n\n"
+            f"Pfad: {installer_path}"
+        )
+        log(f"[UPDATE] Neue Version verfügbar: {remote_version} ({installer_path})")
+    except Exception as e:
+        log(f"[UPDATE] Update-Prüfung fehlgeschlagen: {e}")
+
+
 def validate_file(filepath):
     """Prüft ob die Datei eine gültige LAS/LAZ oder COPC Datei ist"""
     if not os.path.exists(filepath):
@@ -158,6 +265,42 @@ def get_total_size(files_list):
     return total
 
 
+def parse_iso_datetime(value):
+    """Parst ISO-Zeitstempel robust und liefert None bei ungültigen Werten."""
+    if not value:
+        return None
+
+    try:
+        normalized = value.replace("Z", "+00:00")
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+
+def prune_deleted_projects(deleted_data):
+    """Entfernt Löschhinweise, die älter als die definierte Aufbewahrungszeit sind."""
+    deleted_projects = deleted_data.get("deleted_projects", [])
+    now = datetime.now()
+    retention_delta = timedelta(days=DELETED_PROJECT_RETENTION_DAYS)
+
+    active_projects = []
+    for project in deleted_projects:
+        deleted_at = parse_iso_datetime(project.get("deleted_at"))
+        if deleted_at is None:
+            continue
+
+        if deleted_at.tzinfo is not None:
+            age = datetime.now(deleted_at.tzinfo) - deleted_at
+        else:
+            age = now - deleted_at
+
+        if age <= retention_delta:
+            active_projects.append(project)
+
+    deleted_data["deleted_projects"] = active_projects
+    return deleted_data
+
+
 def load_projects_index(s3_client):
     """Lädt den bestehenden Projekt-Index von S3"""
     try:
@@ -198,6 +341,7 @@ def load_deleted_projects(s3_client):
     try:
         response = s3_client.get_object(Bucket=BUCKET_NAME, Key=S3_DELETED_JSON)
         data = json.loads(response['Body'].read().decode('utf-8'))
+        data = prune_deleted_projects(data)
         log(f"[GELÖSCHT] Liste geladen ({len(data.get('deleted_projects', []))} Einträge)")
         return data
     except s3_client.exceptions.NoSuchKey:
@@ -211,6 +355,7 @@ def load_deleted_projects(s3_client):
 def save_deleted_projects(s3_client, deleted_data):
     """Speichert die Liste der gelöschten Projekte auf S3"""
     try:
+        deleted_data = prune_deleted_projects(deleted_data)
         deleted_data["last_updated"] = datetime.now().isoformat()
         s3_client.put_object(
             Bucket=BUCKET_NAME,
@@ -396,7 +541,8 @@ class UploadProgress:
 
 def run_process(laz_file, kunde, projekt, aws_access, aws_secret):
     config = load_config()
-    converter_path = config.get("converter_path", "")
+    configured_converter_path = config.get("converter_path", "")
+    converter_path = resolve_converter_path(configured_converter_path)
     output_base_dir = config.get("output_base_dir", "")
     
     try:
@@ -421,9 +567,13 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret):
             messagebox.showwarning("Fehler", "Bitte AWS Zugangsdaten in den Einstellungen eingeben!")
             return
 
-        if not is_copc and (not converter_path or not os.path.exists(converter_path)):
-            log("[FEHLER] Potree Converter Pfad nicht konfiguriert!")
-            messagebox.showwarning("Fehler", "Bitte Potree Converter Pfad in den Einstellungen angeben!")
+        if not is_copc and not converter_path:
+            log("[FEHLER] Kein Potree Converter verfügbar")
+            messagebox.showwarning(
+                "Fehler",
+                "Mitgelieferter Potree Converter nicht gefunden. "
+                "Bitte Build/Projektdateien prüfen oder optional einen Override-Pfad konfigurieren!"
+            )
             return
 
         if not is_copc and not output_base_dir:
@@ -459,12 +609,14 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret):
             os.makedirs(output_dir, exist_ok=True)
 
             log(f"[KONVERTIERUNG] Starte Potree Converter...")
+            log(f"[CONVERTER] {converter_path}")
             log(f"[OUTPUT] {output_dir}")
 
             cmd = [converter_path, laz_file, "-o", output_dir, "--overwrite"]
             
             process = subprocess.Popen(
                 cmd,
+                cwd=os.path.dirname(converter_path),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 universal_newlines=True,
@@ -1191,13 +1343,26 @@ def open_settings_window(first_run=False):
 
     ctk.CTkLabel(
         converter_card,
-        text="Potree Converter",
+        text="Integrierter Potree Converter",
         font=ctk.CTkFont(size=14, weight="bold")
     ).pack(anchor="w", padx=16, pady=(14, 8))
 
     ctk.CTkLabel(
         converter_card,
-        text="Optional für COPC Uploads, erforderlich für klassische LAS/LAZ Konvertierung.",
+        text="Die App bringt PotreeConverter.exe und laszip.dll mit. Für klassische LAS/LAZ Uploads ist keine externe Installation mehr nötig.",
+        font=ctk.CTkFont(size=10),
+        text_color=COLOR_TEXT_DIM,
+        wraplength=540
+    ).pack(anchor="w", padx=16, pady=(0, 8))
+
+    bundled_converter_status = (
+        f"Mitgeliefert: {get_bundled_converter_path()}"
+        if is_converter_bundle_available()
+        else "Mitgelieferter Converter aktuell nicht gefunden"
+    )
+    ctk.CTkLabel(
+        converter_card,
+        text=bundled_converter_status,
         font=ctk.CTkFont(size=10),
         text_color=COLOR_TEXT_DIM,
         wraplength=540
@@ -1205,7 +1370,7 @@ def open_settings_window(first_run=False):
 
     ctk.CTkLabel(
         converter_card,
-        text="Pfad zur PotreeConverter.exe:",
+        text="Optionaler Override-Pfad zur PotreeConverter.exe:",
         font=ctk.CTkFont(size=11),
         text_color=COLOR_TEXT_DIM
     ).pack(anchor="w", padx=16, pady=(4, 2))
@@ -1215,7 +1380,7 @@ def open_settings_window(first_run=False):
     
     entry_converter = ctk.CTkEntry(
         converter_frame,
-        placeholder_text="C:\\...\\PotreeConverter.exe",
+        placeholder_text="Leer lassen, um den integrierten Converter zu verwenden",
         font=ctk.CTkFont(family="Consolas", size=10),
         height=32
     )
@@ -1295,6 +1460,13 @@ def open_settings_window(first_run=False):
             messagebox.showwarning("Fehler", "Bitte einen gültigen Pfad zum Potree Converter angeben!")
             return
 
+        if not is_converter_bundle_available() and not converter_path:
+            messagebox.showwarning(
+                "Fehler",
+                "Es wurde kein mitgelieferter Potree Converter gefunden und kein Override-Pfad angegeben!"
+            )
+            return
+
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
 
@@ -1330,12 +1502,12 @@ def open_settings_window(first_run=False):
 # ============================================================
 
 root = TkinterDnD.Tk()
-root.title("Dronautix Pointcloud Uploader")
+root.title(f"{APP_NAME} {APP_VERSION}")
 root.geometry("700x900")
 
 # Icon (optional)
 try:
-    root.iconbitmap("icon.ico")
+    root.iconbitmap(get_bundled_resource_path("icon.ico"))
 except:
     pass
 
@@ -1355,13 +1527,13 @@ header_inner.pack(fill="x", padx=24, pady=16)
 
 ctk.CTkLabel(
     header_inner,
-    text="☁  Dronautix Pointcloud Uploader",
+    text=f"☁  {APP_NAME}",
     font=ctk.CTkFont(size=20, weight="bold")
 ).pack(side="left")
 
 ctk.CTkLabel(
     header_inner,
-    text="v7.0",
+    text=f"v{APP_VERSION}",
     font=ctk.CTkFont(size=12),
     text_color=COLOR_TEXT_DIM
 ).pack(side="left", padx=(10, 0), pady=(4, 0))
@@ -1539,7 +1711,7 @@ txt_log.pack(fill="both", expand=True, padx=16, pady=(0, 16))
 #  INITIALISIERUNG
 # ============================================================
 
-log("═══  Dronautix Pointcloud Uploader v7.0  ═══")
+log(f"═══  {APP_NAME} v{APP_VERSION}  ═══")
 log(f"Konfiguration gespeichert in: {APPDATA_DIR}")
 
 # Prüfe ob erste Ausführung
@@ -1551,6 +1723,8 @@ else:
     log("[OK] Konfiguration geladen")
     log("Bereit. Wähle eine .laz oder .las Datei aus.")
     log("Klicke auf 'Projekt-Übersicht' um alle Projekte zu sehen.")
+
+root.after(1000, check_for_available_update)
 
 try:
     root.mainloop()

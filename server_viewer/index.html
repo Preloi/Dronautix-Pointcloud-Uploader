@@ -54,6 +54,80 @@
     </div>
 
     <script>
+        const deletedProjectRetentionDays = 30;
+
+        function showUnavailableProjectPage(messageHtml) {
+            document.body.innerHTML = `
+                <div style="
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    height: 100vh;
+                    background: linear-gradient(135deg, #1e1e2e 0%, #2a2a3c 100%);
+                    margin: 0;
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    color: #e2e8f0;
+                ">
+                    <div style="
+                        text-align: center;
+                        padding: 40px;
+                        background: #2a2a3c;
+                        border-radius: 12px;
+                        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+                        max-width: 500px;
+                    ">
+                        <div style="font-size: 64px; margin-bottom: 20px;">🚫</div>
+                        <h1 style="
+                            font-size: 28px;
+                            margin: 0 0 16px 0;
+                            color: #e74c3c;
+                        ">Projekt nicht verfügbar</h1>
+                        <p style="
+                            font-size: 16px;
+                            color: #94a3b8;
+                            margin: 0 0 24px 0;
+                            line-height: 1.6;
+                        ">
+                            ${messageHtml}
+                        </p>
+                        <a
+                            href="https://dronautix.at"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style="display: inline-block;"
+                        >
+                            <img
+                                src="./libs/potree/resources/images/dronautix_logo.png"
+                                alt="Dronautix"
+                                style="
+                                    display: block;
+                                    width: 180px;
+                                    max-width: 100%;
+                                    height: auto;
+                                    margin: 0 auto;
+                                "
+                            >
+                        </a>
+                    </div>
+                </div>
+            `;
+        }
+
+        function isDeletedEntryActive(entry) {
+            if (!entry || !entry.deleted_at) {
+                return false;
+            }
+
+            const deletedAt = new Date(entry.deleted_at);
+            if (Number.isNaN(deletedAt.getTime())) {
+                return false;
+            }
+
+            const ageMs = Date.now() - deletedAt.getTime();
+            const retentionMs = deletedProjectRetentionDays * 24 * 60 * 60 * 1000;
+            return ageMs <= retentionMs;
+        }
+
         // ============================================================
         // GELÖSCHTE PROJEKTE CHECK - Prüft ob Projekt gelöscht wurde
         // ============================================================
@@ -87,7 +161,7 @@
                 }
 
                 const deletedData = await response.json();
-                const deletedProjects = deletedData.deleted_projects || [];
+                const deletedProjects = (deletedData.deleted_projects || []).filter(isDeletedEntryActive);
 
                 // Prüfe ob dieses Projekt gelöscht wurde
                 const isDeleted = deletedProjects.some(proj =>
@@ -95,62 +169,9 @@
                 );
 
                 if (isDeleted) {
-                    // Projekt wurde gelöscht - zeige Fehlermeldung
-                    document.body.innerHTML = `
-                        <div style="
-                            display: flex;
-                            justify-content: center;
-                            align-items: center;
-                            height: 100vh;
-                            background: linear-gradient(135deg, #1e1e2e 0%, #2a2a3c 100%);
-                            margin: 0;
-                            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                            color: #e2e8f0;
-                        ">
-                            <div style="
-                                text-align: center;
-                                padding: 40px;
-                                background: #2a2a3c;
-                                border-radius: 12px;
-                                box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-                                max-width: 500px;
-                            ">
-                                <div style="font-size: 64px; margin-bottom: 20px;">🚫</div>
-                                <h1 style="
-                                    font-size: 28px;
-                                    margin: 0 0 16px 0;
-                                    color: #e74c3c;
-                                ">Projekt nicht verfügbar</h1>
-                                <p style="
-                                    font-size: 16px;
-                                    color: #94a3b8;
-                                    margin: 0 0 24px 0;
-                                    line-height: 1.6;
-                                ">
-                                    Dieses Projekt wurde gelöscht und ist nicht mehr verfügbar.<br>
-                                    Der Link ist nicht mehr gültig.
-                                </p>
-                                <a
-                                    href="https://dronautix.at"
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    style="display: inline-block;"
-                                >
-                                    <img
-                                        src="./libs/potree/resources/images/dronautix_logo.png"
-                                        alt="Dronautix"
-                                        style="
-                                            display: block;
-                                            width: 180px;
-                                            max-width: 100%;
-                                            height: auto;
-                                            margin: 0 auto;
-                                        "
-                                    >
-                                </a>
-                            </div>
-                        </div>
-                    `;
+                    showUnavailableProjectPage(
+                        "Dieses Projekt wurde gelöscht und ist nicht mehr verfügbar.<br>Der Link ist nicht mehr gültig."
+                    );
                     return true; // Projekt ist gelöscht
                 }
 
@@ -164,7 +185,7 @@
         }
 
         // Führe Check aus und initialisiere Viewer nur wenn Projekt nicht gelöscht
-        checkIfProjectDeleted().then(isDeleted => {
+        checkIfProjectDeleted().then(async isDeleted => {
             // Verstecke Lade-Anzeige
             const loadingDiv = document.getElementById('loading_check');
             if (loadingDiv) loadingDiv.style.display = 'none';
@@ -229,8 +250,31 @@
                 ? `./pointclouds/${projectPathID}`
                 : `./pointclouds/${projectPathID}/metadata.json`;
 
+            try {
+                const response = await fetch(path, { method: 'HEAD', cache: 'no-store' });
+                if (!response.ok) {
+                    showUnavailableProjectPage(
+                        "Dieses Projekt ist nicht mehr online verfügbar.<br>Die zugehörigen Dateien wurden bereits entfernt."
+                    );
+                    return;
+                }
+            } catch (error) {
+                console.warn("Projektdatei konnte nicht geprüft werden:", error);
+                showUnavailableProjectPage(
+                    "Dieses Projekt ist aktuell nicht erreichbar.<br>Bitte versuche es später erneut oder kontaktiere Dronautix."
+                );
+                return;
+            }
+
             // Laden
             Potree.loadPointCloud(path, finalName, e => {
+                if (!e || !e.pointcloud) {
+                    showUnavailableProjectPage(
+                        "Dieses Projekt ist nicht mehr online verfügbar.<br>Die zugehörigen Dateien wurden bereits entfernt."
+                    );
+                    return;
+                }
+
                 let scene = viewer.scene;
                 let pointcloud = e.pointcloud;
 

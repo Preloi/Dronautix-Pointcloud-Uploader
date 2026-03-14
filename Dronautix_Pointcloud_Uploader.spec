@@ -5,7 +5,7 @@ a = Analysis(
     ['Dronautix_Pointcloud_Uploader_v7.py'],
     pathex=[],
     binaries=[],
-    datas=[('icon.ico', '.')],
+    datas=[('icon.ico', '.'), ('bundled_tools', 'bundled_tools')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -35,5 +35,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    version='version_info.txt',
     icon=['icon.ico'],
 )
