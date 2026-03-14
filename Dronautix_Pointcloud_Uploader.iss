@@ -1,5 +1,5 @@
 #define AppName "Dronautix Pointcloud Uploader"
-#define AppVersion "1.0"
+#define AppVersion "1.1"
 #define AppPublisher "Dronautix"
 #define AppExeName "Dronautix_Pointcloud_Uploader.exe"
 #define SourceExe "dist\\Dronautix_Pointcloud_Uploader.exe"

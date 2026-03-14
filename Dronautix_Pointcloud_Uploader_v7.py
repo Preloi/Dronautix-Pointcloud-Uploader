@@ -202,15 +202,40 @@ def check_for_available_update():
             return
 
         installer_name = manifest.get("installer_name", "")
-        installer_path = os.path.join(UPDATE_SHARE_DIR, installer_name) if installer_name else UPDATE_SHARE_DIR
-        messagebox.showinfo(
+        installer_path = os.path.join(UPDATE_SHARE_DIR, installer_name) if installer_name else ""
+        if not installer_path or not os.path.exists(installer_path):
+            log(f"[UPDATE] Neue Version {remote_version} gefunden, aber Installer fehlt: {installer_path or UPDATE_SHARE_DIR}")
+            messagebox.showwarning(
+                "Update verfügbar",
+                f"Version {remote_version} ist verfügbar, aber der Installer wurde nicht gefunden.\n\n"
+                f"Erwarteter Pfad:\n{installer_path or UPDATE_SHARE_DIR}"
+            )
+            return
+
+        install_now = messagebox.askyesno(
             "Update verfügbar",
             f"Es ist eine neue Version verfügbar.\n\n"
             f"Installierte Version: {APP_VERSION}\n"
             f"Verfügbare Version: {remote_version}\n\n"
-            f"Pfad: {installer_path}"
+            f"Soll das Update jetzt installiert werden?"
         )
+
         log(f"[UPDATE] Neue Version verfügbar: {remote_version} ({installer_path})")
+
+        if not install_now:
+            log("[UPDATE] Benutzer hat das Update verschoben")
+            return
+
+        try:
+            subprocess.Popen([installer_path], shell=False)
+            log(f"[UPDATE] Installer gestartet: {installer_path}")
+            root.after(200, root.destroy)
+        except Exception as install_error:
+            log(f"[UPDATE] Installer konnte nicht gestartet werden: {install_error}")
+            messagebox.showerror(
+                "Update fehlgeschlagen",
+                f"Der Installer konnte nicht gestartet werden:\n{installer_path}\n\n{install_error}"
+            )
     except Exception as e:
         log(f"[UPDATE] Update-Prüfung fehlgeschlagen: {e}")
 
