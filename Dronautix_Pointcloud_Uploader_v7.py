@@ -976,42 +976,40 @@ def open_projects_window():
         font=ctk.CTkFont(size=14)
     ).pack(side="left", padx=(0, 8))
 
-    # Filter Typ Auswahl
-    filter_type = ctk.CTkComboBox(
+    # Kunden-Dropdown
+    ctk.CTkLabel(
         filter_inner,
-        values=["Alle", "Kunde", "Projekt"],
-        width=120,
+        text="Kunde:",
+        font=ctk.CTkFont(size=11)
+    ).pack(side="left", padx=(0, 4))
+
+    customer_filter = ctk.CTkComboBox(
+        filter_inner,
+        values=["Alle Kunden"],
+        width=180,
         font=ctk.CTkFont(size=11),
-        state="readonly"
+        state="readonly",
+        command=lambda val: apply_filter()
     )
-    filter_type.set("Alle")
-    filter_type.pack(side="left", padx=(0, 8))
+    customer_filter.set("Alle Kunden")
+    customer_filter.pack(side="left", padx=(0, 12))
 
     # Such-Eingabefeld
     search_entry = ctk.CTkEntry(
         filter_inner,
-        placeholder_text="Suchen...",
+        placeholder_text="Projekt suchen...",
         font=ctk.CTkFont(size=11),
         width=250
     )
     search_entry.pack(side="left", padx=(0, 8))
 
     def apply_filter():
-        load_projects(filter_type.get(), search_entry.get().strip())
+        load_projects(customer_filter.get(), search_entry.get().strip())
 
     def on_search_key(event):
         apply_filter()
 
     search_entry.bind('<KeyRelease>', on_search_key)
-
-    ctk.CTkButton(
-        filter_inner,
-        text="Filter anwenden",
-        font=ctk.CTkFont(size=11),
-        width=120,
-        height=28,
-        command=apply_filter
-    ).pack(side="left", padx=(0, 8))
 
     ctk.CTkButton(
         filter_inner,
@@ -1021,7 +1019,7 @@ def open_projects_window():
         height=28,
         fg_color="transparent",
         border_width=1,
-        command=lambda: (filter_type.set("Alle"), search_entry.delete(0, tk.END), load_projects())
+        command=lambda: (customer_filter.set("Alle Kunden"), search_entry.delete(0, tk.END), load_projects())
     ).pack(side="left")
 
     # Tabelle mit verbesserter Spaltenbreite
@@ -1177,7 +1175,7 @@ def open_projects_window():
         command=delete_project
     ).pack(side="left")
 
-    def load_projects(filter_by="Alle", search_term=""):
+    def load_projects(selected_customer="Alle Kunden", search_term=""):
         """Lädt Projekte von S3 und wendet Filter an"""
         for item in tree.get_children():
             tree.delete(item)
@@ -1197,29 +1195,30 @@ def open_projects_window():
                 tree.insert("", "end", values=("", "", "Keine Projekte gefunden", "", ""))
                 return
 
+            # Kunden-Dropdown befüllen
+            unique_customers = sorted(set(p.get("kunde", "") for p in projects if p.get("kunde", "")))
+            customer_filter.configure(values=["Alle Kunden"] + unique_customers)
+
             # Sortiere nach Datum (neueste zuerst)
             projects.sort(key=lambda x: x.get("datum", ""), reverse=True)
 
             # Filter anwenden
             filtered_projects = []
             search_lower = search_term.lower()
-            
+
             for proj in projects:
-                kunde = proj.get("kunde", "").lower()
+                kunde = proj.get("kunde", "")
                 projekt = proj.get("projekt", "").lower()
-                
-                if filter_by == "Alle":
-                    # Suche in Kunde ODER Projekt
-                    if not search_term or search_lower in kunde or search_lower in projekt:
-                        filtered_projects.append(proj)
-                elif filter_by == "Kunde":
-                    # Suche nur in Kunde
-                    if not search_term or search_lower in kunde:
-                        filtered_projects.append(proj)
-                elif filter_by == "Projekt":
-                    # Suche nur in Projekt
-                    if not search_term or search_lower in projekt:
-                        filtered_projects.append(proj)
+
+                # Kunden-Filter
+                if selected_customer != "Alle Kunden" and kunde != selected_customer:
+                    continue
+
+                # Text-Suche im Projektnamen
+                if search_term and search_lower not in projekt:
+                    continue
+
+                filtered_projects.append(proj)
 
             if not filtered_projects:
                 tree.insert("", "end", values=("", "", "Keine passenden Projekte gefunden", "", ""))

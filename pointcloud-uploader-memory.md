@@ -21,6 +21,7 @@ Stand: 2026-03-14
 - Künftige Versionen werden in `0.1`-Schritten erhöht (`1.0`, `1.1`, `1.2`, ...).
 - Die Versionsnummer steht unten in der Statusleiste der App.
 - Setup und App-Version werden aus derselben zentralen Versionsquelle abgeleitet.
+- Klassische LAS/LAZ-Konvertierungsdaten werden nach erfolgreichem Upload lokal wieder gelöscht.
 
 ## Wichtige Viewer-Details
 
@@ -34,6 +35,8 @@ Stand: 2026-03-14
 
 - COPC-Dateien (`.copc.laz`) werden direkt nach S3 hochgeladen.
 - Klassische `.las/.laz` laufen weiter über den Potree Converter.
+- Die Originaldatei bleibt lokal erhalten.
+- Der erzeugte Potree-Output ist nur temporär und wird nach erfolgreichem Upload per Cleanup entfernt.
 - Der Löschablauf wurde robuster gemacht:
   - S3-Objekte werden zuerst gelöscht
   - `deleted_projects.json` wird dedupliziert aktualisiert
@@ -64,3 +67,4 @@ Stand: 2026-03-14
 - Für Live-Viewer-Änderungen ist `server_viewer/index.html` die maßgebliche Datei.
 - Nach `1.2` weiter nur in `0.1`-Schritten erhöhen, nicht in Patch-Versionen wie `1.2.1`.
 - Setup nutzt jetzt `CloseApplications` und deinstalliert ältere Versionen vor der Neuinstallation.
+- Das verbesserte Update-/Setup-Verhalten greift zuverlässig erst ab installierter Version `1.2`.
