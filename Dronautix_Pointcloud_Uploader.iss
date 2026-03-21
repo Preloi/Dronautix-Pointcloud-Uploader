@@ -78,11 +78,23 @@ begin
   end;
 end;
 
+procedure KillRunningApp();
+var
+  resultCode: Integer;
+begin
+  Exec('cmd.exe', '/c taskkill /IM {#AppExeName} /F', '', SW_HIDE, ewWaitUntilTerminated, resultCode);
+  // Warte bis Prozess beendet und Dateien freigegeben
+  Exec('cmd.exe', '/c ping -n 4 127.0.0.1 >nul', '', SW_HIDE, ewWaitUntilTerminated, resultCode);
+  // Alte PyInstaller _MEI Temp-Ordner aufräumen
+  Exec('cmd.exe', '/c for /d %i in ("%TEMP%\_MEI*") do rd /s /q "%i"', '', SW_HIDE, ewWaitUntilTerminated, resultCode);
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   uninstallResult: Integer;
 begin
   Result := '';
+  KillRunningApp();
   uninstallResult := UnInstallOldVersion();
 
   if (uninstallResult <> 0) and (uninstallResult <> 1) and (uninstallResult <> 3010) then
