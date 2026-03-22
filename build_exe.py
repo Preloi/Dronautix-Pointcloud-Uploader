@@ -17,6 +17,9 @@
 import subprocess
 import sys
 import os
+import json
+import shutil
+from datetime import datetime
 from app_version import (
     APP_EXE_NAME,
     APP_FILE_VERSION,
@@ -28,6 +31,7 @@ from app_version import (
 
 VERSION_INFO_FILE = "version_info.txt"
 INSTALLER_VERSION_FILE = "installer_version.iss"
+LATEST_RELEASE_FILE = "latest-release.json"
 INNO_SETUP_SCRIPT = "Dronautix_Pointcloud_Uploader.iss"
 INNO_SETUP_CANDIDATES = [
     r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
@@ -38,6 +42,12 @@ INNO_SETUP_CANDIDATES = [
 def write_text_file(path, content):
     with open(path, "w", encoding="utf-8", newline="\n") as file:
         file.write(content)
+
+
+def write_json_file(path, data):
+    with open(path, "w", encoding="utf-8", newline="\n") as file:
+        json.dump(data, file, indent=2, ensure_ascii=False)
+        file.write("\n")
 
 
 def sync_version_files():
@@ -78,9 +88,23 @@ def sync_version_files():
         f'#define AppExeName "{APP_EXE_NAME}"\n'
         f'#define AppId "{APP_ID}"\n'
     )
+    latest_release_content = {
+        "version": APP_VERSION,
+        "installer_name": f"Dronautix_Pointcloud_Uploader_Setup_{APP_VERSION}.exe",
+        "published_at": datetime.now().isoformat(timespec="seconds"),
+    }
 
     write_text_file(VERSION_INFO_FILE, version_info_content)
     write_text_file(INSTALLER_VERSION_FILE, installer_version_content)
+    write_json_file(LATEST_RELEASE_FILE, latest_release_content)
+
+
+def sync_output_manifest():
+    output_dir = "Output"
+    if not os.path.isdir(output_dir):
+        return
+
+    shutil.copyfile(LATEST_RELEASE_FILE, os.path.join(output_dir, LATEST_RELEASE_FILE))
 
 
 def find_inno_setup():
@@ -167,6 +191,8 @@ try:
     if inno_setup:
         print("[OK] Inno Setup gefunden - baue Setup...")
         subprocess.run([inno_setup, INNO_SETUP_SCRIPT], check=True)
+        sync_output_manifest()
+        print("[OK] Update-Manifest synchronisiert")
     else:
         print("[WARNUNG] Inno Setup nicht gefunden - Setup wurde nicht gebaut")
     print()
