@@ -19,6 +19,7 @@ import sys
 import os
 import json
 import shutil
+import stat
 from datetime import datetime
 from app_version import (
     APP_EXE_NAME,
@@ -107,6 +108,17 @@ def sync_output_manifest():
     shutil.copyfile(LATEST_RELEASE_FILE, os.path.join(output_dir, LATEST_RELEASE_FILE))
 
 
+def cleanup_previous_build_artifacts():
+    def remove_readonly(func, path, excinfo):
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+
+    for target in ["build", "dist", "Output"]:
+        if os.path.isdir(target):
+            shutil.rmtree(target, onerror=remove_readonly)
+            print(f"[OK] Alter Build-Ordner entfernt: {target}")
+
+
 def find_inno_setup():
     for candidate in INNO_SETUP_CANDIDATES:
         if os.path.exists(candidate):
@@ -119,7 +131,9 @@ print("=" * 70)
 print()
 
 sync_version_files()
+cleanup_previous_build_artifacts()
 print("[OK] Versionsdateien synchronisiert")
+print("[OK] Vorherige Build-Artefakte bereinigt")
 
 # Prüfe ob PyInstaller installiert ist
 try:
