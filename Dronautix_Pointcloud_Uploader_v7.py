@@ -1421,6 +1421,76 @@ def build_project_url(folder_kunde, folder_id, folder_projekt, input_format, kun
     return path_param, project_url
 
 
+def extract_project_identifiers_from_link(project_link):
+
+    """Extrahiert Viewer-ID und Kurz-ID aus einem Projekt-Link."""
+
+    if not project_link:
+
+        return "", ""
+
+    try:
+
+        parsed_url = urllib.parse.urlparse(project_link)
+
+        query_params = urllib.parse.parse_qs(parsed_url.query)
+
+        raw_identifier = query_params.get("id", [""])[0].strip()
+
+        if not raw_identifier:
+
+            return "", ""
+
+        short_identifier = raw_identifier
+
+        if "/" in raw_identifier:
+
+            id_parts = [part for part in raw_identifier.split("/") if part]
+
+            if len(id_parts) >= 2:
+
+                short_identifier = id_parts[1]
+
+        return raw_identifier, short_identifier
+
+    except Exception:
+
+        return "", ""
+
+
+def find_project_in_index(index_data, project_id="", project_link=""):
+
+    """Findet ein Projekt im Index ueber ID, Link oder Viewer-Pfad."""
+
+    projects = index_data.get("projects", []) if isinstance(index_data, dict) else []
+    normalized_project_id = str(project_id).strip()
+    raw_link_identifier, short_link_identifier = extract_project_identifiers_from_link(project_link)
+
+    for project in projects:
+
+        indexed_project_id = str(project.get("id", "")).strip()
+        indexed_project_link = str(project.get("link", "")).strip()
+        indexed_viewer_path = str(project.get("viewer_path", "")).strip()
+
+        if normalized_project_id and indexed_project_id == normalized_project_id:
+
+            return project
+
+        if project_link and indexed_project_link == project_link:
+
+            return project
+
+        if raw_link_identifier and indexed_viewer_path == raw_link_identifier:
+
+            return project
+
+        if short_link_identifier and indexed_project_id == short_link_identifier:
+
+            return project
+
+    return None
+
+
 
 
 
@@ -3365,6 +3435,7 @@ def open_projects_window():
         item = tree.item(selected[0])
 
         project_id = item['values'][0]
+        project_link = item['values'][4] if len(item.get('values', [])) > 4 else ""
 
         if not project_id:
 
@@ -3375,6 +3446,26 @@ def open_projects_window():
 
 
         project_info = projects_by_id.get(project_id)
+
+        if not project_info:
+
+            try:
+
+                s3_client = create_s3_client(aws_access, aws_secret)
+
+                index_data = load_projects_index(s3_client)
+
+                project_info = find_project_in_index(index_data, project_id=project_id, project_link=project_link)
+
+                if project_info:
+
+                    projects_by_id[str(project_info.get("id", "")).strip()] = project_info
+
+            except Exception as e:
+
+                messagebox.showerror("Fehler", f"Projektdaten konnten nicht geladen werden:\n{e}")
+
+                return None
 
         if not project_info:
 
@@ -3430,19 +3521,13 @@ def open_projects_window():
 
     def delete_project():
 
-        selected = tree.selection()
+        project_info = get_selected_project()
 
-        if not selected:
-
-            messagebox.showinfo("Info", "Bitte ein Projekt auswählen!")
+        if not project_info:
 
             return
 
-
-
-        item = tree.item(selected[0])
-
-        projekt_name = item['values'][2]
+        projekt_name = project_info.get("projekt", "")
 
 
 
@@ -3466,49 +3551,11 @@ def open_projects_window():
 
         try:
 
-            s3_client = boto3.client(
-
-                's3',
-
-                aws_access_key_id=aws_access,
-
-                aws_secret_access_key=aws_secret,
-
-                region_name=REGION_NAME
-
-            )
+            s3_client = create_s3_client(aws_access, aws_secret)
 
 
 
-            # Finde Projekt im Index
-
-            index_data = load_projects_index(s3_client)
-
-            projekt_id = item['values'][0]
-
-
-
-            project_to_delete = None
-
-            for proj in index_data["projects"]:
-
-                if proj["id"] == projekt_id:
-
-                    project_to_delete = proj
-
-                    break
-
-
-
-            if not project_to_delete:
-
-                messagebox.showerror("Fehler", "Projekt nicht im Index gefunden!")
-
-                return
-
-
-
-            delete_result = delete_project_transaction(s3_client, project_to_delete)
+            delete_result = delete_project_transaction(s3_client, project_info)
 
 
 
@@ -3588,59 +3635,9 @@ def open_projects_window():
 
 
 
-        selected = tree.selection()
-
-        if not selected:
-
-            messagebox.showinfo("Info", "Bitte ein Projekt auswählen!")
-
-            return
-
-
-
-        item = tree.item(selected[0])
-
-        projekt_id = item['values'][0]
-
-
-
-        if not projekt_id:
-
-            messagebox.showinfo("Info", "Bitte ein gültiges Projekt auswählen!")
-
-            return
-
-
-
-        try:
-
-            s3_client = create_s3_client(aws_access, aws_secret)
-
-            index_data = load_projects_index(s3_client)
-
-        except Exception as e:
-
-            messagebox.showerror("Fehler", f"Projektdaten konnten nicht geladen werden:\n{e}")
-
-            return
-
-
-
-        project_info = None
-
-        for proj in index_data.get("projects", []):
-
-            if proj.get("id") == projekt_id:
-
-                project_info = proj
-
-                break
-
-
+        project_info = get_selected_project()
 
         if not project_info:
-
-            messagebox.showerror("Fehler", "Projekt nicht im Index gefunden!")
 
             return
 
@@ -4472,6 +4469,8 @@ def open_projects_window():
 
         """Laedt Projekte von S3 und wendet Filter an"""
 
+        projects_by_id.clear()
+
         for item in tree.get_children():
 
             tree.delete(item)
@@ -4588,9 +4587,13 @@ def open_projects_window():
 
                 
 
+                project_id = proj.get("id", "")
+
+                projects_by_id[project_id] = proj
+
                 tree.insert("", "end", values=(
 
-                    proj.get("id", ""),
+                    project_id,
 
                     proj.get("kunde", ""),
 
@@ -5515,6 +5518,7 @@ def show_projects_view():
         item = tree.item(selected[0])
 
         project_id = item["values"][0]
+        project_link = item["values"][4] if len(item.get("values", [])) > 4 else ""
 
         if not project_id:
 
@@ -5525,6 +5529,26 @@ def show_projects_view():
 
 
         project_info = projects_by_id.get(project_id)
+
+        if not project_info:
+
+            try:
+
+                s3_client = create_s3_client(aws_access, aws_secret)
+
+                index_data = load_projects_index(s3_client)
+
+                project_info = find_project_in_index(index_data, project_id=project_id, project_link=project_link)
+
+                if project_info:
+
+                    projects_by_id[str(project_info.get("id", "")).strip()] = project_info
+
+            except Exception as e:
+
+                messagebox.showerror("Fehler", f"Projektdaten konnten nicht geladen werden:\n{e}")
+
+                return None
 
         if not project_info:
 
