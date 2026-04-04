@@ -1416,11 +1416,7 @@ def build_project_url(folder_kunde, folder_id, folder_projekt, input_format, kun
 
 
 
-    display_name = f"{kunde} - {projekt}"
-
-    safe_name = urllib.parse.quote(display_name)
-
-    project_url = f"{DOMAIN_URL}?id={path_param}&name={safe_name}"
+    project_url = f"{DOMAIN_URL}?id={folder_id}"
 
     return path_param, project_url
 
@@ -2068,9 +2064,7 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret):
 
 
 
-        # Link erstellen. COPC-Projekte verlinken direkt auf die Datei,
-
-        # klassische Projekte bleiben bei der bisherigen metadata.json Logik.
+        # Viewer-Pfad bleibt sprechend im Index, aber der oeffentliche Link nutzt nur die technische Kurz-ID.
 
         if is_copc:
 
@@ -2079,12 +2073,7 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret):
         else:
 
             path_param = f"{folder_kunde}/{folder_id}/{folder_projekt}"
-
-        display_name = f"{kunde} - {projekt}"
-
-        safe_name = urllib.parse.quote(display_name)
-
-        project_url = f"{DOMAIN_URL}?id={path_param}&name={safe_name}"
+        project_url = f"{DOMAIN_URL}?id={folder_id}"
 
 
 

@@ -1,12 +1,35 @@
+## Release 1.6
+
+- Aktueller Release des Uploaders ist `1.6`.
+- Neue Uploads erzeugen anonyme Kurz-Links nur noch mit der technischen Projekt-ID.
+- `Dronautix_Pointcloud_Uploader_Setup_1.6.exe` und `latest-release.json` wurden auf `Z:\03 Apps\Pointcloud uploader\` veroeffentlicht.
+- Die UI-Versionsanzeige und das Setup ziehen ihre Versionsnummer zentral aus `app_version.py` und stehen jetzt auf `1.6`.
+
+## Session Update 2026-04-04
+
+### Aktueller Stand
+
+- Die Uploader-App erzeugt neue Viewer-Links jetzt anonym nur noch mit der technischen Kurz-ID wie `?id=491d7a`.
+- Der mitgelieferte `server_viewer/index.html` kann diese Kurz-IDs intern ueber `projects_index.json` aufloesen.
+- Legacy-Links mit sprechendem Pfad bleiben weiterhin kompatibel.
+- Fuer die echte Online-Version des Viewers ist weiterhin die separate Viewer-Repo mit ihrer `index.html` massgeblich; `server_viewer/index.html` dient hier nur als Test-/Deploy-Kopie.
+
+### Konkrete technische Aenderungen
+
+- In `Dronautix_Pointcloud_Uploader_v7.py` wurde die Link-Erzeugung fuer neue Uploads auf reine Kurz-IDs umgestellt.
+- In `server_viewer/index.html` wurde die Projektauflosung fuer Kurz-IDs plus Legacy-Pfade umgesetzt.
+- In `server_viewer/index.html` prueft die Geloescht-Logik jetzt sowohl Kurz-IDs als auch alte Pfad-Links.
+- Release `1.6` wurde gebaut und samt `latest-release.json` auf den Update-Share veroeffentlicht.
+
 # Pointcloud Uploader Memory
 
-Stand: 2026-04-02
+Stand: 2026-04-04
 
 ## Git
 
 - Repo: `Preloi/Pointcloud-Uploader`
 - Aktueller Branch: `develop`
-- Aktueller Release: `1.5`
+- Aktueller Release: `1.6`
 
 ## Aktueller Stand
 
@@ -17,9 +40,9 @@ Stand: 2026-04-02
 - Der Potree Converter ist in die App integriert (`bundled_tools/PotreeConverter`).
 - Die App prueft beim Start `Z:\03 Apps\Pointcloud uploader\latest-release.json` auf neuere Versionen.
 - Wenn eine neuere Version gefunden wird, fragt die App per Ja/Nein-Dialog, ob das Update jetzt installiert werden soll.
-- EXE und Windows-Setup fuer Version `1.5` sind der aktuelle Release-Stand.
-- EXE, Setup und `latest-release.json` fuer `1.5` wurden auf `Z:\03 Apps\Pointcloud uploader\` aktualisiert.
-- Kuenftige Versionen werden in `0.1`-Schritten erhoeht (`1.0`, `1.1`, `1.2`, `1.3`, `1.4`, `1.5`, ...).
+- EXE und Windows-Setup fuer Version `1.6` sind der aktuelle Release-Stand.
+- EXE, Setup und `latest-release.json` fuer `1.6` wurden auf `Z:\03 Apps\Pointcloud uploader\` aktualisiert.
+- Kuenftige Versionen werden in `0.1`-Schritten erhoeht (`1.0`, `1.1`, `1.2`, `1.3`, `1.4`, `1.5`, `1.6`, ...).
 - Die Versionsnummer steht unten in der Statusleiste der App.
 - Setup, App-Version und `latest-release.json` werden aus derselben zentralen Versionsquelle abgeleitet.
 - Vor jedem Build werden die lokalen Build-Artefakte in `build/`, `dist/` und `Output/` geloescht, damit immer nur der aktuelle Build-Stand vorliegt.
@@ -28,7 +51,7 @@ Stand: 2026-04-02
 
 ## Wichtige Viewer-Details
 
-- `server_viewer/index.html` ist die lokale Deploy-Kopie fuer den Server-Viewer.
+- `server_viewer/index.html` ist nur die lokale Test-/Deploy-Kopie fuer den Viewer; live massgeblich ist die separate Viewer-Repo mit ihrer `index.html`.
 - `deleted_projects.json` wird im Viewer jetzt von derselben Origin geladen, nicht mehr direkt von S3.
 - Auf der "Projekt nicht verfuegbar"-Seite wurde der Button entfernt.
 - Stattdessen wird das Dronautix-Logo angezeigt und verlinkt auf `https://dronautix.at`.
@@ -45,7 +68,7 @@ Stand: 2026-04-02
   - `deleted_projects.json` wird dedupliziert aktualisiert
   - `projects_index.json` wird separat nachgezogen
   - Teilfehler werden explizit gemeldet
-- Die Versionsanzeige in der App steht auf `1.5`.
+- Die Versionsanzeige in der App steht auf `1.6`.
 
 ## Aenderungen in Version 1.5
 
@@ -97,10 +120,10 @@ Stand: 2026-04-02
 ## Release-Dateien
 
 - `dist/Dronautix_Pointcloud_Uploader.exe`
-- `Output/Dronautix_Pointcloud_Uploader_Setup_1.5.exe`
+- `Output/Dronautix_Pointcloud_Uploader_Setup_1.6.exe`
 - `Output/latest-release.json`
 - `Z:\03 Apps\Pointcloud uploader\latest-release.json`
-- `Z:\03 Apps\Pointcloud uploader\Dronautix_Pointcloud_Uploader_Setup_1.5.exe`
+- `Z:\03 Apps\Pointcloud uploader\Dronautix_Pointcloud_Uploader_Setup_1.6.exe`
 
 ## Git-relevante Dateien fuer das Release
 
@@ -116,8 +139,9 @@ Stand: 2026-04-02
 ## Offene Hinweise
 
 - Falls CloudFront noch alte Assets liefert, gezielt invalidieren.
-- Fuer Live-Viewer-Aenderungen ist `server_viewer/index.html` die massgebliche Datei.
-- Nach `1.5` weiter nur in `0.1`-Schritten erhoehen, nicht in Patch-Versionen wie `1.5.1`.
+- Fuer echte Live-Viewer-Aenderungen ist die `index.html` der separaten Viewer-Repo die massgebliche Datei, nicht `server_viewer/index.html`.
+- Nach `1.6` weiter nur in `0.1`-Schritten erhoehen, nicht in Patch-Versionen wie `1.6.1`.
 - Setup nutzt `CloseApplications` und deinstalliert aeltere Versionen vor der Neuinstallation.
 - Setup beendet laufende App automatisch (`KillRunningApp`) und raeumt `_MEI*` Temp-Ordner auf.
 - Das verbesserte Update-/Setup-Verhalten greift zuverlaessig erst ab installierter Version `1.2`.
+

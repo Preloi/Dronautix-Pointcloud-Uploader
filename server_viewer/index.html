@@ -140,16 +140,16 @@
                     return false; // Keine ID in URL, zeige Viewer normal
                 }
 
-                // Verwende den Projektordner als stabile Kennung.
-                // Potree: kunde/abc123/projekt
-                // COPC:   kunde/abc123/projekt/source.copc.laz
-                const idParts = projectId.split('/');
-                if (idParts.length < 3) {
-                    return false; // Ungültiges Format
-                }
+                let projectFolderPath = '';
+                let projectShortId = projectId;
 
-                const projectFolderPath = `pointclouds/${idParts.slice(0, 3).join('/')}`;
-                const projectShortId = idParts[1];
+                if (projectId.includes('/')) {
+                    const idParts = projectId.split('/');
+                    if (idParts.length >= 3) {
+                        projectFolderPath = `pointclouds/${idParts.slice(0, 3).join('/')}`;
+                        projectShortId = idParts[1];
+                    }
+                }
 
                 // Lade die Löschliste von derselben Origin, damit kein CORS-Fehler entsteht.
                 const deletedProjectsUrl = new URL('./deleted_projects.json', window.location.href);
@@ -163,9 +163,8 @@
                 const deletedData = await response.json();
                 const deletedProjects = (deletedData.deleted_projects || []).filter(isDeletedEntryActive);
 
-                // Prüfe ob dieses Projekt gelöscht wurde
                 const isDeleted = deletedProjects.some(proj =>
-                    proj.s3_path === projectFolderPath || proj.id === projectShortId
+                    proj.id === projectShortId || (projectFolderPath && proj.s3_path === projectFolderPath)
                 );
 
                 if (isDeleted) {
@@ -232,23 +231,105 @@
             console.log("GUI geladen und Sidebar aktiviert");
         });
 
-        // --- DYNAMISCHER LADER (KORRIGIERT FÜR ID + NAME) ---
+        // --- DYNAMISCHER LADER (UNTERSTUETZT ANONYME KURZ-IDS UND LEGACY-PFADE) ---
 
         const urlParams = new URLSearchParams(window.location.search);
+        const rawProjectId = urlParams.get('id');
+        const projectDisplayName = urlParams.get('name');
 
-        // WICHTIG: Wir lesen jetzt 'id' statt 'project'
-        const projectPathID = urlParams.get('id');       // Liest z.B. "hella/7e20b9/5mm"
-        const projectDisplayName = urlParams.get('name'); // Liest z.B. "Hella - 5mm"
+        const normalizeViewerPath = (projectPath) => {
+            if (!projectPath || typeof projectPath !== 'string') {
+                return '';
+            }
 
-        // Wenn kein Name im Link steht, nutzen wir die ID als Fallback
-        const finalName = projectDisplayName ? projectDisplayName : projectPathID;
+            return projectPath.startsWith('pointclouds/')
+                ? projectPath.slice('pointclouds/'.length)
+                : projectPath;
+        };
 
-        if (projectPathID) {
+        const buildProjectDisplayName = (projectEntry, fallbackValue) => {
+            if (!projectEntry) {
+                return fallbackValue;
+            }
 
-            const isCopcProject = projectPathID.toLowerCase().endsWith(".copc.laz");
-            const path = isCopcProject
-                ? `./pointclouds/${projectPathID}`
-                : `./pointclouds/${projectPathID}/metadata.json`;
+            const kunde = typeof projectEntry.kunde === 'string' ? projectEntry.kunde.trim() : '';
+            const projekt = typeof projectEntry.projekt === 'string' ? projectEntry.projekt.trim() : '';
+
+            if (kunde && projekt) {
+                return `${kunde} - ${projekt}`;
+            }
+
+            return kunde || projekt || fallbackValue;
+        };
+
+        const buildProjectAssetPath = (viewerPath) => {
+            const normalizedViewerPath = normalizeViewerPath(viewerPath);
+            const lowerViewerPath = normalizedViewerPath.toLowerCase();
+
+            if (
+                lowerViewerPath.endsWith('.copc.laz') ||
+                lowerViewerPath.endsWith('metadata.json') ||
+                lowerViewerPath.endsWith('cloud.js') ||
+                lowerViewerPath.endsWith('ept.json')
+            ) {
+                return `./pointclouds/${normalizedViewerPath}`;
+            }
+
+            return `./pointclouds/${normalizedViewerPath}/metadata.json`;
+        };
+
+        const resolveProjectConfig = async (projectId) => {
+            if (!projectId) {
+                return null;
+            }
+
+            if (projectId.includes('/')) {
+                return {
+                    viewerPath: projectId,
+                    displayName: projectId,
+                };
+            }
+
+            const indexUrl = new URL('./projects_index.json', window.location.href);
+            indexUrl.searchParams.set('t', Date.now());
+            const response = await fetch(indexUrl.toString(), { cache: 'no-store' });
+            if (!response.ok) {
+                return {
+                    viewerPath: '',
+                    displayName: projectId,
+                };
+            }
+
+            const indexData = await response.json();
+            const projects = Array.isArray(indexData.projects) ? indexData.projects : [];
+            const matchedProject = projects.find(project => String(project.id) === projectId);
+            if (!matchedProject) {
+                return {
+                    viewerPath: '',
+                    displayName: projectId,
+                };
+            }
+
+            const baseViewerPath = normalizeViewerPath(matchedProject.viewer_path || matchedProject.s3_path || '');
+            const projectFormat = typeof matchedProject.format === 'string'
+                ? matchedProject.format.toLowerCase()
+                : '';
+            const viewerPath = projectFormat === 'copc' && !baseViewerPath.toLowerCase().endsWith('.copc.laz')
+                ? `${baseViewerPath}/source.copc.laz`
+                : baseViewerPath;
+
+            return {
+                viewerPath,
+                displayName: buildProjectDisplayName(matchedProject, projectId),
+            };
+        };
+
+        const projectConfig = await resolveProjectConfig(rawProjectId);
+
+        if (projectConfig && projectConfig.viewerPath) {
+
+            const finalName = projectDisplayName ? projectDisplayName : projectConfig.displayName;
+            const path = buildProjectAssetPath(projectConfig.viewerPath);
 
             try {
                 const response = await fetch(path, { method: 'HEAD', cache: 'no-store' });
@@ -293,8 +374,7 @@
             document.title = finalName;
 
         } else {
-            // Fehlermeldung nur wenn ID komplett fehlt
-            console.log("Keine ID im Link gefunden.");
+            console.log("Keine ID im Link gefunden oder Projekt konnte nicht aufgeloest werden.");
         }
 
         }); // Ende der checkIfProjectDeleted Promise
