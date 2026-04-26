@@ -40,7 +40,7 @@ INNO_SETUP_CANDIDATES = [
 ]
 GITHUB_UPDATE_OWNER = "Preloi"
 GITHUB_UPDATE_REPO = "Dronautix-Pointcloud-Uploader"
-GITHUB_UPDATE_BRANCH = "develop"
+GITHUB_UPDATE_BRANCH = "master"
 
 
 def write_text_file(path, content):

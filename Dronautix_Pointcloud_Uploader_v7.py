@@ -76,7 +76,7 @@ UPDATE_REPO_OWNER = "Preloi"
 
 UPDATE_REPO_NAME = "Dronautix-Pointcloud-Uploader"
 
-UPDATE_MANIFEST_BRANCH = "develop"
+UPDATE_MANIFEST_BRANCH = "master"
 
 UPDATE_MANIFEST_URL = (
 
