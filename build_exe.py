@@ -38,6 +38,9 @@ INNO_SETUP_CANDIDATES = [
     r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
     r"C:\Program Files\Inno Setup 6\ISCC.exe",
 ]
+GITHUB_UPDATE_OWNER = "Preloi"
+GITHUB_UPDATE_REPO = "Dronautix-Pointcloud-Uploader"
+GITHUB_UPDATE_BRANCH = "develop"
 
 
 def write_text_file(path, content):
@@ -92,6 +95,14 @@ def sync_version_files():
     latest_release_content = {
         "version": APP_VERSION,
         "installer_name": f"Dronautix_Pointcloud_Uploader_Setup_{APP_VERSION}.exe",
+        "repo_owner": GITHUB_UPDATE_OWNER,
+        "repo_name": GITHUB_UPDATE_REPO,
+        "manifest_branch": GITHUB_UPDATE_BRANCH,
+        "release_tag": f"v{APP_VERSION}",
+        "installer_url": (
+            f"https://github.com/{GITHUB_UPDATE_OWNER}/{GITHUB_UPDATE_REPO}/"
+            f"releases/download/v{APP_VERSION}/Dronautix_Pointcloud_Uploader_Setup_{APP_VERSION}.exe"
+        ),
         "published_at": datetime.now().isoformat(timespec="seconds"),
     }
 

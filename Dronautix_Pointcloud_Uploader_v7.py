@@ -14,7 +14,11 @@ import uuid
 
 import csv
 
+import urllib.error
+
 import urllib.parse
+
+import urllib.request
 
 from datetime import datetime, timedelta
 
@@ -68,9 +72,21 @@ REGION_NAME = "eu-central-1"
 
 DOMAIN_URL = "https://pointcloud.dronautix.at/index.html"
 
-UPDATE_SHARE_DIR = r"Z:\03 Apps\Pointcloud uploader"
+UPDATE_REPO_OWNER = "Preloi"
 
-UPDATE_MANIFEST_FILE = os.path.join(UPDATE_SHARE_DIR, "latest-release.json")
+UPDATE_REPO_NAME = "Dronautix-Pointcloud-Uploader"
+
+UPDATE_MANIFEST_BRANCH = "develop"
+
+UPDATE_MANIFEST_URL = (
+
+    f"https://raw.githubusercontent.com/{UPDATE_REPO_OWNER}/{UPDATE_REPO_NAME}/"
+
+    f"{UPDATE_MANIFEST_BRANCH}/latest-release.json"
+
+)
+
+UPDATE_DOWNLOAD_DIR = os.path.join(APPDATA_DIR, "updates")
 
 
 
@@ -632,25 +648,123 @@ def is_remote_version_newer(remote_version, local_version):
 
 def load_update_manifest():
 
-    """Laedt das Update-Manifest aus dem Netzwerkverzeichnis."""
+    """Laedt das Update-Manifest direkt aus dem GitHub-Repo."""
 
-    if not os.path.exists(UPDATE_MANIFEST_FILE):
+    try:
+
+        request = urllib.request.Request(
+
+            UPDATE_MANIFEST_URL,
+
+            headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"}
+
+        )
+
+        with urllib.request.urlopen(request, timeout=15) as response:
+
+            payload = response.read()
+
+            encoding = response.headers.get_content_charset() or "utf-8"
+
+        manifest = json.loads(payload.decode(encoding))
+
+        log(f"[UPDATE] Manifest von GitHub geladen: {UPDATE_MANIFEST_URL}")
+
+        return manifest
+
+    except Exception as e:
+
+        log(f"[UPDATE] Manifest konnte nicht von GitHub geladen werden: {e}")
 
         return None
+
+
+
+def get_update_installer_url(manifest):
+
+    """Ermittelt die Download-URL fuer den Installer aus dem Manifest."""
+
+    installer_url = str(manifest.get("installer_url", "")).strip()
+
+    if installer_url:
+
+        return installer_url
+
+
+
+    remote_version = str(manifest.get("version", "")).strip()
+
+    installer_name = str(manifest.get("installer_name", "")).strip()
+
+    repo_owner = str(manifest.get("repo_owner", UPDATE_REPO_OWNER)).strip()
+
+    repo_name = str(manifest.get("repo_name", UPDATE_REPO_NAME)).strip()
+
+    release_tag = str(manifest.get("release_tag", f"v{remote_version}")).strip()
+
+
+
+    if not remote_version or not installer_name or not repo_owner or not repo_name or not release_tag:
+
+        return ""
+
+
+
+    return (
+
+        f"https://github.com/{repo_owner}/{repo_name}/releases/download/"
+
+        f"{urllib.parse.quote(release_tag, safe='')}/{urllib.parse.quote(installer_name)}"
+
+    )
+
+
+
+def download_update_installer(installer_url, installer_name):
+
+    """Laedt den Installer in den lokalen Update-Cache herunter."""
+
+    os.makedirs(UPDATE_DOWNLOAD_DIR, exist_ok=True)
+
+    installer_path = os.path.join(UPDATE_DOWNLOAD_DIR, installer_name)
+
+    temp_path = f"{installer_path}.download"
+
+    request = urllib.request.Request(
+
+        installer_url,
+
+        headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"}
+
+    )
 
 
 
     try:
 
-        with open(UPDATE_MANIFEST_FILE, "r", encoding="utf-8") as manifest_file:
+        with urllib.request.urlopen(request, timeout=120) as response, open(temp_path, "wb") as installer_file:
 
-            return json.load(manifest_file)
+            shutil.copyfileobj(response, installer_file)
 
-    except Exception as e:
+        os.replace(temp_path, installer_path)
 
-        log(f"[UPDATE] Manifest konnte nicht geladen werden: {e}")
+        log(f"[UPDATE] Installer heruntergeladen: {installer_path}")
 
-        return None
+        return installer_path
+
+    except Exception:
+
+        if os.path.exists(temp_path):
+
+            try:
+
+                os.remove(temp_path)
+
+            except OSError:
+
+                pass
+
+        raise
 
 
 
@@ -658,7 +772,7 @@ def load_update_manifest():
 
 def check_for_available_update():
 
-    """Prueft beim Start, ob im Netzwerkverzeichnis eine neuere Version bereitliegt."""
+    """Prueft beim Start, ob im GitHub-Repo eine neuere Version bereitliegt."""
 
     try:
 
@@ -678,21 +792,19 @@ def check_for_available_update():
 
 
 
-        installer_name = manifest.get("installer_name", "")
+        installer_name = str(manifest.get("installer_name", "")).strip()
 
-        installer_path = os.path.join(UPDATE_SHARE_DIR, installer_name) if installer_name else ""
+        installer_url = get_update_installer_url(manifest)
 
-        if not installer_path or not os.path.exists(installer_path):
+        if not installer_name or not installer_url:
 
-            log(f"[UPDATE] Neue Version {remote_version} gefunden, aber Installer fehlt: {installer_path or UPDATE_SHARE_DIR}")
+            log(f"[UPDATE] Neue Version {remote_version} gefunden, aber keine gueltige Installer-URL im Manifest")
 
             messagebox.showwarning(
 
                 "Update verfügbar",
 
-                f"Version {remote_version} ist verfügbar, aber der Installer wurde nicht gefunden.\n\n"
-
-                f"Erwarteter Pfad:\n{installer_path or UPDATE_SHARE_DIR}"
+                f"Version {remote_version} ist verfügbar, aber die Download-Informationen sind unvollständig."
 
             )
 
@@ -716,7 +828,7 @@ def check_for_available_update():
 
 
 
-        log(f"[UPDATE] Neue Version verfügbar: {remote_version} ({installer_path})")
+        log(f"[UPDATE] Neue Version verfügbar: {remote_version} ({installer_url})")
 
 
 
@@ -730,6 +842,10 @@ def check_for_available_update():
 
         try:
 
+            log(f"[UPDATE] Lade Installer herunter: {installer_url}")
+
+            installer_path = download_update_installer(installer_url, installer_name)
+
             subprocess.Popen([installer_path, "/CLOSEAPPLICATIONS"], shell=False)
 
             log(f"[UPDATE] Installer gestartet: {installer_path}")
@@ -738,13 +854,13 @@ def check_for_available_update():
 
         except Exception as install_error:
 
-            log(f"[UPDATE] Installer konnte nicht gestartet werden: {install_error}")
+            log(f"[UPDATE] Installer konnte nicht heruntergeladen oder gestartet werden: {install_error}")
 
             messagebox.showerror(
 
                 "Update fehlgeschlagen",
 
-                f"Der Installer konnte nicht gestartet werden:\n{installer_path}\n\n{install_error}"
+                f"Der Installer konnte nicht heruntergeladen oder gestartet werden:\n{installer_url}\n\n{install_error}"
 
             )
 

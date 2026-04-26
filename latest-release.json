@@ -1,5 +1,10 @@
 {
   "version": "1.6.1",
   "installer_name": "Dronautix_Pointcloud_Uploader_Setup_1.6.1.exe",
-  "published_at": "2026-04-04T11:58:50"
+  "repo_owner": "Preloi",
+  "repo_name": "Dronautix-Pointcloud-Uploader",
+  "manifest_branch": "develop",
+  "release_tag": "v1.6.1",
+  "installer_url": "https://github.com/Preloi/Dronautix-Pointcloud-Uploader/releases/download/v1.6.1/Dronautix_Pointcloud_Uploader_Setup_1.6.1.exe",
+  "published_at": "2026-04-26T16:39:38"
 }
