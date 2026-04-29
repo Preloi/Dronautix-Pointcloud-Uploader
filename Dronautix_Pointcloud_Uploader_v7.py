@@ -1282,24 +1282,85 @@ def collect_project_objects(s3_client, s3_path):
 
     """Sammelt alle S3-Objekte unter einem Projektpraefix."""
 
+    return [entry["Key"] for entry in collect_project_object_entries(s3_client, s3_path)]
+
+
+
+
+def collect_project_object_entries(s3_client, s3_path):
+
+    """Sammelt S3-Objekte inklusive Groesse unter einem Projektpraefix."""
+
     paginator = s3_client.get_paginator('list_objects_v2')
 
     pages = paginator.paginate(Bucket=BUCKET_NAME, Prefix=s3_path)
 
 
 
-    object_keys = []
+    object_entries = []
 
     for page in pages:
 
         for obj in page.get('Contents', []):
 
-            object_keys.append(obj['Key'])
+            object_key = obj.get('Key')
+
+            if not object_key:
+
+                continue
+
+            object_entries.append({
+
+                "Key": object_key,
+
+                "Size": int(obj.get("Size", 0) or 0)
+
+            })
 
 
 
-    return object_keys
+    return object_entries
 
+
+
+
+def build_safe_download_path(base_dir, s3_prefix, object_key):
+
+    """Erstellt einen lokalen Zielpfad ohne S3-Pfadbestandteile blind zu uebernehmen."""
+
+    relative_path = object_key[len(s3_prefix):] if object_key.startswith(s3_prefix) else os.path.basename(object_key)
+
+    relative_path = relative_path.lstrip("/\\")
+
+    safe_parts = []
+
+    for path_part in re.split(r'[/\\]+', relative_path):
+
+        if not path_part or path_part in (".", ".."):
+
+            continue
+
+        safe_parts.append(path_part)
+
+    if not safe_parts:
+
+        fallback_name = os.path.basename(object_key.rstrip("/\\"))
+
+        if not fallback_name:
+
+            return ""
+
+        safe_parts.append(fallback_name)
+
+    return os.path.join(base_dir, *safe_parts)
+
+
+
+
+
+class DownloadCancelledError(Exception):
+
+    """Signalisiert einen bewusst abgebrochenen Projekt-Download."""
 
 
 
@@ -3184,6 +3245,530 @@ def duplicate_project_process(project_info, new_kunde, new_projekt, aws_access, 
 
 
 
+def download_project_data_process(project_info, target_dir, aws_access, aws_secret, on_success=None, on_cancel=None, ui=None, cancel_event=None):
+
+    """Laedt alle Punktwolkendaten eines Projekts aus S3 in einen lokalen Ordner."""
+
+    try:
+
+        source_s3_path = project_info.get("s3_path", "")
+
+        if not source_s3_path:
+
+            raise ValueError("Projekt hat keinen S3-Pfad.")
+
+        if not target_dir:
+
+            raise ValueError("Kein Zielordner ausgewaehlt.")
+
+        folder_parts = [
+
+            sanitize_folder_name(project_info.get("kunde", "")),
+
+            sanitize_folder_name(project_info.get("projekt", "")),
+
+            str(project_info.get("id", "")).strip()
+
+        ]
+
+        download_folder_name = "_".join(part for part in folder_parts if part) or "punktwolke"
+
+        download_dir = os.path.join(target_dir, download_folder_name)
+
+        os.makedirs(download_dir, exist_ok=True)
+
+
+
+        ui_log("[DOWNLOAD] Starte Download der Punktwolkendaten...", ui)
+
+        ui_set_progress(0.05, ui)
+
+        ui_set_detail("Verbinde mit S3...", ui)
+
+
+
+        s3_client = create_s3_client(aws_access, aws_secret)
+
+
+
+        ui_set_detail("Sammle Projektdateien...", ui)
+
+        object_entries = [
+
+            entry for entry in collect_project_object_entries(s3_client, source_s3_path)
+
+            if not entry["Key"].endswith("/")
+
+        ]
+
+        if not object_entries:
+
+            raise ValueError("Keine Dateien im Projekt gefunden.")
+
+
+
+        total_files = len(object_entries)
+
+        total_bytes = sum(entry.get("Size", 0) for entry in object_entries)
+
+        downloaded_bytes = 0
+
+        ui_log(f"[DOWNLOAD] {total_files} Dateien gefunden", ui)
+
+
+
+        active_local_path = ""
+
+
+
+        def raise_if_cancelled():
+
+            if cancel_event and cancel_event.is_set():
+
+                raise DownloadCancelledError("Download wurde abgebrochen.")
+
+
+
+        def update_download_progress(bytes_amount):
+
+            nonlocal downloaded_bytes
+
+            raise_if_cancelled()
+
+            downloaded_bytes += bytes_amount
+
+            if total_bytes > 0:
+
+                ui_set_progress(0.1 + 0.85 * min(downloaded_bytes / total_bytes, 1.0), ui)
+
+
+
+        for index, entry in enumerate(object_entries, start=1):
+
+            raise_if_cancelled()
+
+            object_key = entry["Key"]
+
+            local_path = build_safe_download_path(download_dir, source_s3_path, object_key)
+
+            if not local_path:
+
+                continue
+
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+
+            active_local_path = local_path
+
+            ui_set_detail(f"Lade Datei {index}/{total_files}: {os.path.basename(local_path)}", ui)
+
+            s3_client.download_file(
+
+                BUCKET_NAME,
+
+                object_key,
+
+                local_path,
+
+                Callback=update_download_progress
+
+            )
+
+            if total_bytes <= 0:
+
+                ui_set_progress(0.1 + 0.85 * (index / total_files), ui)
+
+            active_local_path = ""
+
+
+
+        ui_set_progress(1.0, ui)
+
+        ui_set_detail("Download abgeschlossen!", ui)
+
+        ui_log(f"[DOWNLOAD] Zielordner: {download_dir}", ui)
+
+
+
+        if on_success:
+
+            root.after(0, lambda: on_success(download_dir))
+
+    except DownloadCancelledError:
+
+        if active_local_path and os.path.exists(active_local_path):
+
+            try:
+
+                os.remove(active_local_path)
+
+            except OSError:
+
+                pass
+
+        ui_log("[DOWNLOAD] Download abgebrochen.", ui)
+
+        ui_set_detail("Download abgebrochen.", ui)
+
+        if on_cancel:
+
+            root.after(0, on_cancel)
+
+    except Exception as e:
+
+        ui_log(f"[FEHLER] Download fehlgeschlagen: {e}", ui)
+
+        ui_set_detail(f"Fehler: {e}", ui)
+
+        root.after(0, lambda err=e: messagebox.showerror("Fehler", f"Download fehlgeschlagen:\n{err}"))
+
+
+
+
+def open_project_download_dialog(parent_window, project_info, aws_access, aws_secret, window_owner):
+
+    """Oeffnet einen Dialog zum Herunterladen der Projektdateien."""
+
+    existing_download_window = getattr(window_owner, "_download_window", None)
+
+    if focus_existing_window(existing_download_window):
+
+        return
+
+    download_window = ctk.CTkToplevel(parent_window)
+
+    window_owner._download_window = download_window
+
+    download_window.title("Punktwolkendaten herunterladen")
+
+    download_window.geometry("720x500")
+
+    download_window.minsize(660, 460)
+
+    download_window.transient(parent_window)
+
+    download_window.lift()
+
+    download_window.focus_force()
+
+    download_window.grab_set()
+
+
+
+    def close_download_window():
+
+        if getattr(window_owner, "_download_window", None) is download_window:
+
+            window_owner._download_window = None
+
+        try:
+
+            download_window.grab_release()
+
+        except tk.TclError:
+
+            pass
+
+        download_window.destroy()
+
+
+
+    download_window.protocol("WM_DELETE_WINDOW", close_download_window)
+
+
+
+    header = ctk.CTkFrame(download_window, fg_color="transparent")
+
+    header.pack(fill="x", padx=20, pady=(16, 8))
+
+    ctk.CTkLabel(
+
+        header,
+
+        text="Punktwolkendaten herunterladen",
+
+        font=ctk.CTkFont(size=18, weight="bold")
+
+    ).pack(anchor="w")
+
+
+
+    info_frame = ctk.CTkFrame(download_window, fg_color=COLOR_CARD, corner_radius=8)
+
+    info_frame.pack(fill="x", padx=20, pady=(0, 12))
+
+    ctk.CTkLabel(
+
+        info_frame,
+
+        text=f"{project_info.get('kunde', '')} - {project_info.get('projekt', '')}  (ID: {project_info.get('id', '')})",
+
+        font=ctk.CTkFont(size=12)
+
+    ).pack(anchor="w", padx=12, pady=(10, 4))
+
+    ctk.CTkLabel(
+
+        info_frame,
+
+        text=f"S3-Pfad: {project_info.get('s3_path', '')}",
+
+        font=ctk.CTkFont(size=11),
+
+        text_color=COLOR_TEXT_DIM,
+
+        wraplength=660,
+
+        justify="left"
+
+    ).pack(anchor="w", padx=12, pady=(0, 10))
+
+
+
+    target_frame = ctk.CTkFrame(download_window, fg_color="transparent")
+
+    target_frame.pack(fill="x", padx=20, pady=(0, 12))
+
+    target_entry = ctk.CTkEntry(
+
+        target_frame,
+
+        font=ctk.CTkFont(family="Consolas", size=11),
+
+        height=36,
+
+        placeholder_text="Zielordner auswählen"
+
+    )
+
+    target_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+
+
+    def choose_target_dir():
+
+        selected_dir = filedialog.askdirectory(title="Zielordner fuer den Download waehlen")
+
+        if selected_dir:
+
+            target_entry.delete(0, tk.END)
+
+            target_entry.insert(0, selected_dir)
+
+
+
+    ctk.CTkButton(
+
+        target_frame,
+
+        text="Ordner wählen",
+
+        fg_color=COLOR_ACCENT,
+
+        hover_color=COLOR_ACCENT_HOVER,
+
+        height=36,
+
+        command=choose_target_dir
+
+    ).pack(side="right")
+
+
+
+    progress_frame = ctk.CTkFrame(download_window, fg_color="transparent")
+
+    progress_frame.pack(fill="both", expand=True, padx=20, pady=(0, 8))
+
+    download_progress_bar = ctk.CTkProgressBar(progress_frame, height=8)
+
+    download_progress_bar.pack(fill="x", pady=(0, 4))
+
+    download_progress_bar.set(0)
+
+    download_detail_label = ctk.CTkLabel(
+
+        progress_frame,
+
+        text="Noch kein Download gestartet.",
+
+        font=ctk.CTkFont(size=11),
+
+        text_color=COLOR_TEXT_DIM
+
+    )
+
+    download_detail_label.pack(anchor="w")
+
+    download_log_box = ctk.CTkTextbox(progress_frame, height=140, font=ctk.CTkFont(size=11), state="disabled")
+
+    download_log_box.pack(fill="both", expand=True, pady=(6, 0))
+
+
+
+    download_ui = {
+
+        "progress_bar": download_progress_bar,
+
+        "progress_detail": download_detail_label,
+
+        "log": download_log_box
+
+    }
+
+
+
+    btn_row = ctk.CTkFrame(download_window, fg_color="transparent")
+
+    btn_row.pack(fill="x", padx=20, pady=(8, 16))
+
+
+
+    def start_download():
+
+        target_dir = target_entry.get().strip()
+
+        if not target_dir:
+
+            messagebox.showwarning("Zielordner fehlt", "Bitte einen Zielordner auswählen.")
+
+            return
+
+        if not os.path.isdir(target_dir):
+
+            messagebox.showerror("Fehler", "Der Zielordner existiert nicht.")
+
+            return
+
+        cancel_event = threading.Event()
+
+
+
+        def request_cancel():
+
+            if cancel_event.is_set():
+
+                return
+
+            cancel_event.set()
+
+            ui_set_detail("Download wird abgebrochen...", download_ui)
+
+            ui_log("[DOWNLOAD] Abbruch angefordert.", download_ui)
+
+            btn_cancel.configure(state="disabled", text="Abbruch läuft...")
+
+
+
+        def on_success(download_dir):
+
+            btn_cancel.configure(state="normal", text="Schließen", command=close_download_window)
+
+            messagebox.showinfo("Download abgeschlossen", f"Punktwolkendaten wurden heruntergeladen:\n{download_dir}")
+
+
+
+        def on_cancel():
+
+            btn_cancel.configure(state="normal", text="Schließen", command=close_download_window)
+
+        btn_start.configure(state="disabled", text="Download läuft...")
+
+        btn_cancel.configure(state="normal", text="Download abbrechen", command=request_cancel)
+
+        download_window.protocol("WM_DELETE_WINDOW", request_cancel)
+
+
+
+        thread = threading.Thread(
+
+            target=download_project_data_process,
+
+            args=(project_info, target_dir, aws_access, aws_secret),
+
+            kwargs={
+
+                "on_success": on_success,
+
+                "on_cancel": on_cancel,
+
+                "ui": download_ui,
+
+                "cancel_event": cancel_event
+
+            },
+
+            daemon=True
+
+        )
+
+        thread.start()
+
+
+
+        def check_thread():
+
+            if thread.is_alive():
+
+                root.after(100, check_thread)
+
+                return
+
+            if download_window.winfo_exists():
+
+                download_window.protocol("WM_DELETE_WINDOW", close_download_window)
+
+                btn_start.configure(state="normal", text="Herunterladen")
+
+                btn_cancel.configure(state="normal", command=close_download_window)
+
+
+
+        root.after(100, check_thread)
+
+
+
+    btn_start = ctk.CTkButton(
+
+        btn_row,
+
+        text="Herunterladen",
+
+        fg_color=COLOR_SUCCESS,
+
+        hover_color=COLOR_SUCCESS_HOVER,
+
+        font=ctk.CTkFont(size=13, weight="bold"),
+
+        height=38,
+
+        command=start_download
+
+    )
+
+    btn_start.pack(side="left", padx=(0, 8))
+
+    btn_cancel = ctk.CTkButton(
+
+        btn_row,
+
+        text="Abbrechen",
+
+        fg_color=COLOR_CARD,
+
+        hover_color="#3a3a4c",
+
+        font=ctk.CTkFont(size=13),
+
+        height=38,
+
+        command=close_download_window
+
+    )
+
+    btn_cancel.pack(side="right")
+
+
+
+
 def open_projects_window():
 
     global projects_window_ref
@@ -4561,6 +5146,18 @@ def open_projects_window():
 
 
 
+    def open_download_dialog():
+
+        project_info = get_selected_project()
+
+        if not project_info:
+
+            return
+
+        open_project_download_dialog(proj_window, project_info, aws_access, aws_secret, proj_window)
+
+
+
     ctk.CTkButton(
 
         btn_frame,
@@ -4576,6 +5173,26 @@ def open_projects_window():
         height=36,
 
         command=open_duplicate_dialog
+
+    ).pack(side="left", padx=(0, 8))
+
+
+
+    ctk.CTkButton(
+
+        btn_frame,
+
+        text="Herunterladen",
+
+        fg_color=COLOR_SUCCESS,
+
+        hover_color=COLOR_SUCCESS_HOVER,
+
+        font=ctk.CTkFont(size=12),
+
+        height=36,
+
+        command=open_download_dialog
 
     ).pack(side="left", padx=(0, 8))
 
@@ -6618,6 +7235,18 @@ def show_projects_view():
 
 
 
+    def open_download_dialog_main():
+
+        project_info = get_selected_project()
+
+        if not project_info:
+
+            return
+
+        open_project_download_dialog(root, project_info, aws_access, aws_secret, projects_page)
+
+
+
     ctk.CTkButton(
 
         btn_frame,
@@ -6633,6 +7262,26 @@ def show_projects_view():
         height=36,
 
         command=open_duplicate_dialog_main
+
+    ).pack(side="left", padx=(0, 8))
+
+
+
+    ctk.CTkButton(
+
+        btn_frame,
+
+        text="Herunterladen",
+
+        fg_color=COLOR_SUCCESS,
+
+        hover_color=COLOR_SUCCESS_HOVER,
+
+        font=ctk.CTkFont(size=13),
+
+        height=36,
+
+        command=open_download_dialog_main
 
     ).pack(side="left", padx=(0, 8))
 
