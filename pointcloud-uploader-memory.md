@@ -1,12 +1,12 @@
 # Pointcloud Uploader Memory
 
-Stand: 2026-04-26
+Stand: 2026-05-01
 
 ## Git
 
-- Repo: `Preloi/Pointcloud-Uploader`
+- Repo: `Preloi/Dronautix-Pointcloud-Uploader`
 - Aktueller Branch: `develop`
-- Aktueller Release: `1.6.1`
+- Aktueller Release: `1.6.5`
 
 ## Systemkontext
 
@@ -30,7 +30,7 @@ Stand: 2026-04-26
 
 ## Update-Logik
 
-- Die App prueft beim Start `latest-release.json` direkt aus dem GitHub-Repo `Preloi/Dronautix-Pointcloud-Uploader`.
+- Die App prueft beim Start `latest-release.json` direkt aus dem GitHub-Repo `Preloi/Dronautix-Pointcloud-Uploader` auf dem Branch `master`.
 - Wenn eine neuere Version gefunden wird, fragt die App per Dialog nach Bestaetigung.
 - Nach Bestaetigung laedt die App den Installer von GitHub herunter und startet das Setup.
 - Der Installer wird lokal unter `%APPDATA%\DronautixUploader\updates` zwischengespeichert.
@@ -43,14 +43,14 @@ Stand: 2026-04-26
   - `release_tag`
   - `installer_url`
 
-## Release 1.6.1
+## Release 1.6.5
 
-- Aktueller Release des Uploaders ist `1.6.1`.
+- Aktueller Release des Uploaders ist `1.6.5`.
 - Neue Uploads erzeugen anonyme Kurz-Links nur noch mit der technischen Projekt-ID.
 - UI-Versionsanzeige, Setup und Dateiversion ziehen ihre Versionsnummer zentral aus `app_version.py`.
 - Fuer Auto-Updates muss das Setup als GitHub-Release-Asset unter dem passenden Tag liegen:
-  - Tag: `v1.6.1`
-  - Asset: `Dronautix_Pointcloud_Uploader_Setup_1.6.1.exe`
+  - Tag: `v1.6.5`
+  - Asset: `Dronautix_Pointcloud_Uploader_Setup_1.6.5.exe`
 
 ## Wichtige Uploader-Details
 
@@ -76,10 +76,13 @@ Stand: 2026-04-26
 - Drag-and-Drop-Feld zeigt nach Dateiauswahl oder Drop den kompletten Dateipfad an.
 - Drag-and-Drop-Feld im Hauptfenster wurde etwas kompakter gemacht.
 - Die Kopfzeile `Upload und Verwaltung im selben Fenster` wurde aus dem Hauptfenster entfernt.
+- Die Seitenleiste enthält zusätzlich die Ansicht `Lokale Konvertierung`.
+- In `Lokale Konvertierung` können `.las` und `.laz` Dateien lokal in ein Potree-Projekt konvertiert und gespeichert werden.
 - Projektuebersicht-Ueberschrift lautet jetzt:
   - `Bestehende Projekte oeffnen, loeschen, austauschen oder duplizieren`
 - Duplizieren-Dialoge wurden vergroessert, damit die Buttons sicher sichtbar sind.
 - Die Farbe aller `Duplizieren`-Buttons wurde an die Standard-Aktionsfarbe der App angepasst.
+- Der `Herunterladen`-Button nutzt wieder dieselbe Standardfarbe wie die übrigen Aktionsbuttons.
 
 ## Aenderungen in frueheren Releases
 
@@ -120,5 +123,5 @@ Stand: 2026-04-26
 
 - Fuer echte Live-Viewer-Aenderungen ist die `index.html` der separaten Viewer-Repo massgeblich, nicht `server_viewer/index.html`.
 - Falls CloudFront noch alte Assets liefert, gezielt invalidieren.
-- Nach dem Hotfix `1.6.1` wieder auf das uebliche `0.1`-Versionsschema zurueckgehen, ausser bewusst erneut ein Patch-Release gewuenscht ist.
+- Die aktuelle Release-Linie steht auf `1.6.5`; Setup, Manifest und GitHub-Release-Asset muessen dieselbe Versionsnummer tragen.
 - Das verbesserte Update-/Setup-Verhalten greift zuverlaessig erst ab installierter Version `1.2`.

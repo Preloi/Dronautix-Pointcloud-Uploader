@@ -1,4 +1,7 @@
 __pycache__/
+.venv/
+.tmp/
+.claude/
 build/
 dist/
 Output/

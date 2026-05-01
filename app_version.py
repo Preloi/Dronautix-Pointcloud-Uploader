@@ -2,6 +2,5 @@ APP_NAME = "Dronautix Pointcloud Uploader"
 APP_PUBLISHER = "Dronautix"
 APP_EXE_NAME = "Dronautix_Pointcloud_Uploader.exe"
 APP_ID = "{{8F213FA6-9C7D-4CD6-BB1E-48E2B09587D8}"
-APP_VERSION = "1.6.1"
-APP_FILE_VERSION = "1.6.1.0"
-
+APP_VERSION = "1.6.5"
+APP_FILE_VERSION = "1.6.5.0"
