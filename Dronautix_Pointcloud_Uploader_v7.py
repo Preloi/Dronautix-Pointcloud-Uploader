@@ -3773,6 +3773,1476 @@ def open_project_download_dialog(parent_window, project_info, aws_access, aws_se
 
 
 
+def show_projects_view():
+
+    """Rendert die Projektübersicht als Hauptansicht im Hauptfenster."""
+
+    config = load_config()
+
+    aws_access = config.get("aws_access", "")
+
+    aws_secret = config.get("aws_secret", "")
+
+
+
+    if not aws_access or not aws_secret:
+
+        messagebox.showwarning("Fehler", "Bitte AWS Zugangsdaten in den Einstellungen eingeben!")
+
+        show_settings_view(first_run=False)
+
+        return
+
+
+
+    clear_frame(projects_page)
+
+    show_main_view("projects")
+
+
+
+    header = ctk.CTkFrame(projects_page, fg_color=COLOR_CARD, corner_radius=0)
+
+    header.pack(fill="x", pady=(0, 8))
+
+
+
+    ctk.CTkLabel(
+
+        header,
+
+        text="Projektübersicht",
+
+        font=ctk.CTkFont(size=22, weight="bold")
+
+    ).pack(side="left", padx=20, pady=16)
+
+
+
+    ctk.CTkLabel(
+
+        header,
+
+        text="Bestehende Projekte öffnen, löschen, austauschen oder duplizieren",
+
+        font=ctk.CTkFont(size=12),
+
+        text_color=COLOR_TEXT_DIM
+
+    ).pack(side="left", padx=(0, 20), pady=(18, 12))
+
+
+
+    filter_frame = ctk.CTkFrame(projects_page, fg_color=COLOR_CARD, corner_radius=12)
+
+    filter_frame.pack(fill="x", padx=16, pady=(0, 8))
+
+
+
+    filter_inner = ctk.CTkFrame(filter_frame, fg_color="transparent")
+
+    filter_inner.pack(fill="x", padx=16, pady=12)
+
+
+
+    ctk.CTkLabel(
+
+        filter_inner,
+
+        text="Filter",
+
+        font=ctk.CTkFont(size=13, weight="bold")
+
+    ).pack(side="left", padx=(0, 12))
+
+
+
+    ctk.CTkLabel(
+
+        filter_inner,
+
+        text="Kunde:",
+
+        font=ctk.CTkFont(size=12)
+
+    ).pack(side="left", padx=(0, 4))
+
+
+
+    customer_filter = ctk.CTkComboBox(
+
+        filter_inner,
+
+        values=["Alle Kunden"],
+
+        width=180,
+
+        font=ctk.CTkFont(size=12),
+
+        state="readonly",
+
+        command=lambda _value: apply_filter()
+
+    )
+
+    customer_filter.set("Alle Kunden")
+
+    customer_filter.pack(side="left", padx=(0, 12))
+
+
+
+    search_entry = ctk.CTkEntry(
+
+        filter_inner,
+
+        placeholder_text="Projekt suchen...",
+
+        font=ctk.CTkFont(size=12),
+
+        width=260
+
+    )
+
+    search_entry.pack(side="left", padx=(0, 8))
+
+
+
+    def apply_filter():
+
+        load_projects(customer_filter.get(), search_entry.get().strip())
+
+
+
+    search_entry.bind("<KeyRelease>", lambda _event: apply_filter())
+
+
+
+    ctk.CTkButton(
+
+        filter_inner,
+
+        text="Zurücksetzen",
+
+        font=ctk.CTkFont(size=12),
+
+        width=120,
+
+        height=30,
+
+        fg_color=COLOR_ACCENT,
+
+        hover_color=COLOR_ACCENT_HOVER,
+
+        command=lambda: (customer_filter.set("Alle Kunden"), search_entry.delete(0, tk.END), load_projects())
+
+    ).pack(side="left", padx=(0, 8))
+
+
+
+    ctk.CTkButton(
+
+        filter_inner,
+
+        text="Aktualisieren",
+
+        fg_color=COLOR_ACCENT,
+
+        hover_color=COLOR_ACCENT_HOVER,
+
+        font=ctk.CTkFont(size=12),
+
+        width=130,
+
+        height=30,
+
+        command=lambda: load_projects()
+
+    ).pack(side="right")
+
+
+
+    table_frame = ctk.CTkFrame(projects_page, fg_color="transparent")
+
+    table_frame.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+
+
+
+    scroll_y = ctk.CTkScrollbar(table_frame, orientation="vertical")
+
+    scroll_y.pack(side="right", fill="y")
+
+
+
+    scroll_x = ctk.CTkScrollbar(table_frame, orientation="horizontal")
+
+    scroll_x.pack(side="bottom", fill="x")
+
+
+
+    tree = ttk.Treeview(
+
+        table_frame,
+
+        columns=("id", "kunde", "projekt", "datum", "url"),
+
+        show="headings",
+
+        yscrollcommand=scroll_y.set,
+
+        xscrollcommand=scroll_x.set,
+
+        height=20
+
+    )
+
+    tree.heading("id", text="ID")
+
+    tree.heading("kunde", text="Kunde")
+
+    tree.heading("projekt", text="Projekt")
+
+    tree.heading("datum", text="Datum")
+
+    tree.heading("url", text="Web-Link")
+
+    tree.column("id", width=90, anchor="center")
+
+    tree.column("kunde", width=180)
+
+    tree.column("projekt", width=220)
+
+    tree.column("datum", width=150, anchor="center")
+
+    tree.column("url", width=560)
+
+    tree.pack(fill="both", expand=True)
+
+
+
+    scroll_y.configure(command=tree.yview)
+
+    scroll_x.configure(command=tree.xview)
+
+
+
+    style = ttk.Style()
+
+    style.theme_use("clam")
+
+    style.configure(
+
+        "Treeview",
+
+        background=COLOR_CARD,
+
+        foreground="#e2e8f0",
+
+        fieldbackground=COLOR_CARD,
+
+        borderwidth=0,
+
+        font=("Segoe UI", 10)
+
+    )
+
+    style.configure(
+
+        "Treeview.Heading",
+
+        background=COLOR_SURFACE,
+
+        foreground="#e2e8f0",
+
+        font=("Segoe UI", 10, "bold")
+
+    )
+
+    style.map("Treeview", background=[("selected", COLOR_ACCENT)])
+
+
+
+    btn_frame = ctk.CTkFrame(projects_page, fg_color="transparent")
+
+    btn_frame.pack(fill="x", padx=16, pady=(0, 16))
+
+    projects_by_id = {}
+
+
+
+    def get_selected_project():
+
+        selected = tree.selection()
+
+        if not selected:
+
+            messagebox.showinfo("Info", "Bitte ein Projekt auswählen!")
+
+            return None
+
+
+
+        item = tree.item(selected[0])
+
+        project_id = item["values"][0]
+        project_link = item["values"][4] if len(item.get("values", [])) > 4 else ""
+
+        if not project_id:
+
+            messagebox.showinfo("Info", "Bitte ein gültiges Projekt auswählen!")
+
+            return None
+
+
+
+        project_info = projects_by_id.get(project_id)
+
+        if not project_info:
+
+            try:
+
+                s3_client = create_s3_client(aws_access, aws_secret)
+
+                index_data = load_projects_index(s3_client)
+
+                project_info = find_project_in_index(index_data, project_id=project_id, project_link=project_link)
+
+                if project_info:
+
+                    projects_by_id[str(project_info.get("id", "")).strip()] = project_info
+
+            except Exception as e:
+
+                messagebox.showerror("Fehler", f"Projektdaten konnten nicht geladen werden:\n{e}")
+
+                return None
+
+        if not project_info:
+
+            messagebox.showerror("Fehler", "Projekt konnte im aktuellen Index nicht gefunden werden!")
+
+            return None
+
+
+
+        return project_info
+
+
+
+    def open_in_browser():
+
+        project_info = get_selected_project()
+
+        if project_info:
+
+            webbrowser.open(project_info.get("link", ""))
+
+
+
+    def copy_link():
+
+        project_info = get_selected_project()
+
+        if not project_info:
+
+            return
+
+        root.clipboard_clear()
+
+        root.clipboard_append(project_info.get("link", ""))
+
+        messagebox.showinfo("Kopiert", "Link in die Zwischenablage kopiert!")
+
+
+
+    def delete_project():
+
+        project_info = get_selected_project()
+
+        if not project_info:
+
+            return
+
+
+
+        projekt_name = project_info.get("projekt", "")
+
+        result = messagebox.askyesno(
+
+            "Löschen bestaetigen",
+
+            f"Projekt '{projekt_name}' wirklich löschen?\n\nDies loescht alle Dateien aus dem S3 Storage!"
+
+        )
+
+        if not result:
+
+            return
+
+
+
+        try:
+
+            s3_client = create_s3_client(aws_access, aws_secret)
+
+            delete_result = delete_project_transaction(s3_client, project_info)
+
+
+
+            if delete_result["success"]:
+
+                messagebox.showinfo("Erfolg", "Projekt wurde gelöscht und der Link deaktiviert!")
+
+                load_projects()
+
+            elif delete_result.get("partial"):
+
+                messagebox.showwarning("Teilweise gelöscht", delete_result["message"])
+
+                load_projects()
+
+            else:
+
+                messagebox.showerror("Fehler", delete_result["message"])
+
+        except Exception as e:
+
+            messagebox.showerror("Fehler", f"Fehler beim Löschen:\n{e}")
+
+
+
+    def open_replace_dialog():
+
+        existing_replace_window = getattr(projects_page, "_replace_window", None)
+
+        if focus_existing_window(existing_replace_window):
+
+            return
+
+
+
+        project_info = get_selected_project()
+
+        if not project_info:
+
+            return
+
+
+
+        try:
+
+            s3_client = create_s3_client(aws_access, aws_secret)
+
+            index_data = load_projects_index(s3_client)
+
+        except Exception as e:
+
+            messagebox.showerror("Fehler", f"Projektdaten konnten nicht geladen werden:\n{e}")
+
+            return
+
+
+
+        current_project = None
+
+        for proj in index_data.get("projects", []):
+
+            if proj.get("id") == project_info.get("id"):
+
+                current_project = proj
+
+                break
+
+
+
+        if not current_project:
+
+            messagebox.showerror("Fehler", "Projekt nicht im Index gefunden!")
+
+            return
+
+
+
+        replace_window = ctk.CTkToplevel(root)
+
+        projects_page._replace_window = replace_window
+
+        replace_window.title("Punktwolkendaten austauschen")
+
+        replace_window.geometry("980x780")
+
+        replace_window.minsize(920, 720)
+
+        replace_window.transient(root)
+
+        replace_window.lift()
+
+        replace_window.focus_force()
+
+        replace_window.grab_set()
+
+
+
+        def close_replace_window():
+
+            if getattr(projects_page, "_replace_window", None) is replace_window:
+
+                projects_page._replace_window = None
+
+            try:
+
+                replace_window.grab_release()
+
+            except tk.TclError:
+
+                pass
+
+            replace_window.destroy()
+
+
+
+        replace_window.protocol("WM_DELETE_WINDOW", close_replace_window)
+
+
+
+        content_frame = ctk.CTkScrollableFrame(replace_window, fg_color="transparent")
+
+        content_frame.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+
+
+
+        header_replace = ctk.CTkFrame(content_frame, fg_color=COLOR_CARD, corner_radius=0)
+
+        header_replace.pack(fill="x", pady=(0, 12))
+
+
+
+        ctk.CTkLabel(
+
+            header_replace,
+
+            text="Punktwolkendaten austauschen",
+
+            font=ctk.CTkFont(size=18, weight="bold")
+
+        ).pack(anchor="w", padx=20, pady=(16, 4))
+
+
+
+        ctk.CTkLabel(
+
+            header_replace,
+
+            text="Nur die Punktwolkendaten werden ersetzt. Projektname, Projekt-ID und Link bleiben unverändert.",
+
+            font=ctk.CTkFont(size=11),
+
+            text_color=COLOR_TEXT_DIM
+
+        ).pack(anchor="w", padx=20, pady=(0, 16))
+
+
+
+        info_card = ctk.CTkFrame(content_frame, corner_radius=12)
+
+        info_card.pack(fill="x", pady=(0, 12))
+
+
+
+        ctk.CTkLabel(info_card, text=f"Kunde: {current_project.get('kunde', '')}", font=ctk.CTkFont(size=12)).pack(anchor="w", padx=16, pady=(14, 4))
+
+        ctk.CTkLabel(info_card, text=f"Projekt: {current_project.get('projekt', '')}", font=ctk.CTkFont(size=12)).pack(anchor="w", padx=16, pady=4)
+
+        ctk.CTkLabel(info_card, text=f"Projekt-ID: {current_project.get('id', '')}", font=ctk.CTkFont(size=12)).pack(anchor="w", padx=16, pady=4)
+
+        ctk.CTkLabel(
+
+            info_card,
+
+            text=current_project.get("link", ""),
+
+            font=ctk.CTkFont(size=10),
+
+            text_color=COLOR_TEXT_DIM,
+
+            wraplength=820,
+
+            justify="left"
+
+        ).pack(anchor="w", padx=16, pady=(4, 14))
+
+
+
+        upload_card = ctk.CTkFrame(content_frame, corner_radius=12)
+
+        upload_card.pack(fill="both", expand=True, pady=(0, 12))
+
+
+
+        replacement_entry = ctk.CTkEntry(
+
+            upload_card,
+
+            font=ctk.CTkFont(family="Consolas", size=11),
+
+            height=34,
+
+            placeholder_text="Neue LAS- oder LAZ-Datei für dieses Projekt auswählen"
+
+        )
+
+        replacement_entry.pack(fill="x", padx=16, pady=(16, 10))
+
+
+
+        def set_replacement_file(file_path):
+
+            replacement_entry.delete(0, tk.END)
+
+            replacement_entry.insert(0, file_path)
+
+            drop_label_replace.configure(
+
+                text=f"Datei erkannt\n\n{os.path.basename(file_path)}\n\nAustausch unten manuell per Button starten"
+
+            )
+
+            drop_frame_replace.configure(border_color=COLOR_SUCCESS)
+
+
+
+        def select_replacement_file():
+
+            file_path = filedialog.askopenfilename(
+
+                title="Neue LAS- oder LAZ-Datei für den Projektaustausch wählen",
+
+                filetypes=[("LAS/LAZ", "*.laz *.las"), ("Alle Dateien", "*.*")]
+
+            )
+
+            if file_path:
+
+                set_replacement_file(file_path)
+
+
+
+        ctk.CTkButton(
+
+            upload_card,
+
+            text="LAS/LAZ-Datei wählen",
+
+            command=select_replacement_file,
+
+            fg_color=COLOR_ACCENT,
+
+            hover_color=COLOR_ACCENT_HOVER,
+
+            height=34
+
+        ).pack(anchor="w", padx=16, pady=(0, 10))
+
+
+
+        drop_frame_replace = ctk.CTkFrame(
+
+            upload_card,
+
+            fg_color="#1e1e2e",
+
+            corner_radius=8,
+
+            border_width=1,
+
+            border_color="#334155"
+
+        )
+
+        drop_frame_replace.pack(fill="x", padx=16, pady=(0, 12))
+
+        drop_frame_replace.configure(height=220)
+
+        drop_frame_replace.pack_propagate(False)
+
+
+
+        drop_label_replace = tk.Label(
+
+            drop_frame_replace,
+
+            text="Datei hier hineinziehen\n\n(nur .las oder .laz)",
+
+            bg="#1e1e2e",
+
+            fg="#cbd5e1",
+
+            padx=20,
+
+            pady=40,
+
+            font=("Segoe UI", 13, "bold"),
+
+            justify="center"
+
+        )
+
+        drop_label_replace.pack(fill="both", expand=True)
+
+        drop_label_replace.drop_target_register(DND_FILES)
+
+        drop_frame_replace.drop_target_register(DND_FILES)
+
+
+
+        def handle_replacement_drop(event):
+
+            file_path = extract_dropped_file(event.data)
+
+            if os.path.isfile(file_path):
+
+                set_replacement_file(file_path)
+
+                valid, message = validate_replacement_file(file_path)
+
+                if not valid:
+
+                    messagebox.showerror("Fehler", message)
+
+
+
+        drop_label_replace.dnd_bind("<<Drop>>", handle_replacement_drop)
+
+        drop_frame_replace.dnd_bind("<<Drop>>", handle_replacement_drop)
+
+
+
+        status_card = ctk.CTkFrame(content_frame, corner_radius=12)
+
+        status_card.pack(fill="x", pady=(0, 12))
+
+
+
+        ctk.CTkLabel(
+
+            status_card,
+
+            text="Status",
+
+            font=ctk.CTkFont(size=14, weight="bold")
+
+        ).pack(anchor="w", padx=16, pady=(16, 6))
+
+
+
+        replace_progress_bar = ctk.CTkProgressBar(status_card, height=10, corner_radius=5)
+
+        replace_progress_bar.pack(fill="x", padx=16, pady=(0, 8))
+
+        replace_progress_bar.set(0)
+
+
+
+        replace_progress_detail = ctk.CTkLabel(
+
+            status_card,
+
+            text="Noch kein Austausch gestartet.",
+
+            font=ctk.CTkFont(size=11),
+
+            text_color=COLOR_TEXT_DIM
+
+        )
+
+        replace_progress_detail.pack(anchor="w", padx=16, pady=(0, 10))
+
+
+
+        dialog_ui = {
+
+            "progress_bar": replace_progress_bar,
+
+            "progress_detail": replace_progress_detail
+
+        }
+
+
+
+        button_row = ctk.CTkFrame(replace_window, fg_color=COLOR_CARD, corner_radius=10)
+
+        button_row.pack(fill="x", padx=16, pady=(0, 16))
+
+
+
+        def start_replacement():
+
+            replacement_file = replacement_entry.get().strip()
+
+            if not replacement_file:
+
+                messagebox.showwarning("Fehler", "Bitte eine LAS- oder LAZ-Datei auswählen!")
+
+                return
+
+
+
+            valid, message = validate_replacement_file(replacement_file)
+
+            if not valid:
+
+                messagebox.showerror("Fehler", message)
+
+                return
+
+
+
+            if not messagebox.askyesno(
+
+                "Austausch bestaetigen",
+
+                f"Die Punktwolkendaten von '{current_project.get('projekt', '')}' werden ersetzt.\n\n"
+
+                "Projektname, Projekt-ID und Link bleiben unverändert.\n\n"
+
+                "Moechten Sie fortfahren?"
+
+            ):
+
+                return
+
+
+
+            btn_replace.configure(state="disabled", text="Austausch läuft...")
+
+            btn_cancel.configure(state="disabled")
+
+            replace_window.protocol("WM_DELETE_WINDOW", lambda: None)
+
+
+
+            thread = threading.Thread(
+
+                target=replace_project_process,
+
+                args=(current_project, replacement_file, aws_access, aws_secret, load_projects),
+
+                kwargs={"ui": dialog_ui},
+
+                daemon=True
+
+            )
+
+            thread.start()
+
+
+
+            def check_thread():
+
+                if thread.is_alive():
+
+                    root.after(100, check_thread)
+
+                    return
+
+
+
+                if replace_window.winfo_exists():
+
+                    replace_window.protocol("WM_DELETE_WINDOW", close_replace_window)
+
+                    btn_replace.configure(state="normal", text="Punktwolke austauschen")
+
+                    btn_cancel.configure(state="normal")
+
+
+
+            root.after(100, check_thread)
+
+
+
+        btn_replace = ctk.CTkButton(
+
+            button_row,
+
+            text="Punktwolke austauschen",
+
+            fg_color=COLOR_SUCCESS,
+
+            hover_color=COLOR_SUCCESS_HOVER,
+
+            font=ctk.CTkFont(size=12, weight="bold"),
+
+            height=38,
+
+            command=start_replacement
+
+        )
+
+        btn_replace.pack(side="left")
+
+
+
+        btn_cancel = ctk.CTkButton(
+
+            button_row,
+
+            text="Schließen",
+
+            fg_color=COLOR_ACCENT,
+
+            hover_color=COLOR_ACCENT_HOVER,
+
+            height=38,
+
+            command=close_replace_window
+
+        )
+
+        btn_cancel.pack(side="right")
+
+
+
+    ctk.CTkButton(
+
+        btn_frame,
+
+        text="Im Browser öffnen",
+
+        fg_color=COLOR_ACCENT,
+
+        hover_color=COLOR_ACCENT_HOVER,
+
+        font=ctk.CTkFont(size=13),
+
+        height=36,
+
+        command=open_in_browser
+
+    ).pack(side="left", padx=(0, 8))
+
+
+
+    ctk.CTkButton(
+
+        btn_frame,
+
+        text="Link kopieren",
+
+        fg_color=COLOR_ACCENT,
+
+        hover_color=COLOR_ACCENT_HOVER,
+
+        font=ctk.CTkFont(size=13),
+
+        height=36,
+
+        command=copy_link
+
+    ).pack(side="left", padx=(0, 8))
+
+
+
+    ctk.CTkButton(
+
+        btn_frame,
+
+        text="Löschen",
+
+        fg_color=COLOR_ACCENT,
+
+        hover_color=COLOR_ACCENT_HOVER,
+
+        font=ctk.CTkFont(size=13),
+
+        height=36,
+
+        command=delete_project
+
+    ).pack(side="left", padx=(0, 8))
+
+
+
+    ctk.CTkButton(
+
+        btn_frame,
+
+        text="Punktwolke austauschen",
+
+        fg_color=COLOR_ACCENT,
+
+        hover_color=COLOR_ACCENT_HOVER,
+
+        font=ctk.CTkFont(size=13),
+
+        height=36,
+
+        command=open_replace_dialog
+
+    ).pack(side="left", padx=(0, 8))
+
+
+
+    def open_duplicate_dialog_main():
+
+        existing_dup_window = getattr(projects_page, "_duplicate_window", None)
+
+        if focus_existing_window(existing_dup_window):
+
+            return
+
+
+
+        project_info = get_selected_project()
+
+        if not project_info:
+
+            return
+
+
+
+        dup_window = ctk.CTkToplevel(root)
+
+        projects_page._duplicate_window = dup_window
+
+        dup_window.title("Projekt duplizieren")
+
+        dup_window.geometry("720x620")
+
+        dup_window.minsize(660, 560)
+
+        dup_window.transient(root)
+
+        dup_window.lift()
+
+        dup_window.focus_force()
+
+        dup_window.grab_set()
+
+
+
+        def close_dup_window():
+
+            if getattr(projects_page, "_duplicate_window", None) is dup_window:
+
+                projects_page._duplicate_window = None
+
+            try:
+
+                dup_window.grab_release()
+
+            except tk.TclError:
+
+                pass
+
+            dup_window.destroy()
+
+
+
+        dup_window.protocol("WM_DELETE_WINDOW", close_dup_window)
+
+
+
+        header = ctk.CTkFrame(dup_window, fg_color="transparent")
+
+        header.pack(fill="x", padx=20, pady=(16, 8))
+
+        ctk.CTkLabel(
+
+            header, text="Projekt duplizieren",
+
+            font=ctk.CTkFont(size=18, weight="bold")
+
+        ).pack(anchor="w")
+
+
+
+        info_frame = ctk.CTkFrame(dup_window, fg_color=COLOR_CARD, corner_radius=8)
+
+        info_frame.pack(fill="x", padx=20, pady=(0, 12))
+
+        ctk.CTkLabel(
+
+            info_frame, text="Quellprojekt:",
+
+            font=ctk.CTkFont(size=12, weight="bold"), text_color=COLOR_TEXT_DIM
+
+        ).pack(anchor="w", padx=12, pady=(8, 2))
+
+        ctk.CTkLabel(
+
+            info_frame,
+
+            text=f"{project_info.get('kunde', '')} - {project_info.get('projekt', '')}  (ID: {project_info.get('id', '')})",
+
+            font=ctk.CTkFont(size=12)
+
+        ).pack(anchor="w", padx=12, pady=(0, 8))
+
+
+
+        form_frame = ctk.CTkFrame(dup_window, fg_color="transparent")
+
+        form_frame.pack(fill="x", padx=20, pady=(0, 8))
+
+
+
+        ctk.CTkLabel(
+
+            form_frame, text="Neuer Kundenname:",
+
+            font=ctk.CTkFont(size=13, weight="bold")
+
+        ).pack(anchor="w", pady=(0, 4))
+
+        kunde_entry = ctk.CTkEntry(form_frame, height=36, font=ctk.CTkFont(size=13))
+
+        kunde_entry.pack(fill="x", pady=(0, 12))
+
+        kunde_entry.insert(0, project_info.get("kunde", ""))
+
+
+
+        ctk.CTkLabel(
+
+            form_frame, text="Neuer Projektname:",
+
+            font=ctk.CTkFont(size=13, weight="bold")
+
+        ).pack(anchor="w", pady=(0, 4))
+
+        projekt_entry = ctk.CTkEntry(form_frame, height=36, font=ctk.CTkFont(size=13))
+
+        projekt_entry.pack(fill="x", pady=(0, 12))
+
+        projekt_entry.insert(0, project_info.get("projekt", "") + " (Kopie)")
+
+
+
+        progress_frame = ctk.CTkFrame(dup_window, fg_color="transparent")
+
+        progress_frame.pack(fill="x", padx=20, pady=(0, 8))
+
+
+
+        dup_progress_bar = ctk.CTkProgressBar(progress_frame, height=8)
+
+        dup_progress_bar.pack(fill="x", pady=(0, 4))
+
+        dup_progress_bar.set(0)
+
+
+
+        dup_detail_label = ctk.CTkLabel(
+
+            progress_frame, text="", font=ctk.CTkFont(size=11), text_color=COLOR_TEXT_DIM
+
+        )
+
+        dup_detail_label.pack(anchor="w")
+
+
+
+        dup_log_box = ctk.CTkTextbox(progress_frame, height=90, font=ctk.CTkFont(size=11), state="disabled")
+
+        dup_log_box.pack(fill="both", expand=True, pady=(4, 0))
+
+
+
+        dup_ui = {
+
+            "progress_bar": dup_progress_bar,
+
+            "progress_detail": dup_detail_label,
+
+            "log": dup_log_box
+
+        }
+
+
+
+        btn_row = ctk.CTkFrame(dup_window, fg_color="transparent")
+
+        btn_row.pack(fill="x", padx=20, pady=(8, 16))
+
+
+
+        def start_duplicate():
+
+            new_kunde = kunde_entry.get().strip()
+
+            new_projekt = projekt_entry.get().strip()
+
+
+
+            if not new_kunde:
+
+                messagebox.showwarning("Eingabe fehlt", "Bitte einen Kundennamen eingeben.")
+
+                return
+
+            if not new_projekt:
+
+                messagebox.showwarning("Eingabe fehlt", "Bitte einen Projektnamen eingeben.")
+
+                return
+
+
+
+            btn_start.configure(state="disabled")
+
+            btn_cancel.configure(state="disabled")
+
+
+
+            def on_success(new_url):
+
+                btn_cancel.configure(state="normal", text="Schließen")
+
+                load_projects()
+
+                result = messagebox.askyesno(
+
+                    "Projekt dupliziert",
+
+                    f"Projekt wurde erfolgreich dupliziert!\n\n"
+
+                    f"Neuer Link:\n{new_url}\n\n"
+
+                    "Link in Zwischenablage kopieren?"
+
+                )
+
+                if result:
+
+                    dup_window.clipboard_clear()
+
+                    dup_window.clipboard_append(new_url)
+
+
+
+            thread = threading.Thread(
+
+                target=duplicate_project_process,
+
+                args=(project_info, new_kunde, new_projekt, aws_access, aws_secret),
+
+                kwargs={"on_success": on_success, "ui": dup_ui},
+
+                daemon=True
+
+            )
+
+            thread.start()
+
+
+
+        btn_start = ctk.CTkButton(
+
+            btn_row, text="Duplizieren",
+
+            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
+
+            font=ctk.CTkFont(size=13, weight="bold"),
+
+            height=38, command=start_duplicate
+
+        )
+
+        btn_start.pack(side="left", padx=(0, 8))
+
+
+
+        btn_cancel = ctk.CTkButton(
+
+            btn_row, text="Abbrechen",
+
+            fg_color=COLOR_CARD, hover_color="#3a3a4c",
+
+            font=ctk.CTkFont(size=13),
+
+            height=38, command=close_dup_window
+
+        )
+
+        btn_cancel.pack(side="right")
+
+
+
+    def open_download_dialog_main():
+
+        project_info = get_selected_project()
+
+        if not project_info:
+
+            return
+
+        open_project_download_dialog(root, project_info, aws_access, aws_secret, projects_page)
+
+
+
+    ctk.CTkButton(
+
+        btn_frame,
+
+        text="Duplizieren",
+
+        fg_color=COLOR_ACCENT,
+
+        hover_color=COLOR_ACCENT_HOVER,
+
+        font=ctk.CTkFont(size=13),
+
+        height=36,
+
+        command=open_duplicate_dialog_main
+
+    ).pack(side="left", padx=(0, 8))
+
+
+
+    ctk.CTkButton(
+
+        btn_frame,
+
+        text="Herunterladen",
+
+        fg_color=COLOR_SUCCESS,
+
+        hover_color=COLOR_SUCCESS_HOVER,
+
+        font=ctk.CTkFont(size=13),
+
+        height=36,
+
+        command=open_download_dialog_main
+
+    ).pack(side="left", padx=(0, 8))
+
+
+
+    def load_projects(selected_customer="Alle Kunden", search_term=""):
+
+        """Laedt Projekte von S3 und wendet Filter an."""
+
+        projects_by_id.clear()
+
+        for item in tree.get_children():
+
+            tree.delete(item)
+
+
+
+        try:
+
+            s3_client = create_s3_client(aws_access, aws_secret)
+
+            index_data = load_projects_index(s3_client)
+
+            projects = index_data.get("projects", [])
+
+
+
+            if not projects:
+
+                tree.insert("", "end", values=("", "", "Keine Projekte gefunden", "", ""))
+
+                return
+
+
+
+            unique_customers = sorted(set(p.get("kunde", "") for p in projects if p.get("kunde", "")))
+
+            customer_filter.configure(values=["Alle Kunden"] + unique_customers)
+
+
+
+            projects.sort(key=lambda x: x.get("datum", ""), reverse=True)
+
+            filtered_projects = []
+
+            search_lower = search_term.lower()
+
+
+
+            for proj in projects:
+
+                kunde = proj.get("kunde", "")
+
+                projekt = proj.get("projekt", "")
+
+
+
+                if selected_customer != "Alle Kunden" and kunde != selected_customer:
+
+                    continue
+
+                if search_term and search_lower not in projekt.lower() and search_lower not in kunde.lower():
+
+                    continue
+
+
+
+                filtered_projects.append(proj)
+
+
+
+            if not filtered_projects:
+
+                tree.insert("", "end", values=("", "", "Keine passenden Projekte gefunden", "", ""))
+
+                return
+
+
+
+            for proj in filtered_projects:
+
+                datum_str = proj.get("datum", "")
+
+                if datum_str and "T" in datum_str:
+
+                    try:
+
+                        dt = datetime.fromisoformat(datum_str)
+
+                        datum_str = dt.strftime("%Y-%m-%d %H:%M")
+
+                    except Exception:
+
+                        pass
+
+
+
+                project_id = proj.get("id", "")
+
+                projects_by_id[project_id] = proj
+
+                tree.insert("", "end", values=(
+
+                    project_id,
+
+                    proj.get("kunde", ""),
+
+                    proj.get("projekt", ""),
+
+                    datum_str,
+
+                    proj.get("link", "")
+
+                ))
+
+        except Exception as e:
+
+            messagebox.showerror("Fehler", f"Laden fehlgeschlagen:\n{e}")
+
+
+
+    load_projects()
+
+
+
+
+
+
 def show_local_conversion_view():
 
     """Rendert die lokale LAS/LAZ -> Potree Konvertierung im Hauptfenster."""
