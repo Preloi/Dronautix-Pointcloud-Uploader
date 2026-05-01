@@ -6,7 +6,7 @@ Stand: 2026-05-01
 
 - Repo: `Preloi/Dronautix-Pointcloud-Uploader`
 - Aktueller Branch: `develop`
-- Aktueller Release: `1.6.5`
+- Aktueller Release: `1.6.7`
 
 ## Systemkontext
 
@@ -43,14 +43,14 @@ Stand: 2026-05-01
   - `release_tag`
   - `installer_url`
 
-## Release 1.6.5
+## Release 1.6.7
 
-- Aktueller Release des Uploaders ist `1.6.5`.
+- Aktueller Release des Uploaders ist `1.6.7`.
 - Neue Uploads erzeugen anonyme Kurz-Links nur noch mit der technischen Projekt-ID.
 - UI-Versionsanzeige, Setup und Dateiversion ziehen ihre Versionsnummer zentral aus `app_version.py`.
 - Fuer Auto-Updates muss das Setup als GitHub-Release-Asset unter dem passenden Tag liegen:
-  - Tag: `v1.6.5`
-  - Asset: `Dronautix_Pointcloud_Uploader_Setup_1.6.5.exe`
+  - Tag: `v1.6.7`
+  - Asset: `Dronautix_Pointcloud_Uploader_Setup_1.6.7.exe`
 
 ## Wichtige Uploader-Details
 
@@ -105,7 +105,7 @@ Stand: 2026-05-01
 ## Release-Dateien
 
 - `dist/Dronautix_Pointcloud_Uploader.exe`
-- `Output/Dronautix_Pointcloud_Uploader_Setup_1.6.1.exe`
+- `Output/Dronautix_Pointcloud_Uploader_Setup_1.6.7.exe`
 - `Output/latest-release.json`
 
 ## Git-relevante Dateien fuer Releases
@@ -123,5 +123,5 @@ Stand: 2026-05-01
 
 - Fuer echte Live-Viewer-Aenderungen ist die `index.html` der separaten Viewer-Repo massgeblich, nicht `server_viewer/index.html`.
 - Falls CloudFront noch alte Assets liefert, gezielt invalidieren.
-- Die aktuelle Release-Linie steht auf `1.6.5`; Setup, Manifest und GitHub-Release-Asset muessen dieselbe Versionsnummer tragen.
+- Die aktuelle Release-Linie steht auf `1.6.7`; Setup, Manifest und GitHub-Release-Asset muessen dieselbe Versionsnummer tragen.
 - Das verbesserte Update-/Setup-Verhalten greift zuverlaessig erst ab installierter Version `1.2`.

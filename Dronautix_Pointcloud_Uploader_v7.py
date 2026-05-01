@@ -930,6 +930,74 @@ def validate_replacement_file(filepath):
 
 
 
+def resolve_replacement_source(source_path):
+
+    """Ordnet eine Austauschquelle einem unterstützten Typ zu."""
+
+    normalized_path = (source_path or "").strip().strip('"')
+
+    if not normalized_path:
+
+        return "", ""
+
+    if os.path.isdir(normalized_path):
+
+        return "potree_dir", normalized_path
+
+    if os.path.isfile(normalized_path):
+
+        if os.path.basename(normalized_path).lower() == "metadata.json":
+
+            return "potree_dir", os.path.dirname(normalized_path)
+
+        return "raw_file", normalized_path
+
+    return "", normalized_path
+
+
+
+def validate_potree_output_dir(directory_path):
+
+    """Prueft ob ein vorhandener Ordner wie ein Potree-Projekt aussieht."""
+
+    if not directory_path or not os.path.isdir(directory_path):
+
+        return False, "Bitte einen gueltigen Potree-Ordner auswählen."
+
+    metadata_path = os.path.join(directory_path, "metadata.json")
+
+    if not os.path.isfile(metadata_path):
+
+        return False, (
+
+            "Im gewählten Ordner wurde keine metadata.json gefunden. "
+
+            "Bitte den Hauptordner des konvertierten Potree-Projekts auswählen."
+
+        )
+
+    return True, "OK"
+
+
+
+def validate_replacement_source(source_path):
+
+    """Prueft ob eine Austauschquelle als LAS/LAZ oder Potree-Ordner geeignet ist."""
+
+    source_type, normalized_path = resolve_replacement_source(source_path)
+
+    if source_type == "raw_file":
+
+        return validate_replacement_file(normalized_path)
+
+    if source_type == "potree_dir":
+
+        return validate_potree_output_dir(normalized_path)
+
+    return False, "Bitte eine gueltige LAS/LAZ-Datei oder einen Potree-Ordner auswählen."
+
+
+
 def cleanup_local_files(output_path):
 
     """Loescht die lokalen konvertierten Dateien nach erfolgreichem Upload"""
@@ -2755,6 +2823,9 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
 
 
     temp_output_dir = None
+    prepared_output_dir = ""
+    replacement_source_type = ""
+    replacement_source_label = ""
 
 
 
@@ -2762,15 +2833,17 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
 
         ui_reset_progress(ui)
 
-        ui_set_step("Pruefe Austauschdatei...", 1, ui)
+        ui_set_step("Pruefe Austauschquelle...", 1, ui)
 
         ui_set_progress(0, ui)
 
-        ui_set_detail("Pruefe die ausgewaehlte Austauschdatei...", ui)
+        ui_set_detail("Pruefe die ausgewaehlte Datei oder den Potree-Ordner...", ui)
 
 
 
-        valid, message = validate_replacement_file(replacement_file)
+        replacement_source_type, normalized_replacement_source = resolve_replacement_source(replacement_file)
+
+        valid, message = validate_replacement_source(replacement_file)
 
         if not valid:
 
@@ -2810,32 +2883,6 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
 
 
 
-        if not converter_path:
-
-            ui_log("[AUSTAUSCH] [FEHLER] Kein Potree Converter verfügbar", ui)
-
-            root.after(0, lambda: messagebox.showwarning(
-
-                "Fehler",
-
-                "Mitgelieferter Potree Converter nicht gefunden. Bitte Build/Projektdateien pruefen oder einen Override-Pfad konfigurieren!"
-
-            ))
-
-            return
-
-
-
-        if not output_base_dir:
-
-            ui_log("[AUSTAUSCH] [FEHLER] Output-Ordner nicht konfiguriert!", ui)
-
-            root.after(0, lambda: messagebox.showwarning("Fehler", "Bitte einen Output-Ordner in den Einstellungen angeben!"))
-
-            return
-
-
-
         if not s3_prefix or not project_id:
 
             ui_log("[AUSTAUSCH] [FEHLER] Projektdaten unvollständig", ui)
@@ -2848,31 +2895,76 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
 
         ui_log(f"[AUSTAUSCH] Starte Datenaustausch für Projekt '{project_name}' ({project_id})", ui)
 
-        ui_log(f"[AUSTAUSCH] Neue Quelldatei: {os.path.basename(replacement_file)}", ui)
-
         ui_log(f"[AUSTAUSCH] Ziel bleibt unverändert: {s3_prefix}", ui)
 
 
+        if replacement_source_type == "potree_dir":
 
-        ui_set_step("Konvertiere mit Potree...", 2, ui)
+            prepared_output_dir = normalized_replacement_source
 
-        ui_set_progress(0, ui)
+            replacement_source_label = os.path.basename(prepared_output_dir.rstrip("\\/")) or prepared_output_dir
 
-        ui_set_detail("Starte den Potree Converter...", ui)
+            ui_log(f"[AUSTAUSCH] Verwende vorhandenen Potree-Ordner: {prepared_output_dir}", ui)
+
+            ui_set_step("Pruefe Potree-Ordner...", 2, ui)
+
+            ui_set_progress(0.1, ui)
+
+            ui_set_detail("Bereits konvertierte Punktwolken werden direkt verwendet...", ui)
+
+        else:
+
+            replacement_source_label = os.path.basename(normalized_replacement_source)
+
+            if not converter_path:
+
+                ui_log("[AUSTAUSCH] [FEHLER] Kein Potree Converter verfügbar", ui)
+
+                root.after(0, lambda: messagebox.showwarning(
+
+                    "Fehler",
+
+                    "Mitgelieferter Potree Converter nicht gefunden. Bitte Build/Projektdateien pruefen oder einen Override-Pfad konfigurieren!"
+
+                ))
+
+                return
 
 
 
-        temp_output_dir = os.path.join(
+            if not output_base_dir:
 
-            output_base_dir,
+                ui_log("[AUSTAUSCH] [FEHLER] Output-Ordner nicht konfiguriert!", ui)
 
-            "_project_replacements",
+                root.after(0, lambda: messagebox.showwarning("Fehler", "Bitte einen Output-Ordner in den Einstellungen angeben!"))
 
-            f"{project_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                return
 
-        )
 
-        run_potree_conversion(replacement_file, converter_path, temp_output_dir, ui=ui)
+
+            ui_log(f"[AUSTAUSCH] Neue Quelldatei: {replacement_source_label}", ui)
+
+            ui_set_step("Konvertiere mit Potree...", 2, ui)
+
+            ui_set_progress(0, ui)
+
+            ui_set_detail("Starte den Potree Converter...", ui)
+
+
+
+            temp_output_dir = os.path.join(
+
+                output_base_dir,
+
+                "_project_replacements",
+
+                f"{project_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+            )
+
+            prepared_output_dir = temp_output_dir
+
+            run_potree_conversion(normalized_replacement_source, converter_path, temp_output_dir, ui=ui)
 
 
 
@@ -2906,17 +2998,17 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
 
         existing_keys = collect_project_objects(s3_client, s3_prefix)
 
-        files_to_upload = collect_upload_files("potree", s3_prefix, output_dir=temp_output_dir)
+        files_to_upload = collect_upload_files("potree", s3_prefix, output_dir=prepared_output_dir)
 
 
 
         if not files_to_upload:
 
-            ui_log("[AUSTAUSCH] [FEHLER] Keine konvertierten Dateien zum Upload gefunden!", ui)
+            ui_log("[AUSTAUSCH] [FEHLER] Keine Potree-Dateien zum Upload gefunden!", ui)
 
-            log("[AUSTAUSCH] [FEHLER] Keine konvertierten Dateien zum Upload gefunden!")
+            log("[AUSTAUSCH] [FEHLER] Keine Potree-Dateien zum Upload gefunden!")
 
-            root.after(0, lambda: messagebox.showerror("Fehler", "Keine konvertierten Dateien zum Upload gefunden!"))
+            root.after(0, lambda: messagebox.showerror("Fehler", "Keine Potree-Dateien zum Upload gefunden!"))
 
             return
 
@@ -2960,9 +3052,17 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
 
         ui_set_step("Raeume auf...", 5, ui)
 
-        ui_set_detail("Entferne temporaere Konvertierungsdaten...", ui)
+        if temp_output_dir:
 
-        cleanup_local_files(temp_output_dir)
+            ui_set_detail("Entferne temporaere Konvertierungsdaten...", ui)
+
+            cleanup_local_files(temp_output_dir)
+
+        else:
+
+            ui_set_detail("Keine lokalen Temp-Daten zu entfernen.", ui)
+
+            ui_log("[AUSTAUSCH] Vorhandener Potree-Ordner bleibt lokal unverändert", ui)
 
 
 
@@ -2978,6 +3078,8 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
 
         ui_log(f"Projekt: {project_name} ({project_id})", ui)
 
+        ui_log(f"Quelle: {replacement_source_label}", ui)
+
         ui_log(f"Link unverändert: {project_link}", ui)
 
         ui_log("=" * 50, ui)
@@ -2989,6 +3091,8 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
         log("PROJEKTDATEN ERFOLGREICH AUSGETAUSCHT")
 
         log(f"Projekt: {project_name} ({project_id})")
+
+        log(f"Quelle: {replacement_source_label}")
 
         log(f"Link unverändert: {project_link}")
 
@@ -4386,7 +4490,7 @@ def show_projects_view():
 
             height=34,
 
-            placeholder_text="Neue LAS- oder LAZ-Datei für dieses Projekt auswählen"
+            placeholder_text="Neue LAS/LAZ-Datei oder Potree-Ordner für dieses Projekt auswählen"
 
         )
 
@@ -4394,15 +4498,21 @@ def show_projects_view():
 
 
 
-        def set_replacement_file(file_path):
+        def set_replacement_source(source_path):
 
             replacement_entry.delete(0, tk.END)
 
-            replacement_entry.insert(0, file_path)
+            replacement_entry.insert(0, source_path)
+
+            source_type, normalized_source = resolve_replacement_source(source_path)
+
+            source_name = os.path.basename(normalized_source.rstrip("\\/")) if normalized_source else source_path
+
+            source_caption = "Potree-Ordner erkannt" if source_type == "potree_dir" else "Datei erkannt"
 
             drop_label_replace.configure(
 
-                text=f"Datei erkannt\n\n{os.path.basename(file_path)}\n\nAustausch unten manuell per Button starten"
+                text=f"{source_caption}\n\n{source_name}\n\nAustausch unten manuell per Button starten"
 
             )
 
@@ -4414,7 +4524,7 @@ def show_projects_view():
 
             file_path = filedialog.askopenfilename(
 
-                title="Neue LAS- oder LAZ-Datei für den Projektaustausch wählen",
+                title="Neue LAS/LAZ-Datei für den Projektaustausch wählen",
 
                 filetypes=[("LAS/LAZ", "*.laz *.las"), ("Alle Dateien", "*.*")]
 
@@ -4422,13 +4532,33 @@ def show_projects_view():
 
             if file_path:
 
-                set_replacement_file(file_path)
+                set_replacement_source(file_path)
+
+
+
+        def select_replacement_folder():
+
+            folder_path = filedialog.askdirectory(
+
+                title="Konvertierten Potree-Ordner für den Projektaustausch wählen"
+
+            )
+
+            if folder_path:
+
+                set_replacement_source(folder_path)
+
+
+
+        source_button_row = ctk.CTkFrame(upload_card, fg_color="transparent")
+
+        source_button_row.pack(fill="x", padx=16, pady=(0, 10))
 
 
 
         ctk.CTkButton(
 
-            upload_card,
+            source_button_row,
 
             text="LAS/LAZ-Datei wählen",
 
@@ -4440,7 +4570,25 @@ def show_projects_view():
 
             height=34
 
-        ).pack(anchor="w", padx=16, pady=(0, 10))
+        ).pack(side="left", padx=(0, 8))
+
+
+
+        ctk.CTkButton(
+
+            source_button_row,
+
+            text="Potree-Ordner wählen",
+
+            command=select_replacement_folder,
+
+            fg_color=COLOR_ACCENT,
+
+            hover_color=COLOR_ACCENT_HOVER,
+
+            height=34
+
+        ).pack(side="left")
 
 
 
@@ -4470,7 +4618,7 @@ def show_projects_view():
 
             drop_frame_replace,
 
-            text="Datei hier hineinziehen\n\n(nur .las oder .laz)",
+            text="Datei oder Potree-Ordner hier hineinziehen\n\n(.las, .laz oder konvertierter Potree-Ordner)",
 
             bg="#1e1e2e",
 
@@ -4496,13 +4644,13 @@ def show_projects_view():
 
         def handle_replacement_drop(event):
 
-            file_path = extract_dropped_file(event.data)
+            source_path = extract_dropped_file(event.data)
 
-            if os.path.isfile(file_path):
+            if os.path.isfile(source_path) or os.path.isdir(source_path):
 
-                set_replacement_file(file_path)
+                set_replacement_source(source_path)
 
-                valid, message = validate_replacement_file(file_path)
+                valid, message = validate_replacement_source(source_path)
 
                 if not valid:
 
@@ -4586,7 +4734,7 @@ def show_projects_view():
 
 
 
-            valid, message = validate_replacement_file(replacement_file)
+            valid, message = validate_replacement_source(replacement_file)
 
             if not valid:
 
