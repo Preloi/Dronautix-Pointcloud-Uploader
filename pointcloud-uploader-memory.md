@@ -1,12 +1,12 @@
 # Pointcloud Uploader Memory
 
-Stand: 2026-05-01
+Stand: 2026-05-07
 
 ## Git
 
 - Repo: `Preloi/Dronautix-Pointcloud-Uploader`
-- Aktueller Branch: `develop`
-- Aktueller Release: `1.6.7`
+- Aktueller Branch: `master`
+- Aktueller Release: `1.7.8`
 
 ## Systemkontext
 
@@ -42,10 +42,22 @@ Stand: 2026-05-01
   - `repo_name`
   - `release_tag`
   - `installer_url`
+  - `installer_sha256`
+
+## Release 1.7.8
+
+- Aktueller Release des Uploaders ist `1.7.8`.
+- Multi-Punktwolken-Upload schreibt `project.pointclouds[]` und der Viewer laedt alle sichtbaren Eintraege.
+- Single-Uploads bleiben rueckwaertskompatibel ueber denselben Kurz-ID-Link moeglich.
+- AWS Secret wird in der lokalen Config nicht mehr im Klartext geschrieben, sondern per Windows DPAPI geschuetzt.
+- Auto-Update prueft gepinnten GitHub-Release-Pfad, SHA-256 und Authenticode-Signatur vor dem Start des Installers.
+- Fuer Auto-Updates muss das Setup als GitHub-Release-Asset unter dem passenden Tag liegen:
+  - Tag: `v1.7.8`
+  - Asset: `Dronautix_Pointcloud_Uploader_Setup_1.7.8.exe`
 
 ## Release 1.6.7
 
-- Aktueller Release des Uploaders ist `1.6.7`.
+- Release des Uploaders war `1.6.7`.
 - Neue Uploads erzeugen anonyme Kurz-Links nur noch mit der technischen Projekt-ID.
 - UI-Versionsanzeige, Setup und Dateiversion ziehen ihre Versionsnummer zentral aus `app_version.py`.
 - Fuer Auto-Updates muss das Setup als GitHub-Release-Asset unter dem passenden Tag liegen:
@@ -56,6 +68,8 @@ Stand: 2026-05-01
 
 - COPC-Dateien (`.copc.laz`) werden direkt nach S3 hochgeladen.
 - Klassische `.las/.laz` laufen weiter ueber den Potree Converter.
+- Neue Multi-Punktwolken-Projekte werden additiv ueber `project.pointclouds[]` im `projects_index.json` beschrieben.
+- Alte Einzelprojekte mit `viewer_path` und bestehende Links bleiben rueckwaertskompatibel unveraendert.
 - Der Loeschablauf ist robust aufgebaut:
   - S3-Objekte werden zuerst geloescht
   - `deleted_projects.json` wird dedupliziert aktualisiert
@@ -74,6 +88,7 @@ Stand: 2026-05-01
 ## UI-Stand
 
 - Drag-and-Drop-Feld zeigt nach Dateiauswahl oder Drop den kompletten Dateipfad an.
+- Im Upload koennen mehrere `.las`, `.laz` oder `.copc.laz` Dateien fuer ein gemeinsames Projekt ausgewaehlt werden.
 - Drag-and-Drop-Feld im Hauptfenster wurde etwas kompakter gemacht.
 - Die Kopfzeile `Upload und Verwaltung im selben Fenster` wurde aus dem Hauptfenster entfernt.
 - Die Seitenleiste enthält zusätzlich die Ansicht `Lokale Konvertierung`.
@@ -105,7 +120,7 @@ Stand: 2026-05-01
 ## Release-Dateien
 
 - `dist/Dronautix_Pointcloud_Uploader.exe`
-- `Output/Dronautix_Pointcloud_Uploader_Setup_1.6.7.exe`
+- `Output/Dronautix_Pointcloud_Uploader_Setup_1.7.8.exe`
 - `Output/latest-release.json`
 
 ## Git-relevante Dateien fuer Releases
@@ -123,5 +138,6 @@ Stand: 2026-05-01
 
 - Fuer echte Live-Viewer-Aenderungen ist die `index.html` der separaten Viewer-Repo massgeblich, nicht `server_viewer/index.html`.
 - Falls CloudFront noch alte Assets liefert, gezielt invalidieren.
-- Die aktuelle Release-Linie steht auf `1.6.7`; Setup, Manifest und GitHub-Release-Asset muessen dieselbe Versionsnummer tragen.
+- Die aktuelle Release-Linie steht auf `1.7.8`; Setup, Manifest und GitHub-Release-Asset muessen dieselbe Versionsnummer tragen.
+- Ab `1.7.8` akzeptiert der Auto-Updater nur noch gueltig signierte Installer. Neue Releases muessen vor Upload code-signiert werden.
 - Das verbesserte Update-/Setup-Verhalten greift zuverlaessig erst ab installierter Version `1.2`.

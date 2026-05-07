@@ -278,6 +278,28 @@
             return `./pointclouds/${normalizedViewerPath}/metadata.json`;
         };
 
+        const buildPointcloudEntry = (pointcloudEntry, fallbackName) => {
+            const rawViewerPath = pointcloudEntry.viewer_path ||
+                pointcloudEntry.viewerPath ||
+                pointcloudEntry.path ||
+                pointcloudEntry.url ||
+                pointcloudEntry.s3_path ||
+                '';
+            let viewerPath = normalizeViewerPath(rawViewerPath);
+            const pointcloudFormat = typeof pointcloudEntry.format === 'string'
+                ? pointcloudEntry.format.toLowerCase()
+                : '';
+
+            if (pointcloudFormat === 'copc' && viewerPath && !viewerPath.toLowerCase().endsWith('.copc.laz')) {
+                viewerPath = `${viewerPath}/source.copc.laz`;
+            }
+
+            return {
+                viewerPath,
+                displayName: pointcloudEntry.name || fallbackName,
+            };
+        };
+
         const resolveProjectConfig = async (projectId) => {
             if (!projectId) {
                 return null;
@@ -285,8 +307,11 @@
 
             if (projectId.includes('/')) {
                 return {
-                    viewerPath: projectId,
                     displayName: projectId,
+                    pointclouds: [{
+                        viewerPath: projectId,
+                        displayName: projectId,
+                    }],
                 };
             }
 
@@ -314,30 +339,77 @@
             const projectFormat = typeof matchedProject.format === 'string'
                 ? matchedProject.format.toLowerCase()
                 : '';
+            const displayName = buildProjectDisplayName(matchedProject, projectId);
+
+            if (projectFormat === 'multi' && Array.isArray(matchedProject.pointclouds)) {
+                const pointclouds = matchedProject.pointclouds
+                    .filter(pointcloud => pointcloud && pointcloud.visible !== false)
+                    .map((pointcloud, index) => buildPointcloudEntry(
+                        pointcloud,
+                        `${displayName} ${index + 1}`
+                    ))
+                    .filter(pointcloud => pointcloud.viewerPath);
+
+                return {
+                    displayName,
+                    pointclouds,
+                };
+            }
+
             const viewerPath = projectFormat === 'copc' && !baseViewerPath.toLowerCase().endsWith('.copc.laz')
                 ? `${baseViewerPath}/source.copc.laz`
                 : baseViewerPath;
 
             return {
-                viewerPath,
-                displayName: buildProjectDisplayName(matchedProject, projectId),
+                displayName,
+                pointclouds: [{
+                    viewerPath,
+                    displayName,
+                }],
             };
         };
 
+        const configureLoadedPointcloud = (pointcloud) => {
+            let material = pointcloud.material;
+            material.size = 0.5;
+            material.minSize = 1;
+            material.pointSizeType = Potree.PointSizeType.ADAPTIVE;
+            material.shape = Potree.PointShape.CIRCLE;
+            material.activeAttributeName = "rgba";
+
+            viewer.scene.addPointCloud(pointcloud);
+        };
+
+        const loadPointcloudEntry = (entry) => new Promise((resolve, reject) => {
+            const assetPath = buildProjectAssetPath(entry.viewerPath);
+
+            Potree.loadPointCloud(assetPath, entry.displayName, e => {
+                if (!e || !e.pointcloud) {
+                    reject(new Error(`Punktwolke konnte nicht geladen werden: ${entry.displayName}`));
+                    return;
+                }
+
+                configureLoadedPointcloud(e.pointcloud);
+                resolve();
+            });
+        });
+
         const projectConfig = await resolveProjectConfig(rawProjectId);
 
-        if (projectConfig && projectConfig.viewerPath) {
+        if (projectConfig && Array.isArray(projectConfig.pointclouds) && projectConfig.pointclouds.length > 0) {
 
             const finalName = projectDisplayName ? projectDisplayName : projectConfig.displayName;
-            const path = buildProjectAssetPath(projectConfig.viewerPath);
 
             try {
-                const response = await fetch(path, { method: 'HEAD', cache: 'no-store' });
-                if (!response.ok) {
-                    showUnavailableProjectPage(
-                        "Dieses Projekt ist nicht mehr online verfügbar.<br>Die zugehörigen Dateien wurden bereits entfernt."
-                    );
-                    return;
+                for (const pointcloud of projectConfig.pointclouds) {
+                    const path = buildProjectAssetPath(pointcloud.viewerPath);
+                    const response = await fetch(path, { method: 'HEAD', cache: 'no-store' });
+                    if (!response.ok) {
+                        showUnavailableProjectPage(
+                            "Dieses Projekt ist nicht mehr online verfügbar.<br>Die zugehörigen Dateien wurden bereits entfernt."
+                        );
+                        return;
+                    }
                 }
             } catch (error) {
                 console.warn("Projektdatei konnte nicht geprüft werden:", error);
@@ -347,28 +419,18 @@
                 return;
             }
 
-            // Laden
-            Potree.loadPointCloud(path, finalName, e => {
-                if (!e || !e.pointcloud) {
-                    showUnavailableProjectPage(
-                        "Dieses Projekt ist nicht mehr online verfügbar.<br>Die zugehörigen Dateien wurden bereits entfernt."
-                    );
-                    return;
+            try {
+                for (const pointcloud of projectConfig.pointclouds) {
+                    await loadPointcloudEntry(pointcloud);
                 }
-
-                let scene = viewer.scene;
-                let pointcloud = e.pointcloud;
-
-                let material = pointcloud.material;
-                material.size = 0.5;
-                material.minSize = 1;
-                material.pointSizeType = Potree.PointSizeType.ADAPTIVE;
-                material.shape = Potree.PointShape.CIRCLE;
-                material.activeAttributeName = "rgba";
-
-                scene.addPointCloud(pointcloud);
                 viewer.fitToScreen();
-            });
+            } catch (error) {
+                console.warn("Punktwolke konnte nicht geladen werden:", error);
+                showUnavailableProjectPage(
+                    "Dieses Projekt ist nicht mehr online verfügbar.<br>Die zugehörigen Dateien wurden bereits entfernt."
+                );
+                return;
+            }
 
             // Setzt den Titel im Browser-Tab
             document.title = finalName;

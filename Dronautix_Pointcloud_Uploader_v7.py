@@ -14,6 +14,14 @@ import uuid
 
 import csv
 
+import base64
+
+import ctypes
+
+from ctypes import wintypes
+
+import hashlib
+
 import urllib.error
 
 import urllib.parse
@@ -88,6 +96,10 @@ UPDATE_MANIFEST_URL = (
 
 UPDATE_DOWNLOAD_DIR = os.path.join(APPDATA_DIR, "updates")
 
+UPDATE_TRUSTED_PUBLISHERS = ("Dronautix",)
+
+SECRET_STORAGE_PREFIX = "dpapi:"
+
 
 
 # S3 Pfad fuer Index-Dateien
@@ -145,6 +157,8 @@ nav_buttons = {}
 app_views = {}
 
 current_view_name = "upload"
+
+selected_upload_files = []
 
 
 
@@ -450,6 +464,168 @@ def log(message):
 
 
 
+class _DataBlob(ctypes.Structure):
+
+    _fields_ = [
+
+        ("cbData", wintypes.DWORD),
+
+        ("pbData", ctypes.POINTER(ctypes.c_byte)),
+
+    ]
+
+
+
+def _dpapi_transform(secret_value, protect=True):
+
+    """Verschluesselt/entschluesselt Secrets mit Windows DPAPI fuer den aktuellen Benutzer."""
+
+    if not secret_value or sys.platform != "win32":
+
+        return ""
+
+    data = secret_value.encode("utf-8") if protect else base64.b64decode(secret_value)
+
+    input_buffer = ctypes.create_string_buffer(data)
+
+    input_blob = _DataBlob(
+
+        len(data),
+
+        ctypes.cast(input_buffer, ctypes.POINTER(ctypes.c_byte))
+
+    )
+
+    output_blob = _DataBlob()
+
+    crypt32 = ctypes.windll.crypt32
+
+    kernel32 = ctypes.windll.kernel32
+
+    if protect:
+
+        ok = crypt32.CryptProtectData(
+
+            ctypes.byref(input_blob), None, None, None, None, 0, ctypes.byref(output_blob)
+
+        )
+
+    else:
+
+        ok = crypt32.CryptUnprotectData(
+
+            ctypes.byref(input_blob), None, None, None, None, 0, ctypes.byref(output_blob)
+
+        )
+
+    if not ok:
+
+        return ""
+
+    try:
+
+        result = ctypes.string_at(output_blob.pbData, output_blob.cbData)
+
+        return base64.b64encode(result).decode("ascii") if protect else result.decode("utf-8")
+
+    finally:
+
+        kernel32.LocalFree(output_blob.pbData)
+
+
+
+def protect_secret(secret_value):
+
+    """Speichert Secrets nicht im Klartext, sondern per DPAPI geschuetzt."""
+
+    secret_value = str(secret_value or "")
+
+    if not secret_value:
+
+        return ""
+
+    if secret_value.startswith(SECRET_STORAGE_PREFIX):
+
+        return secret_value
+
+    encrypted = _dpapi_transform(secret_value, protect=True)
+
+    return f"{SECRET_STORAGE_PREFIX}{encrypted}" if encrypted else ""
+
+
+
+def unprotect_secret(stored_value):
+
+    """Liest ein DPAPI-Secret fuer die Laufzeit wieder ein."""
+
+    stored_value = str(stored_value or "")
+
+    if not stored_value:
+
+        return ""
+
+    if not stored_value.startswith(SECRET_STORAGE_PREFIX):
+
+        return stored_value
+
+    encrypted = stored_value[len(SECRET_STORAGE_PREFIX):]
+
+    return _dpapi_transform(encrypted, protect=False)
+
+
+
+def normalize_config(config):
+
+    """Normalisiert alte und neue Config-Dateien fuer die App-Laufzeit."""
+
+    if not isinstance(config, dict):
+
+        return {"first_run": True}
+
+    encrypted_secret = config.get("aws_secret_encrypted", "")
+
+    if encrypted_secret:
+
+        config["aws_secret"] = unprotect_secret(encrypted_secret)
+
+    else:
+
+        config["aws_secret"] = str(config.get("aws_secret", ""))
+
+    return config
+
+
+
+def persistable_config(config):
+
+    """Entfernt Klartext-Secrets vor dem Schreiben der Config-Datei."""
+
+    clean_config = dict(config)
+
+    plain_secret = str(clean_config.get("aws_secret", ""))
+
+    if plain_secret:
+
+        protected_secret = protect_secret(plain_secret)
+
+        if protected_secret:
+
+            clean_config["aws_secret_encrypted"] = protected_secret
+
+        else:
+
+            clean_config.pop("aws_secret_encrypted", None)
+
+    else:
+
+        clean_config.pop("aws_secret_encrypted", None)
+
+    clean_config.pop("aws_secret", None)
+
+    return clean_config
+
+
+
 def save_config(aws_access=None, aws_secret=None, converter_path=None, output_dir=None):
 
     """Speichert die Einstellungen in AppData"""
@@ -484,7 +660,7 @@ def save_config(aws_access=None, aws_secret=None, converter_path=None, output_di
 
         with open(CONFIG_FILE, "w") as f:
 
-            json.dump(config, f, indent=2)
+            json.dump(persistable_config(config), f, indent=2)
 
         return True
 
@@ -508,7 +684,7 @@ def load_config():
 
             with open(CONFIG_FILE, "r") as f:
 
-                return json.load(f)
+                return normalize_config(json.load(f))
 
         except:
 
@@ -716,6 +892,158 @@ def get_update_installer_url(manifest):
 
 
 
+def is_safe_installer_name(installer_name):
+
+    """Verhindert Pfadtricks im Manifest-Installername."""
+
+    if not installer_name or os.path.basename(installer_name) != installer_name:
+
+        return False
+
+    return installer_name.lower().endswith(".exe")
+
+
+
+def validate_update_download_info(manifest, installer_url, installer_name):
+
+    """Prueft, dass Updates nur aus dem gepinnten GitHub-Release-Pfad kommen."""
+
+    remote_version = str(manifest.get("version", "")).strip()
+
+    expected_tag = f"v{remote_version}"
+
+    if not remote_version or not is_safe_installer_name(installer_name):
+
+        return False, "ungueltige Versions- oder Installerangabe"
+
+    repo_owner = str(manifest.get("repo_owner", UPDATE_REPO_OWNER)).strip()
+
+    repo_name = str(manifest.get("repo_name", UPDATE_REPO_NAME)).strip()
+
+    release_tag = str(manifest.get("release_tag", expected_tag)).strip()
+
+    if repo_owner != UPDATE_REPO_OWNER or repo_name != UPDATE_REPO_NAME or release_tag != expected_tag:
+
+        return False, "Update-Manifest verweist nicht auf das erwartete Release"
+
+    parsed_url = urllib.parse.urlparse(installer_url)
+
+    expected_path = (
+
+        f"/{UPDATE_REPO_OWNER}/{UPDATE_REPO_NAME}/releases/download/"
+
+        f"{urllib.parse.quote(expected_tag, safe='')}/{urllib.parse.quote(installer_name, safe='')}"
+
+    )
+
+    if parsed_url.scheme != "https" or parsed_url.netloc.lower() != "github.com":
+
+        return False, "Installer-URL muss auf https://github.com zeigen"
+
+    if parsed_url.path != expected_path:
+
+        return False, "Installer-URL passt nicht zum erwarteten Release-Pfad"
+
+    return True, "OK"
+
+
+
+def calculate_file_sha256(file_path):
+
+    """Berechnet den SHA-256 Hash einer Datei."""
+
+    sha256 = hashlib.sha256()
+
+    with open(file_path, "rb") as file:
+
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+
+            sha256.update(chunk)
+
+    return sha256.hexdigest()
+
+
+
+def verify_installer_hash(installer_path, expected_sha256):
+
+    """Validiert den Installer gegen den Hash aus dem Release-Manifest."""
+
+    expected_sha256 = str(expected_sha256 or "").strip().lower()
+
+    if not re.fullmatch(r"[a-f0-9]{64}", expected_sha256):
+
+        return False, "Update-Manifest enthaelt keinen gueltigen SHA-256 Hash"
+
+    actual_sha256 = calculate_file_sha256(installer_path)
+
+    if actual_sha256.lower() != expected_sha256:
+
+        return False, "Installer-Hash stimmt nicht mit dem Release-Manifest ueberein"
+
+    return True, "OK"
+
+
+
+def verify_installer_signature(installer_path):
+
+    """Prueft die Authenticode-Signatur des Installers."""
+
+    if sys.platform != "win32":
+
+        return False, "Authenticode-Pruefung ist nur unter Windows verfuegbar"
+
+    script = (
+
+        "$sig = Get-AuthenticodeSignature -LiteralPath $args[0]; "
+
+        "$subject = ''; "
+
+        "if ($sig.SignerCertificate) { $subject = $sig.SignerCertificate.Subject }; "
+
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+
+        "[pscustomobject]@{ Status=[string]$sig.Status; Subject=$subject } | ConvertTo-Json -Compress"
+
+    )
+
+    result = subprocess.run(
+
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script, installer_path],
+
+        capture_output=True,
+
+        text=True,
+
+        timeout=20
+
+    )
+
+    if result.returncode != 0 or not result.stdout.strip():
+
+        return False, "Authenticode-Signatur konnte nicht geprueft werden"
+
+    try:
+
+        signature_info = json.loads(result.stdout.strip())
+
+    except json.JSONDecodeError:
+
+        return False, "Authenticode-Pruefung lieferte kein gueltiges Ergebnis"
+
+    if signature_info.get("Status") != "Valid":
+
+        return False, f"Installer-Signatur ist nicht gueltig: {signature_info.get('Status', 'Unknown')}"
+
+    subject = signature_info.get("Subject", "")
+
+    if UPDATE_TRUSTED_PUBLISHERS and not any(name in subject for name in UPDATE_TRUSTED_PUBLISHERS):
+
+        return False, "Installer-Signatur stammt nicht von einem erwarteten Publisher"
+
+    return True, "OK"
+
+
+
 def download_update_installer(installer_url, installer_name):
 
     """Laedt den Installer in den lokalen Update-Cache herunter."""
@@ -792,7 +1120,13 @@ def check_for_available_update():
 
         installer_url = get_update_installer_url(manifest)
 
-        if not installer_name or not installer_url:
+        download_valid, download_message = validate_update_download_info(
+
+            manifest, installer_url, installer_name
+
+        )
+
+        if not installer_name or not installer_url or not download_valid:
 
             log(f"[UPDATE] Neue Version {remote_version} gefunden, aber keine gueltige Installer-URL im Manifest")
 
@@ -800,7 +1134,9 @@ def check_for_available_update():
 
                 "Update verfügbar",
 
-                f"Version {remote_version} ist verfügbar, aber die Download-Informationen sind unvollständig."
+                f"Version {remote_version} ist verfügbar, aber die Download-Informationen sind ungueltig.\n\n"
+
+                f"{download_message}"
 
             )
 
@@ -841,6 +1177,38 @@ def check_for_available_update():
             log(f"[UPDATE] Lade Installer herunter: {installer_url}")
 
             installer_path = download_update_installer(installer_url, installer_name)
+
+            hash_ok, hash_message = verify_installer_hash(
+
+                installer_path, manifest.get("installer_sha256", "")
+
+            )
+
+            if not hash_ok:
+
+                try:
+
+                    os.remove(installer_path)
+
+                except OSError:
+
+                    pass
+
+                raise RuntimeError(hash_message)
+
+            signature_ok, signature_message = verify_installer_signature(installer_path)
+
+            if not signature_ok:
+
+                try:
+
+                    os.remove(installer_path)
+
+                except OSError:
+
+                    pass
+
+                raise RuntimeError(signature_message)
 
             subprocess.Popen([installer_path, "/CLOSEAPPLICATIONS"], shell=False)
 
@@ -901,6 +1269,162 @@ def detect_input_format(filepath):
     filename = os.path.basename(filepath).lower()
 
     return "copc" if filename.endswith(".copc.laz") else "potree"
+
+
+
+def normalize_upload_sources(sources):
+
+    """Normalisiert eine einzelne Datei oder eine Dateiliste fuer den Upload."""
+
+    if isinstance(sources, (list, tuple)):
+
+        raw_sources = sources
+
+    else:
+
+        raw_sources = [sources]
+
+    normalized_sources = []
+
+    seen_paths = set()
+
+    for source in raw_sources:
+
+        path = str(source or "").strip().strip('"').strip("{}")
+
+        if not path:
+
+            continue
+
+        normalized_path = os.path.normpath(path)
+
+        lookup_key = os.path.normcase(os.path.abspath(normalized_path))
+
+        if lookup_key in seen_paths:
+
+            continue
+
+        seen_paths.add(lookup_key)
+
+        normalized_sources.append(normalized_path)
+
+    return normalized_sources
+
+
+
+def get_pointcloud_display_name(source_path):
+
+    """Erzeugt einen lesbaren Namen fuer eine einzelne Punktwolke."""
+
+    filename = os.path.basename(source_path or "").strip()
+
+    lower_name = filename.lower()
+
+    if lower_name.endswith(".copc.laz"):
+
+        return filename[:-9] or "Punktwolke"
+
+    name, _ = os.path.splitext(filename)
+
+    return name or "Punktwolke"
+
+
+
+def make_unique_cloud_slug(source_path, used_slugs):
+
+    """Erzeugt einen eindeutigen Unterordner fuer eine Punktwolke im Projekt."""
+
+    base_slug = sanitize_folder_name(get_pointcloud_display_name(source_path)) or "punktwolke"
+
+    candidate = base_slug
+
+    suffix = 2
+
+    while candidate in used_slugs:
+
+        candidate = f"{base_slug}_{suffix}"
+
+        suffix += 1
+
+    used_slugs.add(candidate)
+
+    return candidate
+
+
+
+def create_pointcloud_index_entry(name, input_format, viewer_path, s3_path):
+
+    """Erzeugt den Viewer-kompatiblen Indexeintrag fuer eine Punktwolke."""
+
+    return {
+
+        "name": name,
+
+        "format": input_format,
+
+        "viewer_path": viewer_path,
+
+        "s3_path": s3_path,
+
+        "visible": True
+
+    }
+
+
+
+def rewrite_project_pointclouds_for_duplicate(project_info, source_s3_path, new_s3_prefix):
+
+    """Schreibt Multi-Punktwolken-Pfade beim Duplizieren auf den neuen Projektpfad um."""
+
+    pointclouds = project_info.get("pointclouds")
+
+    if not isinstance(pointclouds, list):
+
+        return None
+
+    source_viewer_root = source_s3_path
+
+    if source_viewer_root.startswith("pointclouds/"):
+
+        source_viewer_root = source_viewer_root[len("pointclouds/"):]
+
+    new_viewer_root = new_s3_prefix
+
+    if new_viewer_root.startswith("pointclouds/"):
+
+        new_viewer_root = new_viewer_root[len("pointclouds/"):]
+
+    rewritten_entries = []
+
+    for pointcloud in pointclouds:
+
+        if not isinstance(pointcloud, dict):
+
+            continue
+
+        rewritten = dict(pointcloud)
+
+        for key in ("viewer_path", "viewerPath", "path", "url"):
+
+            value = str(rewritten.get(key, "")).strip()
+
+            if value.startswith(source_viewer_root):
+
+                rewritten[key] = f"{new_viewer_root}{value[len(source_viewer_root):]}"
+
+            elif value.startswith(source_s3_path):
+
+                rewritten[key] = f"{new_s3_prefix}{value[len(source_s3_path):]}"
+
+        s3_value = str(rewritten.get("s3_path", "")).strip()
+
+        if s3_value.startswith(source_s3_path):
+
+            rewritten["s3_path"] = f"{new_s3_prefix}{s3_value[len(source_s3_path):]}"
+
+        rewritten_entries.append(rewritten)
+
+    return rewritten_entries
 
 
 
@@ -1997,6 +2521,342 @@ class UploadProgress:
 
 
 
+def run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_secret, converter_path, output_base_dir):
+
+    """Laedt mehrere Punktwolken als ein Viewer-Projekt hoch."""
+
+    temp_output_dirs = []
+
+    s3_client = None
+
+    files_to_upload = []
+
+    s3_prefix = ""
+
+    index_saved = False
+
+    try:
+
+        ui_reset_progress()
+
+        ui_set_step("Pruefe Dateien...", 1)
+
+        ui_set_progress(0)
+
+        if not aws_access or not aws_secret:
+
+            log("[FEHLER] Bitte AWS Keys in den Einstellungen eingeben!")
+
+            messagebox.showwarning("Fehler", "Bitte AWS Zugangsdaten in den Einstellungen eingeben!")
+
+            return
+
+        validated_sources = []
+
+        needs_converter = False
+
+        for source_path in upload_sources:
+
+            valid, msg = validate_file(source_path)
+
+            if not valid:
+
+                log(f"[FEHLER] {source_path}: {msg}")
+
+                messagebox.showerror("Fehler", f"{source_path}\n\n{msg}")
+
+                return
+
+            input_format = detect_input_format(source_path)
+
+            needs_converter = needs_converter or input_format == "potree"
+
+            validated_sources.append({
+
+                "path": source_path,
+
+                "format": input_format,
+
+                "name": get_pointcloud_display_name(source_path)
+
+            })
+
+        if needs_converter and not converter_path:
+
+            log("[FEHLER] Kein Potree Converter verfügbar")
+
+            messagebox.showwarning(
+
+                "Fehler",
+
+                "Mitgelieferter Potree Converter nicht gefunden. "
+
+                "Bitte Build/Projektdateien pruefen oder optional einen Override-Pfad konfigurieren!"
+
+            )
+
+            return
+
+        if needs_converter and not output_base_dir:
+
+            log("[FEHLER] Output-Ordner nicht konfiguriert!")
+
+            messagebox.showwarning("Fehler", "Bitte einen Output-Ordner in den Einstellungen angeben!")
+
+            return
+
+        folder_kunde = sanitize_folder_name(kunde)
+
+        folder_id = uuid.uuid4().hex[:6]
+
+        folder_projekt = sanitize_folder_name(projekt)
+
+        project_viewer_root = f"{folder_kunde}/{folder_id}/{folder_projekt}"
+
+        s3_prefix = f"pointclouds/{project_viewer_root}"
+
+        log(f"[MULTI] Neues Multi-Punktwolken-Projekt mit {len(validated_sources)} Punktwolken")
+
+        log(f"[KUNDE] {kunde}")
+
+        log(f"[PROJEKT] {projekt}")
+
+        log(f"[ID] {folder_id}")
+
+        log(f"[S3] Ziel-Pfad: {s3_prefix}")
+
+        pointcloud_entries = []
+
+        used_slugs = set()
+
+        for index, source in enumerate(validated_sources, 1):
+
+            source_path = source["path"]
+
+            input_format = source["format"]
+
+            cloud_name = source["name"]
+
+            cloud_slug = make_unique_cloud_slug(source_path, used_slugs)
+
+            cloud_viewer_path = f"{project_viewer_root}/{cloud_slug}"
+
+            cloud_s3_prefix = f"{s3_prefix}/{cloud_slug}"
+
+            ui_set_step(f"Bereite Punktwolke {index}/{len(validated_sources)} vor...", 2)
+
+            ui_set_detail(cloud_name)
+
+            log(f"[MULTI] Punktwolke {index}/{len(validated_sources)}: {cloud_name}")
+
+            if input_format == "copc":
+
+                log("[COPC] Direkter Upload ohne Potree Converter")
+
+                copc_s3_key = f"{cloud_s3_prefix}/source.copc.laz"
+
+                files_to_upload.append((source_path, copc_s3_key))
+
+                viewer_path = f"{cloud_viewer_path}/source.copc.laz"
+
+                pointcloud_s3_path = copc_s3_key
+
+            else:
+
+                output_dir = os.path.join(output_base_dir, folder_kunde, folder_id, folder_projekt, cloud_slug)
+
+                temp_output_dirs.append(output_dir)
+
+                run_potree_conversion(source_path, converter_path, output_dir)
+
+                valid_output, output_message = validate_potree_output_dir(output_dir)
+
+                if not valid_output:
+
+                    raise RuntimeError(f"{cloud_name}: {output_message}")
+
+                files_to_upload.extend(collect_upload_files("potree", cloud_s3_prefix, output_dir=output_dir))
+
+                viewer_path = cloud_viewer_path
+
+                pointcloud_s3_path = cloud_s3_prefix
+
+            pointcloud_entries.append(create_pointcloud_index_entry(
+
+                cloud_name,
+
+                input_format,
+
+                viewer_path,
+
+                pointcloud_s3_path
+
+            ))
+
+        if not files_to_upload:
+
+            log("[FEHLER] Keine Dateien zum Upload gefunden!")
+
+            messagebox.showwarning("Fehler", "Keine Dateien zum Upload gefunden!")
+
+            return
+
+        ui_set_step("Lade zu S3 hoch...", 3)
+
+        ui_set_progress(0)
+
+        s3_client = create_s3_client(aws_access, aws_secret)
+
+        log("[S3] Verbindung hergestellt")
+
+        upload_files_to_s3(s3_client, files_to_upload)
+
+        ui_set_step("Aktualisiere Index...", 4)
+
+        ui_set_detail("Schreibe Multi-Punktwolken-Projekt in projects_index.json")
+
+        log("[INDEX] Aktualisiere Projekt-Index...")
+
+        timestamp = datetime.now().isoformat()
+
+        project_url = f"{DOMAIN_URL}?id={folder_id}"
+
+        index_data = load_projects_index(s3_client)
+
+        new_project = {
+
+            "datum": timestamp,
+
+            "kunde": kunde,
+
+            "id": folder_id,
+
+            "projekt": projekt,
+
+            "format": "multi",
+
+            "link": project_url,
+
+            "viewer_path": project_viewer_root,
+
+            "s3_path": s3_prefix,
+
+            "pointcloud_count": len(pointcloud_entries),
+
+            "pointclouds": pointcloud_entries
+
+        }
+
+        index_data["projects"].insert(0, new_project)
+
+        if not save_projects_index(s3_client, index_data):
+
+            raise RuntimeError("Projekt-Index konnte nicht gespeichert werden. Upload wird zurueckgerollt.")
+
+        index_saved = True
+
+        try:
+
+            file_exists = os.path.exists(CSV_FILE)
+
+            datum = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+            with open(CSV_FILE, mode='a', newline='', encoding='utf-8') as f:
+
+                writer = csv.writer(f, delimiter=';')
+
+                if not file_exists:
+
+                    writer.writerow(["ID", "Kunde", "Projekt", "Datum", "Link"])
+
+                writer.writerow([folder_id, kunde, projekt, datum, project_url])
+
+            log("[CSV] Lokale CSV aktualisiert")
+
+        except Exception as e:
+
+            log(f"[WARNUNG] CSV konnte nicht aktualisiert werden: {e}")
+
+        ui_set_step("Raeume auf...", 5)
+
+        for output_dir in temp_output_dirs:
+
+            cleanup_local_files(output_dir)
+
+        ui_set_step("Fertig!", 5)
+
+        ui_set_progress(1)
+
+        ui_set_detail("")
+
+        root.after(0, lambda: entry_link.delete(0, tk.END))
+
+        root.after(0, lambda: entry_link.insert(0, project_url))
+
+        log("=" * 50)
+
+        log("MULTI-UPLOAD ERFOLGREICH ABGESCHLOSSEN")
+
+        log(f"Projekt-Link: {project_url}")
+
+        log("=" * 50)
+
+        save_config(aws_access=aws_access, aws_secret=aws_secret)
+
+        root.after(0, lambda: messagebox.showinfo(
+
+            "Erfolg",
+
+            f"Upload erfolgreich!\n\nProjekt: {projekt}\nPunktwolken: {len(pointcloud_entries)}\n\nLink wurde kopiert."
+
+        ))
+
+        root.after(0, lambda: root.clipboard_clear())
+
+        root.after(0, lambda: root.clipboard_append(project_url))
+
+    except Exception as e:
+
+        if s3_client and s3_prefix and files_to_upload and not index_saved:
+
+            rollback_keys = [
+
+                s3_key for _, s3_key in files_to_upload
+
+                if str(s3_key).startswith(f"{s3_prefix}/")
+
+            ]
+
+            if rollback_keys:
+
+                try:
+
+                    deleted_count = delete_s3_objects(s3_client, rollback_keys)
+
+                    log(f"[ROLLBACK] {deleted_count} Dateien aus fehlgeschlagenem Multi-Upload entfernt")
+
+                except Exception as rollback_error:
+
+                    log(f"[ROLLBACK] Konnte fehlgeschlagene Upload-Dateien nicht entfernen: {rollback_error}")
+
+        log(f"[FEHLER] {str(e)}")
+
+        import traceback
+
+        log(traceback.format_exc())
+
+        root.after(0, lambda: messagebox.showerror("Fehler", f"Unerwarteter Fehler:\n{e}"))
+
+    finally:
+
+        for output_dir in list(temp_output_dirs):
+
+            if os.path.exists(output_dir):
+
+                cleanup_local_files(output_dir)
+
+
+
 def run_process(laz_file, kunde, projekt, aws_access, aws_secret):
 
     config = load_config()
@@ -2008,6 +2868,18 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret):
     output_base_dir = config.get("output_base_dir", "")
 
     
+
+    upload_sources = normalize_upload_sources(laz_file)
+
+    if len(upload_sources) > 1:
+
+        run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_secret, converter_path, output_base_dir)
+
+        return
+
+    if upload_sources:
+
+        laz_file = upload_sources[0]
 
     try:
 
@@ -2532,22 +3404,63 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret):
 
 def select_file():
 
-    file = filedialog.askopenfilename(
+    files = filedialog.askopenfilenames(
 
-        title="LAS/LAZ/COPC Datei auswählen",
+        title="LAS/LAZ/COPC Datei(en) auswählen",
 
         filetypes=[("Point Cloud", "*.copc.laz *.laz *.las"), ("Alle Dateien", "*.*")]
 
     )
 
-    if file:
+    if files:
 
-        entry_file.delete(0, tk.END)
+        set_selected_upload_files(files)
 
-        entry_file.insert(0, file)
-        update_drop_zone_text(file)
+        log(f"[DATEI] Ausgewaehlt: {len(selected_upload_files)} Datei(en)")
 
-        log(f"[DATEI] Ausgewaehlt: {os.path.basename(file)}")
+
+
+def set_selected_upload_files(file_paths):
+
+    """Speichert die aktuell ausgewaehlten Upload-Dateien und aktualisiert die UI."""
+
+    global selected_upload_files
+
+    selected_upload_files = normalize_upload_sources(file_paths)
+
+    entry_file.delete(0, tk.END)
+
+    if len(selected_upload_files) == 1:
+
+        entry_file.insert(0, selected_upload_files[0])
+
+    elif len(selected_upload_files) > 1:
+
+        entry_file.insert(0, f"{len(selected_upload_files)} Punktwolken ausgewählt")
+
+    update_drop_zone_text(selected_upload_files)
+
+
+
+def get_upload_sources_from_ui():
+
+    """Liest die aktuelle Upload-Auswahl aus Auswahlstatus oder Eingabefeld."""
+
+    entry_value = entry_file.get().strip()
+
+    if selected_upload_files:
+
+        multi_label = f"{len(selected_upload_files)} Punktwolken ausgewählt"
+
+        if len(selected_upload_files) > 1 and entry_value == multi_label:
+
+            return selected_upload_files
+
+        if len(selected_upload_files) == 1 and entry_value == selected_upload_files[0]:
+
+            return selected_upload_files
+
+    return normalize_upload_sources(entry_value)
 
 
 
@@ -2556,6 +3469,16 @@ def select_file():
 def extract_dropped_file(event_data):
 
     """Extrahiert die erste Datei aus einem Drag-and-Drop Event."""
+
+    dropped_files = extract_dropped_files(event_data)
+
+    return dropped_files[0] if dropped_files else ""
+
+
+
+def extract_dropped_files(event_data):
+
+    """Extrahiert Dateien aus einem Drag-and-Drop Event."""
 
     try:
 
@@ -2569,11 +3492,11 @@ def extract_dropped_file(event_data):
 
     if not file_list:
 
-        return ""
+        return []
 
 
 
-    return file_list[0].strip('{}')
+    return [file_path.strip('{}') for file_path in file_list if file_path.strip('{}')]
 
 
 
@@ -2587,11 +3510,27 @@ def set_drop_zone_text(drop_label, file_path, empty_text="Datei hier hineinziehe
 
         return
 
-    if file_path:
+    selected_paths = normalize_upload_sources(file_path)
+
+    if selected_paths:
+
+        if len(selected_paths) == 1:
+
+            display_text = selected_paths[0]
+
+        else:
+
+            preview_paths = "\n".join(selected_paths[:4])
+
+            if len(selected_paths) > 4:
+
+                preview_paths += f"\n... und {len(selected_paths) - 4} weitere"
+
+            display_text = f"{len(selected_paths)} Punktwolken ausgewählt:\n{preview_paths}"
 
         drop_label.configure(
 
-            text=file_path,
+            text=display_text,
 
             fg="#e2e8f0",
 
@@ -2627,24 +3566,20 @@ def set_drop_zone_text(drop_label, file_path, empty_text="Datei hier hineinziehe
 
 def update_drop_zone_text(file_path):
 
-    """Zeigt den Dateipfad direkt in der Drag-and-Drop-Zone an."""
+    """Zeigt die ausgewaehlten Dateipfade direkt in der Drag-and-Drop-Zone an."""
 
     set_drop_zone_text(lbl_drop, file_path)
 
 
 def drop_file(event):
 
-    file_path = extract_dropped_file(event.data)
+    file_paths = [path for path in extract_dropped_files(event.data) if os.path.isfile(path)]
 
-    if os.path.isfile(file_path):
+    if file_paths:
 
-        entry_file.delete(0, tk.END)
+        set_selected_upload_files(file_paths)
 
-        entry_file.insert(0, file_path)
-
-        update_drop_zone_text(file_path)
-
-        log(f"[DRAG & DROP] Datei: {os.path.basename(file_path)}")
+        log(f"[DRAG & DROP] {len(file_paths)} Datei(en)")
 
 
 
@@ -2706,7 +3641,7 @@ def start_thread():
 
     """Startet den Upload-Prozess in einem Thread"""
 
-    laz = entry_file.get().strip()
+    upload_sources = get_upload_sources_from_ui()
 
     kunde = entry_kunde.get().strip()
 
@@ -2714,9 +3649,9 @@ def start_thread():
 
 
 
-    if not laz:
+    if not upload_sources:
 
-        messagebox.showwarning("Fehler", "Bitte eine LAZ/LAS Datei auswählen!")
+        messagebox.showwarning("Fehler", "Bitte mindestens eine LAZ/LAS/COPC Datei auswählen!")
 
         return
 
@@ -2742,7 +3677,7 @@ def start_thread():
 
         target=run_process,
 
-        args=(laz, kunde, projekt, aws_access, aws_secret),
+        args=(upload_sources, kunde, projekt, aws_access, aws_secret),
 
         daemon=True
 
@@ -2862,6 +3797,22 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
                 "Dieses Projekt nutzt derzeit COPC. Der Austausch mit Potree-Konvertierung ist aktuell "
 
                 "nur für klassische Potree-Projekte verfügbar, damit Link und Viewer-Pfad unverändert bleiben."
+
+            )
+
+            ui_log(f"[AUSTAUSCH] [FEHLER] {message}", ui)
+
+            root.after(0, lambda msg=message: messagebox.showerror("Fehler", msg))
+
+            return
+
+        if project_format == "multi" or isinstance(project_info.get("pointclouds"), list):
+
+            message = (
+
+                "Dieses Projekt enthält mehrere Punktwolken. Der Austausch-Dialog ist aktuell "
+
+                "nur für klassische Einzel-Potree-Projekte verfügbar, damit Multi-Projekte nicht versehentlich überschrieben werden."
 
             )
 
@@ -3291,6 +4242,14 @@ def duplicate_project_process(project_info, new_kunde, new_projekt, aws_access, 
             "s3_path": new_s3_prefix
 
         }
+
+        rewritten_pointclouds = rewrite_project_pointclouds_for_duplicate(project_info, source_s3_path, new_s3_prefix)
+
+        if rewritten_pointclouds:
+
+            new_project["pointclouds"] = rewritten_pointclouds
+
+            new_project["pointcloud_count"] = len(rewritten_pointclouds)
 
         index_data["projects"].insert(0, new_project)
 
@@ -6626,7 +7585,7 @@ ctk.CTkLabel(
 
 ctk.CTkButton(
 
-    card_data, text="LAZ / LAS Datei wählen...",
+    card_data, text="LAZ / LAS / COPC Datei(en) wählen...",
 
     fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
 
@@ -6642,7 +7601,7 @@ ctk.CTkButton(
 
 entry_file = ctk.CTkEntry(card_data, font=ctk.CTkFont(family="Consolas", size=11),
 
-                           placeholder_text="Dateipfad...")
+                           placeholder_text="Dateipfad oder mehrere ausgewählte Punktwolken...")
 
 entry_file.pack(fill="x", padx=16, pady=(0, 8))
 
@@ -6664,7 +7623,7 @@ drop_frame.pack_propagate(False)
 
 lbl_drop = tk.Label(
 
-    drop_frame, text="Datei hier hineinziehen (Drag & Drop)",
+    drop_frame, text="Eine oder mehrere Dateien hier hineinziehen (Drag & Drop)",
 
     bg="#1e1e2e", fg="#64748b",
 

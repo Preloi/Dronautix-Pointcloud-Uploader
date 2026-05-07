@@ -20,6 +20,7 @@ import os
 import json
 import shutil
 import stat
+import hashlib
 from datetime import datetime
 from app_version import (
     APP_EXE_NAME,
@@ -52,6 +53,18 @@ def write_json_file(path, data):
     with open(path, "w", encoding="utf-8", newline="\n") as file:
         json.dump(data, file, indent=2, ensure_ascii=False)
         file.write("\n")
+
+
+def calculate_file_sha256(path):
+    sha256 = hashlib.sha256()
+    with open(path, "rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            sha256.update(chunk)
+    return sha256.hexdigest()
+
+
+def get_output_installer_path():
+    return os.path.join("Output", f"Dronautix_Pointcloud_Uploader_Setup_{APP_VERSION}.exe")
 
 
 def sync_version_files():
@@ -117,6 +130,20 @@ def sync_output_manifest():
         return
 
     shutil.copyfile(LATEST_RELEASE_FILE, os.path.join(output_dir, LATEST_RELEASE_FILE))
+
+
+def update_release_manifest_with_installer_hash():
+    installer_path = get_output_installer_path()
+    if not os.path.isfile(installer_path):
+        print("[WARNUNG] Installer-Hash konnte nicht geschrieben werden, Setup fehlt")
+        return
+
+    with open(LATEST_RELEASE_FILE, "r", encoding="utf-8") as file:
+        release_manifest = json.load(file)
+
+    release_manifest["installer_sha256"] = calculate_file_sha256(installer_path)
+    write_json_file(LATEST_RELEASE_FILE, release_manifest)
+    print("[OK] Installer SHA-256 in latest-release.json geschrieben")
 
 
 def cleanup_previous_build_artifacts():
@@ -216,6 +243,7 @@ try:
     if inno_setup:
         print("[OK] Inno Setup gefunden - baue Setup...")
         subprocess.run([inno_setup, INNO_SETUP_SCRIPT], check=True)
+        update_release_manifest_with_installer_hash()
         sync_output_manifest()
         print("[OK] Update-Manifest synchronisiert")
     else:
