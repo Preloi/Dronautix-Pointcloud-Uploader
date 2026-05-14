@@ -98,8 +98,6 @@ UPDATE_MANIFEST_URL = (
 
 UPDATE_DOWNLOAD_DIR = os.path.join(APPDATA_DIR, "updates")
 
-UPDATE_TRUSTED_PUBLISHERS = ("Dronautix",)
-
 SECRET_STORAGE_PREFIX = "dpapi:"
 
 
@@ -988,66 +986,6 @@ def verify_installer_hash(installer_path, expected_sha256):
 
 
 
-def verify_installer_signature(installer_path):
-
-    """Prueft die Authenticode-Signatur des Installers."""
-
-    if sys.platform != "win32":
-
-        return False, "Authenticode-Pruefung ist nur unter Windows verfuegbar"
-
-    script = (
-
-        "$sig = Get-AuthenticodeSignature -LiteralPath $args[0]; "
-
-        "$subject = ''; "
-
-        "if ($sig.SignerCertificate) { $subject = $sig.SignerCertificate.Subject }; "
-
-        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
-
-        "[pscustomobject]@{ Status=[string]$sig.Status; Subject=$subject } | ConvertTo-Json -Compress"
-
-    )
-
-    result = subprocess.run(
-
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script, installer_path],
-
-        capture_output=True,
-
-        text=True,
-
-        timeout=20
-
-    )
-
-    if result.returncode != 0 or not result.stdout.strip():
-
-        return False, "Authenticode-Signatur konnte nicht geprueft werden"
-
-    try:
-
-        signature_info = json.loads(result.stdout.strip())
-
-    except json.JSONDecodeError:
-
-        return False, "Authenticode-Pruefung lieferte kein gueltiges Ergebnis"
-
-    if signature_info.get("Status") != "Valid":
-
-        return False, f"Installer-Signatur ist nicht gueltig: {signature_info.get('Status', 'Unknown')}"
-
-    subject = signature_info.get("Subject", "")
-
-    if UPDATE_TRUSTED_PUBLISHERS and not any(name in subject for name in UPDATE_TRUSTED_PUBLISHERS):
-
-        return False, "Installer-Signatur stammt nicht von einem erwarteten Publisher"
-
-    return True, "OK"
-
-
-
 def download_update_installer(installer_url, installer_name):
 
     """Laedt den Installer in den lokalen Update-Cache herunter."""
@@ -1199,20 +1137,6 @@ def check_for_available_update():
                     pass
 
                 raise RuntimeError(hash_message)
-
-            signature_ok, signature_message = verify_installer_signature(installer_path)
-
-            if not signature_ok:
-
-                try:
-
-                    os.remove(installer_path)
-
-                except OSError:
-
-                    pass
-
-                raise RuntimeError(signature_message)
 
             subprocess.Popen([installer_path, "/CLOSEAPPLICATIONS"], shell=False)
 
