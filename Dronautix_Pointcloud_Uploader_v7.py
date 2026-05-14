@@ -50,6 +50,8 @@ import sys
 
 import unicodedata
 
+import struct
+
 from app_version import APP_NAME, APP_VERSION, APP_FILE_VERSION
 
 
@@ -159,6 +161,8 @@ app_views = {}
 current_view_name = "upload"
 
 selected_upload_files = []
+
+last_auto_crs_entry_value = ""
 
 
 
@@ -1272,6 +1276,862 @@ def detect_input_format(filepath):
 
 
 
+def clean_las_text(raw_value):
+
+    """Dekodiert nullterminierte LAS/VLR-Textfelder robust."""
+
+    if raw_value is None:
+
+        return ""
+
+    if isinstance(raw_value, bytes):
+
+        text = raw_value.decode("utf-8", errors="ignore")
+
+    else:
+
+        text = str(raw_value)
+
+    return text.replace("\x00", "").strip().strip("|").strip()
+
+
+
+def normalize_crs_value(crs_value, source="manual", name=None, wkt=None):
+
+    """Normalisiert eine CRS-Eingabe in Viewer- und JSON-kompatible Metadaten."""
+
+    raw_value = clean_las_text(crs_value)
+
+    if not raw_value:
+
+        return None
+
+    epsg_match = re.fullmatch(r"(?:EPSG[:\s-]*)?(\d{3,6})", raw_value, re.IGNORECASE)
+
+    crs_info = {
+
+        "value": raw_value,
+
+        "source": source
+
+    }
+
+    if epsg_match:
+
+        code = epsg_match.group(1)
+
+        crs_info.update({
+
+            "value": f"EPSG:{code}",
+
+            "projection": f"EPSG:{code}",
+
+            "auth": "EPSG",
+
+            "code": code,
+
+            "epsg": f"EPSG:{code}"
+
+        })
+
+    else:
+
+        crs_info["projection"] = raw_value
+
+        authority_match = re.search(r"\bEPSG[:\s-]*(\d{3,6})\b", raw_value, re.IGNORECASE)
+
+        if authority_match:
+
+            code = authority_match.group(1)
+
+            crs_info.update({
+
+                "projection": f"EPSG:{code}",
+
+                "auth": "EPSG",
+
+                "code": code,
+
+                "epsg": f"EPSG:{code}"
+
+            })
+
+    if name:
+
+        crs_info["name"] = clean_las_text(name)
+
+    if wkt:
+
+        crs_info["wkt"] = clean_las_text(wkt)
+
+    return crs_info
+
+
+
+def extract_wkt_block(wkt, keyword):
+
+    """Extrahiert einen balancierten WKT-Block wie PROJCRS[...] oder PROJCS[...]."""
+
+    if not wkt or not keyword:
+
+        return ""
+
+    match = re.search(rf"\b{re.escape(keyword)}\s*\[", wkt, re.IGNORECASE)
+
+    if not match:
+
+        return ""
+
+    start = match.start()
+
+    bracket_start = wkt.find("[", match.start())
+
+    depth = 0
+
+    in_quote = False
+
+    index = bracket_start
+
+    while index < len(wkt):
+
+        char = wkt[index]
+
+        if char == '"':
+
+            in_quote = not in_quote
+
+        elif not in_quote:
+
+            if char == "[":
+
+                depth += 1
+
+            elif char == "]":
+
+                depth -= 1
+
+                if depth == 0:
+
+                    return wkt[start:index + 1]
+
+        index += 1
+
+    return wkt[start:]
+
+
+
+def extract_wkt_epsg_codes(wkt):
+
+    """Findet EPSG-Codes aus WKT AUTHORITY[]/ID[] Eintraegen."""
+
+    if not wkt:
+
+        return []
+
+    return re.findall(r'(?:AUTHORITY|ID)\s*\[\s*"EPSG"\s*,\s*"?(\d{3,6})"?', wkt, re.IGNORECASE)
+
+
+
+def extract_wkt_name_for_keywords(wkt, keywords):
+
+    """Extrahiert den Namen aus dem ersten passenden WKT-CRS-Block."""
+
+    for keyword in keywords:
+
+        block = extract_wkt_block(wkt, keyword)
+
+        if not block:
+
+            continue
+
+        name_match = re.search(rf"^\s*{re.escape(keyword)}\s*\[\s*\"([^\"]+)\"", block, re.IGNORECASE)
+
+        if name_match:
+
+            return clean_las_text(name_match.group(1))
+
+    return ""
+
+
+
+def extract_epsg_from_wkt(wkt):
+
+    """Extrahiert bevorzugt den horizontalen EPSG-Code aus einem WKT-CRS."""
+
+    if not wkt:
+
+        return ""
+
+    for keyword in ("PROJCRS", "PROJCS", "GEOGCRS", "GEOGCS"):
+
+        block = extract_wkt_block(wkt, keyword)
+
+        epsg_codes = extract_wkt_epsg_codes(block)
+
+        if epsg_codes:
+
+            return epsg_codes[-1]
+
+    has_vertical_only = re.search(r"\b(?:VERTCRS|VERT_CS)\s*\[", wkt, re.IGNORECASE)
+
+    if has_vertical_only:
+
+        return ""
+
+    matches = extract_wkt_epsg_codes(wkt)
+
+    return matches[-1] if matches else ""
+
+
+
+def extract_vertical_epsg_from_wkt(wkt):
+
+    """Extrahiert einen vertikalen EPSG-Code nur als Zusatzinformation."""
+
+    for keyword in ("VERTCRS", "VERT_CS"):
+
+        block = extract_wkt_block(wkt, keyword)
+
+        epsg_codes = extract_wkt_epsg_codes(block)
+
+        if epsg_codes:
+
+            return epsg_codes[-1]
+
+    return ""
+
+
+
+def extract_vertical_name_from_wkt(wkt):
+
+    """Extrahiert den Namen des vertikalen CRS/Datums aus WKT."""
+
+    return extract_wkt_name_for_keywords(wkt, ("VERTCRS", "VERT_CS"))
+
+
+
+def extract_name_from_wkt(wkt):
+
+    """Extrahiert bevorzugt den horizontalen CRS-Namen aus WKT1/WKT2."""
+
+    if not wkt:
+
+        return ""
+
+    horizontal_name = extract_wkt_name_for_keywords(wkt, ("PROJCRS", "PROJCS", "GEOGCRS", "GEOGCS"))
+
+    if horizontal_name:
+
+        return horizontal_name
+
+    return extract_wkt_name_for_keywords(wkt, ("COMPOUNDCRS", "COMPD_CS"))
+
+
+
+def read_las_projection_records(filepath, max_record_bytes=1024 * 1024):
+
+    """Liest CRS-relevante LAS/LAZ VLR- und EVLR-Datensaetze ohne externe Abhaengigkeiten."""
+
+    records = []
+
+    try:
+
+        with open(filepath, "rb") as f:
+
+            header = f.read(375)
+
+            if len(header) < 104 or header[:4] != b"LASF":
+
+                return records
+
+            version_major = header[24]
+
+            version_minor = header[25]
+
+            header_size = struct.unpack_from("<H", header, 94)[0]
+
+            point_data_offset = struct.unpack_from("<I", header, 96)[0]
+
+            vlr_count = struct.unpack_from("<I", header, 100)[0]
+
+            f.seek(header_size)
+
+            for _ in range(vlr_count):
+
+                vlr_header = f.read(54)
+
+                if len(vlr_header) < 54:
+
+                    break
+
+                user_id = clean_las_text(vlr_header[2:18])
+
+                record_id = struct.unpack_from("<H", vlr_header, 18)[0]
+
+                record_length = struct.unpack_from("<H", vlr_header, 20)[0]
+
+                data = f.read(min(record_length, max_record_bytes))
+
+                if record_length > max_record_bytes:
+
+                    f.seek(record_length - max_record_bytes, os.SEEK_CUR)
+
+                if user_id == "LASF_Projection":
+
+                    records.append({
+
+                        "user_id": user_id,
+
+                        "record_id": record_id,
+
+                        "data": data
+
+                    })
+
+                if point_data_offset and f.tell() >= point_data_offset:
+
+                    break
+
+            if len(header) >= 247 and header_size >= 247 and version_major == 1 and version_minor >= 4:
+
+                evlr_start = struct.unpack_from("<Q", header, 235)[0]
+
+                evlr_count = struct.unpack_from("<I", header, 243)[0]
+
+                if evlr_start and evlr_count:
+
+                    f.seek(evlr_start)
+
+                    for _ in range(evlr_count):
+
+                        evlr_header = f.read(60)
+
+                        if len(evlr_header) < 60:
+
+                            break
+
+                        user_id = clean_las_text(evlr_header[2:18])
+
+                        record_id = struct.unpack_from("<H", evlr_header, 18)[0]
+
+                        record_length = struct.unpack_from("<Q", evlr_header, 20)[0]
+
+                        data = f.read(min(record_length, max_record_bytes))
+
+                        if record_length > max_record_bytes:
+
+                            f.seek(record_length - max_record_bytes, os.SEEK_CUR)
+
+                        if user_id == "LASF_Projection":
+
+                            records.append({
+
+                                "user_id": user_id,
+
+                                "record_id": record_id,
+
+                                "data": data
+
+                            })
+
+    except Exception as e:
+
+        log(f"[CRS] Automatische CRS-Erkennung fehlgeschlagen: {e}")
+
+    return records
+
+
+
+def decode_geo_key_value(entry, ascii_params, double_params):
+
+    key_id, tiff_tag_location, count, value_offset = entry
+
+    if tiff_tag_location == 0:
+
+        return value_offset
+
+    if tiff_tag_location == 34737:
+
+        value = ascii_params[value_offset:value_offset + count]
+
+        return clean_las_text(value)
+
+    if tiff_tag_location == 34736:
+
+        return double_params[value_offset:value_offset + count]
+
+    return None
+
+
+
+def detect_pointcloud_crs(source_path):
+
+    """Erkennt EPSG/WKT-CRS aus LAS/LAZ/COPC-Headern, wenn die Datei referenziert ist."""
+
+    records = read_las_projection_records(source_path)
+
+    if not records:
+
+        return None
+
+    wkt = ""
+
+    geo_key_entries = []
+
+    ascii_params = ""
+
+    double_params = []
+
+    for record in records:
+
+        record_id = record["record_id"]
+
+        data = record["data"]
+
+        if record_id in (2111, 2112):
+
+            candidate = clean_las_text(data)
+
+            if candidate:
+
+                wkt = candidate
+
+        elif record_id == 34735 and len(data) >= 8:
+
+            value_count = len(data) // 2
+
+            values = struct.unpack("<" + "H" * value_count, data[:value_count * 2])
+
+            entry_count = values[3] if len(values) >= 4 else 0
+
+            for index in range(entry_count):
+
+                start = 4 + index * 4
+
+                if start + 4 <= len(values):
+
+                    geo_key_entries.append(values[start:start + 4])
+
+        elif record_id == 34736 and len(data) >= 8:
+
+            double_count = len(data) // 8
+
+            double_params = list(struct.unpack("<" + "d" * double_count, data[:double_count * 8]))
+
+        elif record_id == 34737:
+
+            ascii_params = data.decode("utf-8", errors="ignore").replace("\x00", "")
+
+    if wkt:
+
+        epsg_code = extract_epsg_from_wkt(wkt)
+
+        vertical_epsg_code = extract_vertical_epsg_from_wkt(wkt)
+
+        vertical_name = extract_vertical_name_from_wkt(wkt)
+
+        wkt_name = extract_name_from_wkt(wkt)
+
+        if epsg_code:
+
+            crs_info = normalize_crs_value(f"EPSG:{epsg_code}", source="auto", name=wkt_name, wkt=wkt)
+
+            if vertical_epsg_code:
+
+                crs_info["vertical_epsg"] = f"EPSG:{vertical_epsg_code}"
+
+                crs_info["vertical_crs"] = f"EPSG:{vertical_epsg_code}"
+
+            if vertical_name:
+
+                crs_info["vertical_name"] = vertical_name
+
+                crs_info["vertical_datum"] = vertical_name
+
+            return crs_info
+
+        if wkt_name:
+
+            crs_info = normalize_crs_value(wkt_name, source="auto", name=wkt_name, wkt=wkt)
+
+            if vertical_epsg_code:
+
+                crs_info["vertical_epsg"] = f"EPSG:{vertical_epsg_code}"
+
+                crs_info["vertical_crs"] = f"EPSG:{vertical_epsg_code}"
+
+            if vertical_name:
+
+                crs_info["vertical_name"] = vertical_name
+
+                crs_info["vertical_datum"] = vertical_name
+
+            return crs_info
+
+        return None
+
+    geo_keys = {
+
+        entry[0]: decode_geo_key_value(entry, ascii_params, double_params)
+
+        for entry in geo_key_entries
+
+    }
+
+    crs_name = ""
+
+    vertical_name = ""
+
+    for name_key in (3073, 2049):
+
+        value = geo_keys.get(name_key)
+
+        if isinstance(value, str) and value:
+
+            crs_name = value
+
+            break
+
+    vertical_value = geo_keys.get(4097)
+
+    if isinstance(vertical_value, str) and vertical_value:
+
+        vertical_name = vertical_value
+
+    vertical_epsg_code = geo_keys.get(4096)
+
+    def attach_vertical_crs(crs_info):
+
+        if not crs_info:
+
+            return crs_info
+
+        if isinstance(vertical_epsg_code, int) and 0 < vertical_epsg_code < 32767:
+
+            crs_info["vertical_epsg"] = f"EPSG:{vertical_epsg_code}"
+
+            crs_info["vertical_crs"] = f"EPSG:{vertical_epsg_code}"
+
+        if vertical_name:
+
+            crs_info["vertical_name"] = vertical_name
+
+            crs_info["vertical_datum"] = vertical_name
+
+        return crs_info
+
+    for epsg_key in (3072, 2048):
+
+        epsg_code = geo_keys.get(epsg_key)
+
+        if isinstance(epsg_code, int) and 0 < epsg_code < 32767:
+
+            return attach_vertical_crs(normalize_crs_value(f"EPSG:{epsg_code}", source="auto", name=crs_name))
+
+    return attach_vertical_crs(normalize_crs_value(crs_name, source="auto")) if crs_name else None
+
+
+
+def get_crs_display_value(crs_info):
+
+    """Gibt eine kurze CRS-Anzeige fuer UI und Logs zurueck."""
+
+    if not crs_info:
+
+        return ""
+
+    return crs_info.get("epsg") or crs_info.get("value") or crs_info.get("name") or ""
+
+
+
+def get_vertical_crs_display_value(crs_info):
+
+    """Gibt eine kurze Anzeige fuer das vertikale CRS/Datum zurueck."""
+
+    if not crs_info:
+
+        return ""
+
+    vertical_value = crs_info.get("vertical_crs") or crs_info.get("vertical_epsg")
+
+    vertical_name = crs_info.get("vertical_name") or crs_info.get("vertical_datum")
+
+    if vertical_value and vertical_name:
+
+        return f"{vertical_value} ({vertical_name})"
+
+    return vertical_value or vertical_name or ""
+
+
+
+def get_crs_summary_text(crs_info):
+
+    """Fasst Lage- und Hoehenreferenz fuer die UI zusammen."""
+
+    horizontal = get_crs_display_value(crs_info)
+
+    vertical = get_vertical_crs_display_value(crs_info)
+
+    parts = []
+
+    if horizontal:
+
+        parts.append(f"Lage: {horizontal}")
+
+    if vertical:
+
+        parts.append(f"Vertikal: {vertical}")
+
+    return " | ".join(parts)
+
+
+
+def merge_detected_vertical_crs(crs_info, detected_crs_info):
+
+    """Ergaenzt ein manuell gesetztes Lage-CRS um erkannte vertikale CRS-Felder."""
+
+    if not crs_info or not detected_crs_info:
+
+        return crs_info
+
+    merged = dict(crs_info)
+
+    copied_vertical = False
+
+    for key in ("vertical_crs", "vertical_epsg", "vertical_projection", "vertical_name", "vertical_datum"):
+
+        if detected_crs_info.get(key) and not merged.get(key):
+
+            merged[key] = detected_crs_info[key]
+
+            copied_vertical = True
+
+    if copied_vertical:
+
+        merged["vertical_source"] = detected_crs_info.get("source", "auto")
+
+    return merged
+
+
+
+def resolve_pointcloud_crs(source_path, crs_input=""):
+
+    """Nutzt manuelle Lage-CRS-Eingaben und uebernimmt erkannte Hoehenreferenzen."""
+
+    detected_crs_info = detect_pointcloud_crs(source_path)
+
+    manual_crs_info = normalize_crs_value(crs_input, source="manual")
+
+    if manual_crs_info:
+
+        return merge_detected_vertical_crs(manual_crs_info, detected_crs_info)
+
+    return detected_crs_info
+
+
+
+def apply_crs_metadata(target, crs_info, include_projection=True):
+
+    """Schreibt CRS-Felder in einen Projekt- oder Punktwolken-Metadatencontainer."""
+
+    if not isinstance(target, dict) or not crs_info:
+
+        return
+
+    value = crs_info.get("value")
+
+    projection = crs_info.get("projection") or value
+
+    if value:
+
+        target["crs"] = value
+
+    if include_projection and projection:
+
+        target["projection"] = projection
+
+    if crs_info.get("epsg"):
+
+        target["epsg"] = crs_info["epsg"]
+
+    vertical_value = crs_info.get("vertical_crs") or crs_info.get("vertical_epsg")
+
+    vertical_name = crs_info.get("vertical_name") or crs_info.get("vertical_datum")
+
+    if vertical_value:
+
+        target["vertical_crs"] = vertical_value
+
+        target["vertical_epsg"] = vertical_value
+
+        target["vertical_projection"] = vertical_value
+
+    if vertical_name:
+
+        target["vertical_datum"] = vertical_name
+
+    target["crs_info"] = dict(crs_info)
+
+
+
+def copy_existing_crs_metadata(source, target):
+
+    """Uebernimmt vorhandene CRS-Felder beim Duplizieren von Projekten."""
+
+    if not isinstance(source, dict) or not isinstance(target, dict):
+
+        return
+
+    for key in ("crs", "projection", "epsg", "vertical_crs", "vertical_epsg", "vertical_projection", "vertical_datum", "crs_info"):
+
+        if key in source:
+
+            target[key] = source[key]
+
+
+
+def write_potree_metadata_crs(output_dir, crs_info, ui=None):
+
+    """Ergaenzt Potree metadata.json/cloud.js um die vom Viewer gelesene Projektion."""
+
+    if not crs_info:
+
+        return
+
+    projection = crs_info.get("projection") or crs_info.get("value")
+
+    if not projection:
+
+        return
+
+    metadata_path = os.path.join(output_dir, "metadata.json")
+
+    if os.path.isfile(metadata_path):
+
+        try:
+
+            with open(metadata_path, "r", encoding="utf-8") as f:
+
+                metadata = json.load(f)
+
+            metadata["projection"] = projection
+
+            apply_crs_metadata(metadata, crs_info, include_projection=False)
+
+            if crs_info.get("epsg"):
+
+                srs = metadata.get("srs") if isinstance(metadata.get("srs"), dict) else {}
+
+                srs["authority"] = "EPSG"
+
+                srs["horizontal"] = crs_info.get("code")
+
+                if crs_info.get("wkt"):
+
+                    srs["wkt"] = crs_info.get("wkt")
+
+                if crs_info.get("vertical_epsg"):
+
+                    srs["vertical"] = crs_info.get("vertical_epsg").replace("EPSG:", "")
+
+                if crs_info.get("vertical_name") or crs_info.get("vertical_datum"):
+
+                    srs["vertical_name"] = crs_info.get("vertical_name") or crs_info.get("vertical_datum")
+
+                metadata["srs"] = srs
+
+            elif crs_info.get("wkt"):
+
+                srs = {"wkt": crs_info.get("wkt")}
+
+                if crs_info.get("vertical_epsg"):
+
+                    srs["vertical"] = crs_info.get("vertical_epsg").replace("EPSG:", "")
+
+                if crs_info.get("vertical_name") or crs_info.get("vertical_datum"):
+
+                    srs["vertical_name"] = crs_info.get("vertical_name") or crs_info.get("vertical_datum")
+
+                metadata["srs"] = srs
+
+            with open(metadata_path, "w", encoding="utf-8") as f:
+
+                json.dump(metadata, f, indent=2, ensure_ascii=False)
+
+            ui_log(f"[CRS] Potree metadata.json aktualisiert: {projection}", ui)
+
+        except Exception as e:
+
+            ui_log(f"[CRS] Warnung: metadata.json konnte nicht aktualisiert werden: {e}", ui)
+
+    cloudjs_path = os.path.join(output_dir, "cloud.js")
+
+    if os.path.isfile(cloudjs_path):
+
+        try:
+
+            with open(cloudjs_path, "r", encoding="utf-8") as f:
+
+                cloudjs_text = f.read()
+
+            prefix = "cloud.js"
+
+            json_text = cloudjs_text.strip()
+
+            if json_text.startswith(prefix):
+
+                json_text = json_text[len(prefix):].strip()
+
+            if json_text.startswith("="):
+
+                json_text = json_text[1:].strip()
+
+            json_text = json_text.rstrip(";").strip()
+
+            cloudjs = json.loads(json_text)
+
+            cloudjs["projection"] = projection
+
+            apply_crs_metadata(cloudjs, crs_info, include_projection=False)
+
+            with open(cloudjs_path, "w", encoding="utf-8") as f:
+
+                f.write("cloud.js = ")
+
+                json.dump(cloudjs, f, indent=2, ensure_ascii=False)
+
+                f.write(";")
+
+            ui_log(f"[CRS] Potree cloud.js aktualisiert: {projection}", ui)
+
+        except Exception as e:
+
+            ui_log(f"[CRS] Warnung: cloud.js konnte nicht aktualisiert werden: {e}", ui)
+
+
+
+def get_common_crs_info(crs_infos):
+
+    """Ermittelt ein gemeinsames CRS fuer Projekt-Metadaten, falls alle Punktwolken gleich sind."""
+
+    crs_info_list = list(crs_infos)
+
+    if not crs_info_list or any(not info for info in crs_info_list):
+
+        return None
+
+    cleaned_infos = crs_info_list
+
+    first_value = get_crs_summary_text(cleaned_infos[0])
+
+    if all(get_crs_summary_text(info) == first_value for info in cleaned_infos):
+
+        return cleaned_infos[0]
+
+    return None
+
+
+
 def normalize_upload_sources(sources):
 
     """Normalisiert eine einzelne Datei oder eine Dateiliste fuer den Upload."""
@@ -1352,11 +2212,11 @@ def make_unique_cloud_slug(source_path, used_slugs):
 
 
 
-def create_pointcloud_index_entry(name, input_format, viewer_path, s3_path):
+def create_pointcloud_index_entry(name, input_format, viewer_path, s3_path, crs_info=None):
 
     """Erzeugt den Viewer-kompatiblen Indexeintrag fuer eine Punktwolke."""
 
-    return {
+    entry = {
 
         "name": name,
 
@@ -1369,6 +2229,10 @@ def create_pointcloud_index_entry(name, input_format, viewer_path, s3_path):
         "visible": True
 
     }
+
+    apply_crs_metadata(entry, crs_info)
+
+    return entry
 
 
 
@@ -2389,6 +3253,30 @@ def upload_files_to_s3(s3_client, files_to_upload, ui=None):
 
 
 
+def get_hidden_converter_process_kwargs():
+
+    """Verhindert, dass der PotreeConverter unter Windows ein Konsolenfenster in den Vordergrund bringt."""
+
+    if os.name != "nt":
+
+        return {}
+
+    startupinfo = subprocess.STARTUPINFO()
+
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+
+    return {
+
+        "startupinfo": startupinfo,
+
+        "creationflags": subprocess.CREATE_NO_WINDOW,
+
+    }
+
+
+
 def run_potree_conversion(laz_file, converter_path, output_dir, ui=None):
 
     """Fuehrt den Potree Converter aus und schreibt den Fortschritt ins passende Log."""
@@ -2421,7 +3309,9 @@ def run_potree_conversion(laz_file, converter_path, output_dir, ui=None):
 
         universal_newlines=True,
 
-        bufsize=1
+        bufsize=1,
+
+        **get_hidden_converter_process_kwargs()
 
     )
 
@@ -2521,7 +3411,7 @@ class UploadProgress:
 
 
 
-def run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_secret, converter_path, output_base_dir):
+def run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_secret, converter_path, output_base_dir, crs_input=""):
 
     """Laedt mehrere Punktwolken als ein Viewer-Projekt hoch."""
 
@@ -2571,13 +3461,27 @@ def run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_sec
 
             needs_converter = needs_converter or input_format == "potree"
 
+            crs_info = resolve_pointcloud_crs(source_path, crs_input)
+
+            crs_display = get_crs_summary_text(crs_info)
+
+            if crs_display:
+
+                log(f"[CRS] {os.path.basename(source_path)}: {crs_display}")
+
+            else:
+
+                log(f"[CRS] {os.path.basename(source_path)}: kein CRS gefunden")
+
             validated_sources.append({
 
                 "path": source_path,
 
                 "format": input_format,
 
-                "name": get_pointcloud_display_name(source_path)
+                "name": get_pointcloud_display_name(source_path),
+
+                "crs": crs_info
 
             })
 
@@ -2637,6 +3541,8 @@ def run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_sec
 
             cloud_name = source["name"]
 
+            crs_info = source.get("crs")
+
             cloud_slug = make_unique_cloud_slug(source_path, used_slugs)
 
             cloud_viewer_path = f"{project_viewer_root}/{cloud_slug}"
@@ -2675,6 +3581,8 @@ def run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_sec
 
                     raise RuntimeError(f"{cloud_name}: {output_message}")
 
+                write_potree_metadata_crs(output_dir, crs_info)
+
                 files_to_upload.extend(collect_upload_files("potree", cloud_s3_prefix, output_dir=output_dir))
 
                 viewer_path = cloud_viewer_path
@@ -2689,7 +3597,9 @@ def run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_sec
 
                 viewer_path,
 
-                pointcloud_s3_path
+                pointcloud_s3_path,
+
+                crs_info
 
             ))
 
@@ -2746,6 +3656,10 @@ def run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_sec
             "pointclouds": pointcloud_entries
 
         }
+
+        common_crs = get_common_crs_info([source.get("crs") for source in validated_sources])
+
+        apply_crs_metadata(new_project, common_crs)
 
         index_data["projects"].insert(0, new_project)
 
@@ -2857,7 +3771,7 @@ def run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_sec
 
 
 
-def run_process(laz_file, kunde, projekt, aws_access, aws_secret):
+def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input=""):
 
     config = load_config()
 
@@ -2873,7 +3787,7 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret):
 
     if len(upload_sources) > 1:
 
-        run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_secret, converter_path, output_base_dir)
+        run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_secret, converter_path, output_base_dir, crs_input)
 
         return
 
@@ -2912,6 +3826,18 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret):
         input_format = detect_input_format(laz_file)
 
         is_copc = input_format == "copc"
+
+        crs_info = resolve_pointcloud_crs(laz_file, crs_input)
+
+        crs_display = get_crs_summary_text(crs_info)
+
+        if crs_display:
+
+            log(f"[CRS] {crs_display}")
+
+        else:
+
+            log("[CRS] Kein CRS gefunden")
 
 
 
@@ -3031,7 +3957,9 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret):
 
                 universal_newlines=True,
 
-                bufsize=1
+                bufsize=1,
+
+                **get_hidden_converter_process_kwargs()
 
             )
 
@@ -3080,6 +4008,8 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret):
             log("[KONVERTIERUNG] Potree Konvertierung abgeschlossen")
 
             root.after(0, lambda: progress_bar.set(1))
+
+            write_potree_metadata_crs(output_dir, crs_info)
 
 
 
@@ -3284,6 +4214,8 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret):
 
         }
 
+        apply_crs_metadata(new_project, crs_info)
+
         index_data["projects"].insert(0, new_project)
 
 
@@ -3439,6 +4371,90 @@ def set_selected_upload_files(file_paths):
         entry_file.insert(0, f"{len(selected_upload_files)} Punktwolken ausgewählt")
 
     update_drop_zone_text(selected_upload_files)
+
+    update_crs_entry_from_selection(selected_upload_files)
+
+
+
+def update_crs_entry_from_selection(file_paths, force=False):
+
+    """Fuellt das CRS-Feld aus der LAS/LAZ/COPC-Metadatenreferenz, sofern eindeutig."""
+
+    global last_auto_crs_entry_value
+
+    if "entry_crs" not in globals() or not widget_exists(entry_crs):
+
+        return
+
+    current_value = entry_crs.get().strip()
+
+    if current_value and current_value != last_auto_crs_entry_value and not force:
+
+        return
+
+    status_label = globals().get("crs_status_label")
+
+    normalized_paths = normalize_upload_sources(file_paths)
+
+    if not normalized_paths:
+
+        if widget_exists(status_label):
+
+            status_label.configure(text="Bitte zuerst eine Punktwolke auswählen.", text_color=COLOR_TEXT_DIM)
+
+        log("[CRS] Keine Punktwolke ausgewählt.")
+
+        return
+
+    crs_infos = [detect_pointcloud_crs(path) for path in normalized_paths]
+
+    common_crs = get_common_crs_info(crs_infos)
+
+    auto_value = get_crs_display_value(common_crs)
+
+    summary = get_crs_summary_text(common_crs)
+
+    entry_crs.delete(0, tk.END)
+
+    if auto_value:
+
+        entry_crs.insert(0, auto_value)
+
+        if widget_exists(status_label):
+
+            status_label.configure(text=f"Erkannt: {summary}", text_color=COLOR_SUCCESS)
+
+        log(f"[CRS] Automatisch erkannt: {summary}")
+
+    elif any(crs_infos):
+
+        if widget_exists(status_label):
+
+            status_label.configure(
+
+                text="Unterschiedliche CRS erkannt. Sie werden je Punktwolke in den Metadaten gespeichert.",
+
+                text_color=COLOR_TEXT_DIM
+
+            )
+
+        log("[CRS] Unterschiedliche CRS erkannt; sie werden pro Punktwolke gespeichert.")
+
+    else:
+
+        if widget_exists(status_label):
+
+            status_label.configure(
+
+                text="Kein CRS in der Auswahl gefunden. Bei Bedarf manuell eintragen.",
+
+                text_color=COLOR_TEXT_DIM
+
+            )
+
+        log("[CRS] Keine CRS-Referenz in der Auswahl gefunden.")
+
+    last_auto_crs_entry_value = auto_value
 
 
 
@@ -3647,6 +4663,12 @@ def start_thread():
 
     projekt = entry_proj.get().strip()
 
+    crs_input = entry_crs.get().strip() if "entry_crs" in globals() and widget_exists(entry_crs) else ""
+
+    if crs_input == last_auto_crs_entry_value:
+
+        crs_input = ""
+
 
 
     if not upload_sources:
@@ -3677,7 +4699,7 @@ def start_thread():
 
         target=run_process,
 
-        args=(upload_sources, kunde, projekt, aws_access, aws_secret),
+        args=(upload_sources, kunde, projekt, aws_access, aws_secret, crs_input),
 
         daemon=True
 
@@ -4242,6 +5264,8 @@ def duplicate_project_process(project_info, new_kunde, new_projekt, aws_access, 
             "s3_path": new_s3_prefix
 
         }
+
+        copy_existing_crs_metadata(project_info, new_project)
 
         rewritten_pointclouds = rewrite_project_pointclouds_for_duplicate(project_info, source_s3_path, new_s3_prefix)
 
@@ -6405,35 +7429,78 @@ def show_local_conversion_view():
     )
     source_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
 
-    output_entry_ref = {"widget": None}
-    result_entry_ref = {"widget": None}
     ui_context = {}
+    local_auto_output_dir = {"value": ""}
+    local_auto_crs_value = {"value": ""}
 
     def build_local_output_dir(source_path, output_base_dir):
         source_name = os.path.splitext(os.path.basename(source_path))[0]
         folder_name = sanitize_folder_name(source_name) or "potree_export"
         return os.path.join(output_base_dir, f"{folder_name}_potree")
 
-    def update_output_preview():
-        result_widget = result_entry_ref["widget"]
-        output_widget = output_entry_ref["widget"]
-        if not widget_exists(result_widget):
+    def update_local_output_from_source(force=False):
+        source_path = source_entry.get().strip()
+        current_output = output_entry.get().strip()
+        if current_output and current_output != local_auto_output_dir["value"] and not force:
             return
 
-        source_path = source_entry.get().strip()
-        output_base_dir = output_widget.get().strip() if widget_exists(output_widget) else ""
+        configured_base_dir = load_config().get("output_base_dir", "")
+        if not source_path or not configured_base_dir:
+            return
 
-        result_widget.configure(state="normal")
-        result_widget.delete(0, tk.END)
-        if source_path and output_base_dir:
-            result_widget.insert(0, build_local_output_dir(source_path, output_base_dir))
-        result_widget.configure(state="readonly")
+        output_dir = os.path.abspath(build_local_output_dir(source_path, configured_base_dir))
+        output_entry.delete(0, tk.END)
+        output_entry.insert(0, output_dir)
+        local_auto_output_dir["value"] = output_dir
+
+    def update_local_crs_from_source(force=False):
+        source_path = source_entry.get().strip()
+        current_crs = local_crs_entry.get().strip()
+        if current_crs and current_crs != local_auto_crs_value["value"] and not force:
+            return
+
+        if not source_path:
+            local_crs_status.configure(
+                text="Bitte zuerst eine LAS/LAZ-Datei auswählen.",
+                text_color=COLOR_TEXT_DIM
+            )
+            ui_log("[CRS] Keine Quelldatei ausgewählt.", ui_context)
+            return
+
+        if not os.path.isfile(source_path):
+            local_crs_status.configure(
+                text="Quelldatei nicht gefunden.",
+                text_color=COLOR_DANGER
+            )
+            ui_log("[CRS] Quelldatei nicht gefunden.", ui_context)
+            return
+
+        crs_info = detect_pointcloud_crs(source_path)
+        crs_value = get_crs_display_value(crs_info)
+        crs_summary = get_crs_summary_text(crs_info)
+
+        local_crs_entry.delete(0, tk.END)
+        if crs_value:
+            local_crs_entry.insert(0, crs_value)
+            local_crs_status.configure(
+                text=f"Erkannt: {crs_summary}",
+                text_color=COLOR_SUCCESS
+            )
+            ui_log(f"[CRS] Automatisch erkannt: {crs_summary}", ui_context)
+        else:
+            local_crs_status.configure(
+                text="Kein CRS in der Datei gefunden. Bei Bedarf manuell eintragen.",
+                text_color=COLOR_TEXT_DIM
+            )
+            ui_log("[CRS] Keine CRS-Referenz in der Quelldatei gefunden.", ui_context)
+        local_auto_crs_value["value"] = crs_value
 
     def set_source_file(file_path):
         source_entry.delete(0, tk.END)
         source_entry.insert(0, file_path)
         set_drop_zone_text(drop_label, file_path)
-        update_output_preview()
+        update_local_output_from_source()
+        update_local_crs_from_source()
 
     def browse_source_file():
         file_path = filedialog.askopenfilename(
@@ -6498,7 +7565,7 @@ def show_local_conversion_view():
 
     ctk.CTkLabel(
         target_card,
-        text="Im Zielordner wird automatisch ein neuer Unterordner für das Potree-Projekt angelegt.",
+        text="Das Potree-Projekt wird direkt in diesen Ordner geschrieben.",
         font=ctk.CTkFont(size=11),
         text_color=COLOR_TEXT_DIM,
         wraplength=760,
@@ -6510,19 +7577,18 @@ def show_local_conversion_view():
 
     output_entry = ctk.CTkEntry(
         target_row,
-        placeholder_text="Lokalen Zielordner wählen",
+        placeholder_text="Ausgabeordner für das Potree-Projekt wählen",
         font=ctk.CTkFont(family="Consolas", size=11),
         height=34
     )
     output_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
-    output_entry_ref["widget"] = output_entry
 
     def browse_output_dir():
-        folder = filedialog.askdirectory(title="Lokalen Zielordner wählen")
+        folder = filedialog.askdirectory(title="Ausgabeordner für das Potree-Projekt wählen")
         if folder:
             output_entry.delete(0, tk.END)
             output_entry.insert(0, folder)
-            update_output_preview()
+            local_auto_output_dir["value"] = ""
 
     ctk.CTkButton(
         target_row,
@@ -6534,50 +7600,52 @@ def show_local_conversion_view():
         command=browse_output_dir
     ).pack(side="right")
 
-    result_card = ctk.CTkFrame(convert_scroll, corner_radius=12)
-    result_card.pack(fill="x", pady=(0, 12))
+    crs_card = ctk.CTkFrame(convert_scroll, corner_radius=12)
+    crs_card.pack(fill="x", pady=(0, 12))
 
     ctk.CTkLabel(
-        result_card,
-        text="Ausgabe",
+        crs_card,
+        text="Koordinatensystem",
         font=ctk.CTkFont(size=15, weight="bold")
     ).pack(anchor="w", padx=16, pady=(14, 8))
 
     ctk.CTkLabel(
-        result_card,
-        text="Voraussichtlicher Ausgabeordner:",
+        crs_card,
+        text="Leer lassen, wenn die Punktwolke nicht referenziert ist.",
         font=ctk.CTkFont(size=11),
-        text_color=COLOR_TEXT_DIM
-    ).pack(anchor="w", padx=16, pady=(0, 4))
+        text_color=COLOR_TEXT_DIM,
+        wraplength=760,
+        justify="left"
+    ).pack(anchor="w", padx=16, pady=(0, 8))
 
-    result_entry = ctk.CTkEntry(
-        result_card,
-        font=ctk.CTkFont(family="Consolas", size=11),
-        state="readonly",
+    crs_row = ctk.CTkFrame(crs_card, fg_color="transparent")
+    crs_row.pack(fill="x", padx=16, pady=(0, 14))
+
+    local_crs_entry = ctk.CTkEntry(
+        crs_row,
+        placeholder_text="Automatisch, EPSG:25832 oder CRS-Name",
+        font=ctk.CTkFont(size=12),
         height=34
     )
-    result_entry.pack(fill="x", padx=16, pady=(0, 8))
-    result_entry_ref["widget"] = result_entry
-
-    def open_result_folder():
-        result_path = result_entry.get().strip()
-        if not result_path:
-            messagebox.showwarning("Fehler", "Es ist noch kein Ausgabeordner vorhanden.")
-            return
-        if not os.path.isdir(result_path):
-            messagebox.showwarning("Fehler", "Der Ausgabeordner existiert noch nicht.")
-            return
-        os.startfile(result_path)
+    local_crs_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
 
     ctk.CTkButton(
-        result_card,
-        text="Ausgabeordner öffnen",
-        width=190,
+        crs_row,
+        text="Erkennen",
+        width=120,
         font=ctk.CTkFont(size=12),
         fg_color=COLOR_ACCENT,
         hover_color=COLOR_ACCENT_HOVER,
-        command=open_result_folder
-    ).pack(anchor="w", padx=16, pady=(0, 14))
+        command=lambda: update_local_crs_from_source(force=True)
+    ).pack(side="right")
+
+    local_crs_status = ctk.CTkLabel(
+        crs_card,
+        text="",
+        font=ctk.CTkFont(size=11),
+        text_color=COLOR_TEXT_DIM
+    )
+    local_crs_status.pack(anchor="w", padx=16, pady=(0, 14))
 
     progress_card = ctk.CTkFrame(convert_scroll, corner_radius=12)
     progress_card.pack(fill="x", pady=(0, 12))
@@ -6625,7 +7693,7 @@ def show_local_conversion_view():
         "log": log_box,
     })
 
-    def run_local_conversion(source_file, output_base_dir, output_dir, converter_path):
+    def run_local_conversion(source_file, output_dir, converter_path, crs_input):
         try:
             ui_log("[KONVERTIERUNG] Starte lokale Potree-Konvertierung", ui_context)
             ui_log(f"[QUELLE] {source_file}", ui_context)
@@ -6635,15 +7703,22 @@ def show_local_conversion_view():
             ui_set_detail("Der lokale Potree-Projektordner wird vorbereitet", ui_context)
             ui_set_progress(0.05, ui_context)
 
-            os.makedirs(output_base_dir, exist_ok=True)
+            output_parent_dir = os.path.dirname(output_dir)
+            if output_parent_dir:
+                os.makedirs(output_parent_dir, exist_ok=True)
+            os.makedirs(output_dir, exist_ok=True)
 
-            if os.path.isdir(output_dir):
-                ui_log("[CLEANUP] Vorhandenen Ausgabeordner entfernen", ui_context)
-                shutil.rmtree(output_dir)
+            crs_info = resolve_pointcloud_crs(source_file, crs_input)
+            crs_display = get_crs_summary_text(crs_info)
+            if crs_display:
+                ui_log(f"[CRS] {crs_display}", ui_context)
+            else:
+                ui_log("[CRS] Kein CRS gefunden", ui_context)
 
             ui_set_step("Konvertiere mit Potree...", 2, ui_context)
             ui_set_detail("Die Punktwolke wird lokal in das Potree-Format umgewandelt", ui_context)
             run_potree_conversion(source_file, converter_path, output_dir, ui=ui_context)
+            write_potree_metadata_crs(output_dir, crs_info, ui=ui_context)
 
             ui_set_step("Prüfe Ergebnis...", 3, ui_context)
             ui_set_detail("Die konvertierten Daten werden lokal bereitgestellt", ui_context)
@@ -6684,7 +7759,10 @@ def show_local_conversion_view():
 
     def start_local_conversion():
         source_file = source_entry.get().strip()
-        output_base_dir = output_entry.get().strip()
+        output_dir = output_entry.get().strip()
+        crs_input = local_crs_entry.get().strip()
+        if crs_input == local_auto_crs_value["value"]:
+            crs_input = ""
 
         if not source_file or not os.path.isfile(source_file):
             messagebox.showwarning("Fehler", "Bitte eine gültige LAS/LAZ Datei auswählen.")
@@ -6695,7 +7773,7 @@ def show_local_conversion_view():
             messagebox.showwarning("Fehler", "Es können nur .las oder .laz Dateien lokal konvertiert werden.")
             return
 
-        if not output_base_dir:
+        if not output_dir:
             messagebox.showwarning("Fehler", "Bitte einen lokalen Zielordner auswählen.")
             return
 
@@ -6708,31 +7786,26 @@ def show_local_conversion_view():
             )
             return
 
-        output_base_dir = os.path.abspath(output_base_dir)
-        output_dir = os.path.abspath(build_local_output_dir(source_file, output_base_dir))
+        output_dir = os.path.abspath(output_dir)
 
-        try:
-            if os.path.commonpath([output_base_dir, output_dir]) != output_base_dir:
-                raise ValueError("Ungültiger Zielordner")
-        except ValueError:
-            messagebox.showerror("Fehler", "Der Zielordner für die lokale Konvertierung ist ungültig.")
+        if os.path.isfile(output_dir):
+            messagebox.showerror("Fehler", "Der lokale Zielpfad ist eine Datei. Bitte einen Ordner wählen.")
             return
 
-        if os.path.isdir(output_dir):
+        if os.path.isdir(output_dir) and os.listdir(output_dir):
             overwrite = messagebox.askyesno(
                 "Ausgabeordner existiert bereits",
-                f"Der Ausgabeordner existiert bereits und wird überschrieben:\n\n{output_dir}\n\nMöchtest du fortfahren?"
+                f"Der Ausgabeordner enthält bereits Dateien. Potree schreibt mit --overwrite in diesen Ordner:\n\n{output_dir}\n\nMöchtest du fortfahren?"
             )
             if not overwrite:
                 return
 
-        update_output_preview()
         ui_reset_progress(ui_context)
         start_convert_button.configure(state="disabled", text="Konvertierung läuft...")
 
         thread = threading.Thread(
             target=run_local_conversion,
-            args=(source_file, output_base_dir, output_dir, converter_path),
+            args=(source_file, output_dir, converter_path, crs_input),
             daemon=True
         )
         thread.start()
@@ -6750,12 +7823,12 @@ def show_local_conversion_view():
     )
     start_convert_button.pack(anchor="w", pady=(0, 12))
 
-    config = load_config()
-    if config.get("output_base_dir"):
-        output_entry.insert(0, config["output_base_dir"])
-
-    source_entry.bind("<KeyRelease>", lambda _event: update_output_preview())
-    output_entry.bind("<KeyRelease>", lambda _event: update_output_preview())
+    source_entry.bind("<KeyRelease>", lambda _event: (
+        update_local_output_from_source(),
+        update_local_crs_from_source()
+    ))
+    output_entry.bind("<KeyRelease>", lambda _event: local_auto_output_dir.update({"value": ""}))
+    local_crs_entry.bind("<KeyRelease>", lambda _event: local_auto_crs_value.update({"value": ""}))
 
 
 
@@ -7667,7 +8740,7 @@ entry_kunde.pack(side="left", padx=(10, 0))
 
 row_proj = ctk.CTkFrame(card_data, fg_color="transparent")
 
-row_proj.pack(fill="x", padx=16, pady=(0, 14))
+row_proj.pack(fill="x", padx=16, pady=(0, 6))
 
 ctk.CTkLabel(row_proj, text="Projekt", width=80, anchor="e",
 
@@ -7678,6 +8751,60 @@ entry_proj = ctk.CTkEntry(row_proj, width=300, font=ctk.CTkFont(size=12),
                             placeholder_text="z.B. Halle 1")
 
 entry_proj.pack(side="left", padx=(10, 0))
+
+
+
+# CRS
+
+row_crs = ctk.CTkFrame(card_data, fg_color="transparent")
+
+row_crs.pack(fill="x", padx=16, pady=(0, 4))
+
+ctk.CTkLabel(row_crs, text="CRS", width=80, anchor="e",
+
+             font=ctk.CTkFont(size=12), text_color=COLOR_TEXT_DIM).pack(side="left")
+
+entry_crs = ctk.CTkEntry(row_crs, width=300, font=ctk.CTkFont(size=12),
+
+                            placeholder_text="Automatisch, EPSG:25832 oder CRS-Name")
+
+entry_crs.pack(side="left", padx=(10, 8))
+
+ctk.CTkButton(
+
+    row_crs,
+
+    text="Erkennen",
+
+    width=100,
+
+    height=32,
+
+    fg_color=COLOR_ACCENT,
+
+    hover_color=COLOR_ACCENT_HOVER,
+
+    text_color="#e2e8f0",
+
+    font=ctk.CTkFont(size=12),
+
+    command=lambda: update_crs_entry_from_selection(get_upload_sources_from_ui(), force=True)
+
+).pack(side="left")
+
+crs_status_label = ctk.CTkLabel(
+
+    card_data,
+
+    text="",
+
+    font=ctk.CTkFont(size=11),
+
+    text_color=COLOR_TEXT_DIM
+
+)
+
+crs_status_label.pack(anchor="w", padx=(106, 16), pady=(0, 14))
 
 
 
