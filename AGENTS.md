@@ -28,6 +28,8 @@ Erst wenn Manifest, Tag, Release und Installer-Asset zusammenpassen, zeigt eine 
 
 Wichtig: Das Manifest darf nicht auf eine Version zeigen, fuer die kein passendes GitHub-Release-Asset existiert. Sonst wird ein Update angeboten, das beim Download oder bei der Pruefung scheitert.
 
+Seit Version 1.7.10 prueft der Updater keine Authenticode-Signatur mehr, sondern verlaesst sich auf die HTTPS-Download-URL und den SHA-256-Hash aus `latest-release.json`. Altversionen, die noch eine Authenticode-Pruefung enthalten, koennen unsignierte Installer nicht automatisch starten; in diesem Fall muss einmalig manuell auf 1.7.10 oder neuer installiert werden.
+
 ## Git-Hinweise
 
 Vor dem Commit immer `git status --short --branch` pruefen. Nicht verwandte lokale Aenderungen nicht versehentlich mitcommiten.
