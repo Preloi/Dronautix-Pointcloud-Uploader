@@ -1777,6 +1777,127 @@ def collect_upload_files(input_format, s3_prefix, source_file=None, output_dir=N
 
 
 
+def infer_cloud_name(source_path):
+
+    """Leitet einen sprechenden Punktwolken-Namen aus Datei oder Ordner ab."""
+
+    source_type, normalized_source = resolve_replacement_source(source_path)
+
+    if source_type == "potree_dir":
+
+        return os.path.basename(normalized_source.rstrip("\\/")) or "Punktwolke"
+
+    base_name = os.path.basename(normalized_source or source_path)
+
+    if base_name.lower().endswith(".copc.laz"):
+
+        return base_name[:-len(".copc.laz")]
+
+    return os.path.splitext(base_name)[0] or "Punktwolke"
+
+
+
+
+def make_unique_slug(name, used_slugs):
+
+    """Erzeugt einen eindeutigen, S3-tauglichen Slug innerhalb eines Projekts."""
+
+    base_slug = sanitize_folder_name(name) or "punktwolke"
+
+    slug = base_slug
+
+    counter = 2
+
+    while slug in used_slugs:
+
+        slug = f"{base_slug}_{counter}"
+
+        counter += 1
+
+    used_slugs.add(slug)
+
+    return slug
+
+
+
+
+def prepare_multi_replacement_sources(source_entries):
+
+    """Validiert und normalisiert mehrere Austauschquellen."""
+
+    if not source_entries:
+
+        raise ValueError("Bitte mindestens eine Punktwolke zur Multi-Liste hinzufügen.")
+
+    prepared_sources = []
+
+    used_names = set()
+
+    used_slugs = set()
+
+    for idx, entry in enumerate(source_entries, 1):
+
+        raw_source = str(entry.get("source", "")).strip()
+
+        if not raw_source:
+
+            raise ValueError(f"Punktwolke {idx}: Quelle fehlt.")
+
+        source_type, normalized_source = resolve_replacement_source(raw_source)
+
+        if source_type == "potree_dir":
+
+            valid, message = validate_potree_output_dir(normalized_source)
+
+            input_format = "potree"
+
+        elif source_type == "raw_file":
+
+            valid, message = validate_file(normalized_source)
+
+            input_format = detect_input_format(normalized_source)
+
+        else:
+
+            valid, message = False, "Quelle muss eine LAS/LAZ/COPC-Datei oder ein Potree-Ordner sein."
+
+            input_format = ""
+
+        if not valid:
+
+            raise ValueError(f"Punktwolke {idx}: {message}")
+
+        cloud_name = str(entry.get("name", "")).strip() or infer_cloud_name(normalized_source)
+
+        name_key = cloud_name.casefold()
+
+        if name_key in used_names:
+
+            raise ValueError(f"Punktwolke '{cloud_name}' ist doppelt vorhanden.")
+
+        used_names.add(name_key)
+
+        cloud_slug = make_unique_slug(cloud_name, used_slugs)
+
+        prepared_sources.append({
+
+            "name": cloud_name,
+
+            "slug": cloud_slug,
+
+            "source": normalized_source,
+
+            "source_type": source_type,
+
+            "format": input_format,
+
+        })
+
+    return prepared_sources
+
+
+
+
 def upload_files_to_s3(s3_client, files_to_upload, ui=None):
 
     """Laedt Dateien nach S3 hoch und aktualisiert die passende Fortschrittsanzeige."""
@@ -2578,6 +2699,23 @@ def extract_dropped_file(event_data):
 
 
 
+def extract_dropped_files(event_data):
+
+    """Extrahiert alle Dateien/Ordner aus einem Drag-and-Drop Event."""
+
+    try:
+
+        file_list = root.tk.splitlist(event_data)
+
+    except tk.TclError:
+
+        file_list = [event_data]
+
+    return [str(file_path).strip('{}') for file_path in file_list if str(file_path).strip('{}')]
+
+
+
+
 
 def set_drop_zone_text(drop_label, file_path, empty_text="Datei hier hineinziehen (Drag & Drop)"):
 
@@ -3140,6 +3278,281 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
 
             cleanup_local_files(temp_output_dir)
 
+
+
+
+
+def replace_project_with_multi_pointclouds(project_info, replacement_entries, aws_access, aws_secret, on_success=None, ui=None):
+
+    """Ersetzt ein Projekt durch mehrere Punktwolken und schreibt pointclouds[] in den Index."""
+
+    config = load_config()
+
+    configured_converter_path = config.get("converter_path", "")
+
+    converter_path = resolve_converter_path(configured_converter_path)
+
+    output_base_dir = config.get("output_base_dir", "")
+
+    project_name = project_info.get("projekt", "")
+
+    project_id = project_info.get("id", "")
+
+    project_link = project_info.get("link", "")
+
+    s3_prefix = project_info.get("s3_path", "")
+
+    temp_output_dirs = []
+
+    try:
+
+        ui_reset_progress(ui)
+
+        ui_set_step("Pruefe Multi-Punktwolken...", 1, ui)
+
+        ui_set_progress(0, ui)
+
+        prepared_sources = prepare_multi_replacement_sources(replacement_entries)
+
+        needs_converter = any(
+
+            source["source_type"] == "raw_file" and source["format"] == "potree"
+
+            for source in prepared_sources
+
+        )
+
+        if not aws_access or not aws_secret:
+
+            raise ValueError("Bitte AWS Zugangsdaten in den Einstellungen eingeben!")
+
+        if needs_converter and not converter_path:
+
+            raise ValueError("Kein Potree Converter verfügbar.")
+
+        if needs_converter and not output_base_dir:
+
+            raise ValueError("Bitte einen Output-Ordner in den Einstellungen angeben.")
+
+        if not s3_prefix or not project_id:
+
+            raise ValueError("Projektdaten sind unvollständig.")
+
+        base_viewer_path = s3_prefix[len("pointclouds/"):] if s3_prefix.startswith("pointclouds/") else s3_prefix
+
+        ui_log(f"[MULTI] Ersetze Projekt '{project_name}' ({project_id}) mit {len(prepared_sources)} Punktwolken", ui)
+
+        ui_log(f"[MULTI] Zielbasis: {s3_prefix}", ui)
+
+        ui_set_step("Verbinde mit S3...", 2, ui)
+
+        ui_set_detail("Verbinde mit dem Projekt-Storage...", ui)
+
+        s3_client = create_s3_client(aws_access, aws_secret)
+
+        existing_keys = collect_project_objects(s3_client, s3_prefix)
+
+        uploaded_keys = set()
+
+        pointcloud_entries = []
+
+        total_sources = len(prepared_sources)
+
+        for source_index, source in enumerate(prepared_sources, 1):
+
+            source_name = source["name"]
+
+            source_slug = source["slug"]
+
+            source_path = source["source"]
+
+            child_s3_prefix = f"{s3_prefix}/{source_slug}"
+
+            child_viewer_path = f"{base_viewer_path}/{source_slug}"
+
+            ui_set_step(f"Bereite Punktwolke {source_index}/{total_sources} vor...", 2, ui)
+
+            ui_set_detail(source_name, ui)
+
+            ui_log(f"[MULTI] Punktwolke {source_index}/{total_sources}: {source_name}", ui)
+
+            if source["source_type"] == "potree_dir":
+
+                upload_source_dir = source_path
+
+                input_format = "potree"
+
+                ui_log(f"[MULTI] Verwende Potree-Ordner: {upload_source_dir}", ui)
+
+            elif source["format"] == "copc":
+
+                upload_source_dir = ""
+
+                input_format = "copc"
+
+                child_viewer_path = f"{child_viewer_path}/source.copc.laz"
+
+                ui_log(f"[MULTI] Verwende COPC-Direktupload: {os.path.basename(source_path)}", ui)
+
+            else:
+
+                input_format = "potree"
+
+                output_dir = os.path.join(
+
+                    output_base_dir,
+
+                    "_multi_project_replacements",
+
+                    f"{project_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+
+                    source_slug
+
+                )
+
+                temp_output_dirs.append(output_dir)
+
+                ui_set_step(f"Konvertiere Punktwolke {source_index}/{total_sources}...", 2, ui)
+
+                ui_set_detail(f"{source_name} wird in das Potree-Format umgewandelt", ui)
+
+                run_potree_conversion(source_path, converter_path, output_dir, ui=ui)
+
+                upload_source_dir = output_dir
+
+            ui_set_step(f"Lade Punktwolke {source_index}/{total_sources} hoch...", 3, ui)
+
+            if input_format == "copc":
+
+                files_to_upload = collect_upload_files("copc", child_s3_prefix, source_file=source_path)
+
+            else:
+
+                files_to_upload = collect_upload_files("potree", child_s3_prefix, output_dir=upload_source_dir)
+
+            if not files_to_upload:
+
+                raise RuntimeError(f"Keine Dateien zum Upload fuer '{source_name}' gefunden.")
+
+            upload_files_to_s3(s3_client, files_to_upload, ui=ui)
+
+            uploaded_keys.update(s3_key for _, s3_key in files_to_upload)
+
+            pointcloud_entries.append({
+
+                "name": source_name,
+
+                "format": input_format,
+
+                "viewer_path": child_viewer_path,
+
+                "s3_path": child_s3_prefix if input_format != "copc" else f"{child_s3_prefix}/source.copc.laz",
+
+            })
+
+        ui_set_step("Bereinige alte Projektdateien...", 4, ui)
+
+        obsolete_keys = [key for key in existing_keys if key not in uploaded_keys]
+
+        if obsolete_keys:
+
+            ui_set_detail(f"Entferne {len(obsolete_keys)} alte Dateien...", ui)
+
+            ui_log(f"[MULTI] Entferne {len(obsolete_keys)} alte Dateien aus dem Projekt", ui)
+
+            delete_s3_objects(s3_client, obsolete_keys)
+
+        ui_set_step("Aktualisiere Projekt-Index...", 5, ui)
+
+        index_data = load_projects_index(s3_client)
+
+        updated = False
+
+        for idx, project in enumerate(index_data.get("projects", [])):
+
+            if project.get("id") == project_id:
+
+                updated_project = dict(project)
+
+                updated_project.update({
+
+                    "format": "multi",
+
+                    "viewer_path": base_viewer_path,
+
+                    "s3_path": s3_prefix,
+
+                    "pointclouds": pointcloud_entries,
+
+                })
+
+                index_data["projects"][idx] = updated_project
+
+                updated = True
+
+                break
+
+        if not updated:
+
+            raise RuntimeError("Projekt wurde im Index nicht gefunden.")
+
+        save_projects_index(s3_client, index_data)
+
+        ui_set_progress(1, ui)
+
+        ui_set_detail("Multi-Projekt wurde aktualisiert.", ui)
+
+        ui_log("=" * 50, ui)
+
+        ui_log("MULTI-PUNKTWOLKEN ERFOLGREICH AUSGETAUSCHT", ui)
+
+        ui_log(f"Projekt: {project_name} ({project_id})", ui)
+
+        ui_log(f"Punktwolken: {len(pointcloud_entries)}", ui)
+
+        ui_log(f"Link unverändert: {project_link}", ui)
+
+        ui_log("=" * 50, ui)
+
+        root.after(0, lambda: root.clipboard_clear())
+
+        root.after(0, lambda: root.clipboard_append(project_link))
+
+        root.after(0, lambda: messagebox.showinfo(
+
+            "Erfolg",
+
+            f"'{project_name}' wurde als Multi-Punktwolken-Projekt aktualisiert.\n\n"
+
+            f"Punktwolken: {len(pointcloud_entries)}\n\nLink bleibt unverändert."
+
+        ))
+
+        if on_success:
+
+            root.after(0, on_success)
+
+    except Exception as e:
+
+        ui_log(f"[MULTI] [FEHLER] {e}", ui)
+
+        log(f"[MULTI] [FEHLER] {e}")
+
+        import traceback
+
+        ui_log(traceback.format_exc(), ui)
+
+        log(traceback.format_exc())
+
+        root.after(0, lambda err=e: messagebox.showerror("Fehler", f"Multi-Austausch fehlgeschlagen:\n{err}"))
+
+    finally:
+
+        for temp_dir in temp_output_dirs:
+
+            if temp_dir and os.path.exists(temp_dir):
+
+                cleanup_local_files(temp_dir)
 
 
 
@@ -4099,15 +4512,63 @@ def show_projects_view():
 
     )
 
-    tree.heading("id", text="ID")
+    sort_state = {"column": "datum", "reverse": True}
 
-    tree.heading("kunde", text="Kunde")
+    heading_labels = {
+        "id": "ID",
+        "kunde": "Kunde",
+        "projekt": "Projekt",
+        "datum": "Datum",
+        "url": "Web-Link",
+    }
 
-    tree.heading("projekt", text="Projekt")
+    def update_project_headings():
 
-    tree.heading("datum", text="Datum")
+        for column, label in heading_labels.items():
 
-    tree.heading("url", text="Web-Link")
+            marker = ""
+
+            if sort_state["column"] == column:
+
+                marker = " ↓" if sort_state["reverse"] else " ↑"
+
+            if column in ("kunde", "projekt", "datum"):
+
+                tree.heading(
+
+                    column,
+
+                    text=f"{label}{marker}",
+
+                    command=lambda col=column: sort_projects_by(col)
+
+                )
+
+            else:
+
+                tree.heading(column, text=label)
+
+
+
+    def sort_projects_by(column):
+
+        if sort_state["column"] == column:
+
+            sort_state["reverse"] = not sort_state["reverse"]
+
+        else:
+
+            sort_state["column"] = column
+
+            sort_state["reverse"] = column == "datum"
+
+        update_project_headings()
+
+        load_projects(customer_filter.get(), search_entry.get().strip())
+
+
+
+    update_project_headings()
 
     tree.column("id", width=90, anchor="center")
 
@@ -4482,71 +4943,99 @@ def show_projects_view():
 
 
 
-        replacement_entry = ctk.CTkEntry(
+        replacement_sources = []
+
+
+
+        sources_box = ctk.CTkTextbox(
 
             upload_card,
 
+            height=118,
+
             font=ctk.CTkFont(family="Consolas", size=11),
 
-            height=34,
-
-            placeholder_text="Neue LAS/LAZ-Datei oder Potree-Ordner für dieses Projekt auswählen"
+            state="disabled"
 
         )
 
-        replacement_entry.pack(fill="x", padx=16, pady=(16, 10))
+        sources_box.pack(fill="x", padx=16, pady=(16, 10))
 
 
 
-        def set_replacement_source(source_path):
+        def render_replacement_sources():
 
-            replacement_entry.delete(0, tk.END)
+            sources_box.configure(state="normal")
 
-            replacement_entry.insert(0, source_path)
+            sources_box.delete("1.0", tk.END)
 
-            source_type, normalized_source = resolve_replacement_source(source_path)
+            if not replacement_sources:
 
-            source_name = os.path.basename(normalized_source.rstrip("\\/")) if normalized_source else source_path
+                sources_box.insert(tk.END, "Noch keine Punktwolke ausgewählt.")
 
-            source_caption = "Potree-Ordner erkannt" if source_type == "potree_dir" else "Datei erkannt"
+            else:
+
+                for idx, source in enumerate(replacement_sources, 1):
+
+                    sources_box.insert(tk.END, f"{idx}. {infer_cloud_name(source)}  ->  {source}\n")
+
+            sources_box.configure(state="disabled")
+
+
+
+        def add_replacement_sources(source_paths):
+
+            added = 0
+
+            for source_path in source_paths:
+
+                if not source_path or source_path in replacement_sources:
+
+                    continue
+
+                if not os.path.isfile(source_path) and not os.path.isdir(source_path):
+
+                    messagebox.showerror("Fehler", f"Quelle nicht gefunden:\n{source_path}")
+
+                    continue
+
+                replacement_sources.append(source_path)
+
+                added += 1
+
+            if added:
+
+                render_replacement_sources()
+
+                drop_label_replace.configure(
+
+                    text=f"{len(replacement_sources)} Punktwolke(n) ausgewählt\n\nWeitere Dateien/Ordner hier ablegen oder Austausch starten"
+
+                )
+
+                drop_frame_replace.configure(border_color=COLOR_SUCCESS)
+
+            return added > 0
+
+
+
+        def clear_replacement_sources():
+
+            replacement_sources.clear()
+
+            render_replacement_sources()
 
             drop_label_replace.configure(
 
-                text=f"{source_caption}\n\n{source_name}\n\nAustausch unten manuell per Button starten"
+                text="Eine oder mehrere Punktwolken hier hineinziehen\n\n.las, .laz, .copc.laz oder Potree-Ordner"
 
             )
 
-            drop_frame_replace.configure(border_color=COLOR_SUCCESS)
+            drop_frame_replace.configure(border_color="#334155")
 
 
 
-        def select_replacement_file():
-
-            file_path = filedialog.askopenfilename(
-
-                title="Neue LAS/LAZ-Datei für den Projektaustausch wählen",
-
-                filetypes=[("LAS/LAZ", "*.laz *.las"), ("Alle Dateien", "*.*")]
-
-            )
-
-            if file_path:
-
-                set_replacement_source(file_path)
-
-
-
-        def select_replacement_folder():
-
-            folder_path = filedialog.askdirectory(
-
-                title="Konvertierten Potree-Ordner für den Projektaustausch wählen"
-
-            )
-
-            if folder_path:
-
-                set_replacement_source(folder_path)
+        render_replacement_sources()
 
 
 
@@ -4560,27 +5049,9 @@ def show_projects_view():
 
             source_button_row,
 
-            text="LAS/LAZ-Datei wählen",
+            text="Auswahl löschen",
 
-            command=select_replacement_file,
-
-            fg_color=COLOR_ACCENT,
-
-            hover_color=COLOR_ACCENT_HOVER,
-
-            height=34
-
-        ).pack(side="left", padx=(0, 8))
-
-
-
-        ctk.CTkButton(
-
-            source_button_row,
-
-            text="Potree-Ordner wählen",
-
-            command=select_replacement_folder,
+            command=clear_replacement_sources,
 
             fg_color=COLOR_ACCENT,
 
@@ -4618,7 +5089,7 @@ def show_projects_view():
 
             drop_frame_replace,
 
-            text="Datei oder Potree-Ordner hier hineinziehen\n\n(.las, .laz oder konvertierter Potree-Ordner)",
+            text="Eine oder mehrere Punktwolken hier hineinziehen\n\n.las, .laz, .copc.laz oder Potree-Ordner",
 
             bg="#1e1e2e",
 
@@ -4644,17 +5115,7 @@ def show_projects_view():
 
         def handle_replacement_drop(event):
 
-            source_path = extract_dropped_file(event.data)
-
-            if os.path.isfile(source_path) or os.path.isdir(source_path):
-
-                set_replacement_source(source_path)
-
-                valid, message = validate_replacement_source(source_path)
-
-                if not valid:
-
-                    messagebox.showerror("Fehler", message)
+            add_replacement_sources(extract_dropped_files(event.data))
 
 
 
@@ -4724,21 +5185,105 @@ def show_projects_view():
 
         def start_replacement():
 
-            replacement_file = replacement_entry.get().strip()
+            if not replacement_sources:
 
-            if not replacement_file:
-
-                messagebox.showwarning("Fehler", "Bitte eine LAS- oder LAZ-Datei auswählen!")
+                messagebox.showwarning("Fehler", "Bitte mindestens eine Punktwolke in das Feld ziehen!")
 
                 return
 
 
 
-            valid, message = validate_replacement_source(replacement_file)
+            use_multi_replacement = len(replacement_sources) > 1
 
-            if not valid:
+            single_source = replacement_sources[0]
 
-                messagebox.showerror("Fehler", message)
+            if not use_multi_replacement:
+
+                valid, message = validate_replacement_source(single_source)
+
+                if not valid:
+
+                    use_multi_replacement = True
+
+
+
+            if use_multi_replacement:
+
+                multi_entries = [
+
+                    {
+
+                        "name": infer_cloud_name(source_path),
+
+                        "source": source_path
+
+                    }
+
+                    for source_path in replacement_sources
+
+                ]
+
+                try:
+
+                    prepare_multi_replacement_sources(multi_entries)
+
+                except Exception as e:
+
+                    messagebox.showerror("Fehler", str(e))
+
+                    return
+
+                if not messagebox.askyesno(
+
+                    "Austausch bestaetigen",
+
+                    f"'{current_project.get('projekt', '')}' wird mit {len(multi_entries)} Punktwolke(n) aktualisiert.\n\n"
+
+                    "Projektname, Projekt-ID und Link bleiben unverändert.\n\n"
+
+                    "Moechten Sie fortfahren?"
+
+                ):
+
+                    return
+
+                btn_replace.configure(state="disabled", text="Austausch läuft...")
+
+                btn_cancel.configure(state="disabled")
+
+                replace_window.protocol("WM_DELETE_WINDOW", lambda: None)
+
+                thread = threading.Thread(
+
+                    target=replace_project_with_multi_pointclouds,
+
+                    args=(current_project, multi_entries, aws_access, aws_secret, load_projects),
+
+                    kwargs={"ui": dialog_ui},
+
+                    daemon=True
+
+                )
+
+                thread.start()
+
+                def check_multi_thread():
+
+                    if thread.is_alive():
+
+                        root.after(100, check_multi_thread)
+
+                        return
+
+                    if replace_window.winfo_exists():
+
+                        replace_window.protocol("WM_DELETE_WINDOW", close_replace_window)
+
+                        btn_replace.configure(state="normal", text="Punktwolke austauschen")
+
+                        btn_cancel.configure(state="normal")
+
+                root.after(100, check_multi_thread)
 
                 return
 
@@ -4772,7 +5317,7 @@ def show_projects_view():
 
                 target=replace_project_process,
 
-                args=(current_project, replacement_file, aws_access, aws_secret, load_projects),
+                args=(current_project, single_source, aws_access, aws_secret, load_projects),
 
                 kwargs={"ui": dialog_ui},
 
@@ -5304,8 +5849,6 @@ def show_projects_view():
 
 
 
-            projects.sort(key=lambda x: x.get("datum", ""), reverse=True)
-
             filtered_projects = []
 
             search_lower = search_term.lower()
@@ -5339,6 +5882,32 @@ def show_projects_view():
                 tree.insert("", "end", values=("", "", "Keine passenden Projekte gefunden", "", ""))
 
                 return
+
+
+
+            def project_sort_key(project):
+
+                column = sort_state["column"]
+
+                if column == "datum":
+
+                    parsed_date = parse_iso_datetime(project.get("datum", ""))
+
+                    return parsed_date.timestamp() if parsed_date else float("-inf")
+
+                if column == "kunde":
+
+                    return str(project.get("kunde", "")).casefold()
+
+                if column == "projekt":
+
+                    return str(project.get("projekt", "")).casefold()
+
+                return str(project.get(column, "")).casefold()
+
+
+
+            filtered_projects.sort(key=project_sort_key, reverse=sort_state["reverse"])
 
 
 
@@ -6456,7 +7025,7 @@ nav_buttons["upload"] = ctk.CTkButton(
 
     sidebar,
 
-    text="Upload",
+    text="Projekt erstellen",
 
     anchor="w",
 
