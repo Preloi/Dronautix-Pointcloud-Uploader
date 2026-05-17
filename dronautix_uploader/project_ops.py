@@ -7,6 +7,7 @@ __all__ = [
     "replace_project_with_multi_pointclouds",
     "duplicate_project_process",
     "download_project_data_process",
+    "rename_project_metadata_process",
 ]
 
 

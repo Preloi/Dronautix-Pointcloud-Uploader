@@ -5808,6 +5808,86 @@ def download_project_data_process(project_info, target_dir, aws_access, aws_secr
 
 
 
+def rename_project_metadata_process(project_info, new_kunde, new_projekt, pointcloud_names, aws_access, aws_secret, on_success=None, ui=None):
+
+    """Benennt Projekt- und Punktwolken-Metadaten um, ohne S3-Dateipfade zu ändern."""
+
+    try:
+
+        project_id = str(project_info.get("id", "")).strip()
+
+        if not project_id:
+
+            raise ValueError("Projekt-ID fehlt.")
+
+        ui_set_step("Aktualisiere Projektnamen...", 1, ui)
+
+        ui_set_detail("Lade Projekt-Index...", ui)
+
+        ui_set_progress(0.15, ui)
+
+        s3_client = create_s3_client(aws_access, aws_secret)
+
+        index_data = load_projects_index(s3_client)
+
+        target_project = None
+
+        for project in index_data.get("projects", []):
+
+            if str(project.get("id", "")).strip() == project_id:
+
+                target_project = project
+
+                break
+
+        if not target_project:
+
+            raise RuntimeError("Projekt wurde im aktuellen Index nicht gefunden.")
+
+        ui_set_progress(0.45, ui)
+
+        target_project["kunde"] = new_kunde
+
+        target_project["projekt"] = new_projekt
+
+        pointclouds = target_project.get("pointclouds", [])
+
+        for index, name in enumerate(pointcloud_names):
+
+            if index < len(pointclouds):
+
+                pointclouds[index]["name"] = name
+
+        ui_set_detail("Speichere Projekt-Index...", ui)
+
+        ui_set_progress(0.75, ui)
+
+        if not save_projects_index(s3_client, index_data):
+
+            raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
+
+        ui_set_progress(1.0, ui)
+
+        ui_set_detail("Umbenennung gespeichert.", ui)
+
+        ui_log(f"[UMBENENNEN] Projekt {project_id} umbenannt: {new_kunde} / {new_projekt}", ui)
+
+        if on_success:
+
+            root.after(0, on_success)
+
+    except Exception as e:
+
+        ui_log(f"[UMBENENNEN] [FEHLER] {e}", ui)
+
+        log(f"[UMBENENNEN] [FEHLER] {e}")
+
+        log(traceback.format_exc())
+
+        root.after(0, lambda err=e: messagebox.showerror("Fehler", f"Umbenennen fehlgeschlagen:\n{err}"))
+
+
+
 def open_project_download_dialog(parent_window, project_info, aws_access, aws_secret, window_owner):
 
     """Oeffnet einen Dialog zum Herunterladen der Projektdateien."""
@@ -7942,6 +8022,320 @@ def show_projects_view():
 
 
 
+    def open_rename_dialog_main():
+
+        existing_rename_window = getattr(projects_page, "_rename_window", None)
+
+        if focus_existing_window(existing_rename_window):
+
+            return
+
+        project_info = get_selected_project()
+
+        if not project_info:
+
+            return
+
+        rename_window = ctk.CTkToplevel(root)
+
+        projects_page._rename_window = rename_window
+
+        rename_window.title("Projekt umbenennen")
+
+        rename_window.geometry("760x680")
+
+        rename_window.minsize(700, 560)
+
+        rename_window.transient(root)
+
+        rename_window.lift()
+
+        rename_window.focus_force()
+
+        rename_window.grab_set()
+
+        def close_rename_window():
+
+            if getattr(projects_page, "_rename_window", None) is rename_window:
+
+                projects_page._rename_window = None
+
+            try:
+
+                rename_window.grab_release()
+
+            except tk.TclError:
+
+                pass
+
+            rename_window.destroy()
+
+        rename_window.protocol("WM_DELETE_WINDOW", close_rename_window)
+
+        content = ctk.CTkScrollableFrame(rename_window, fg_color="transparent")
+
+        content.pack(fill="both", expand=True, padx=18, pady=(14, 8))
+
+        header = ctk.CTkFrame(content, fg_color=COLOR_CARD, corner_radius=8)
+
+        header.pack(fill="x", pady=(0, 12))
+
+        ctk.CTkLabel(
+
+            header,
+
+            text="Projekt umbenennen",
+
+            font=ctk.CTkFont(size=18, weight="bold")
+
+        ).pack(anchor="w", padx=16, pady=(14, 4))
+
+        ctk.CTkLabel(
+
+            header,
+
+            text="Nur Metadaten werden geändert. Projekt-ID, Link und S3-Dateipfade bleiben unverändert.",
+
+            font=ctk.CTkFont(size=11),
+
+            text_color=COLOR_TEXT_DIM,
+
+            wraplength=680,
+
+            justify="left"
+
+        ).pack(anchor="w", padx=16, pady=(0, 14))
+
+        form_card = ctk.CTkFrame(content, corner_radius=10)
+
+        form_card.pack(fill="x", pady=(0, 12))
+
+        ctk.CTkLabel(
+
+            form_card,
+
+            text="Kundenname",
+
+            font=ctk.CTkFont(size=13, weight="bold")
+
+        ).pack(anchor="w", padx=16, pady=(14, 4))
+
+        kunde_entry = ctk.CTkEntry(form_card, height=36, font=ctk.CTkFont(size=13))
+
+        kunde_entry.pack(fill="x", padx=16, pady=(0, 12))
+
+        kunde_entry.insert(0, project_info.get("kunde", ""))
+
+        ctk.CTkLabel(
+
+            form_card,
+
+            text="Projektname",
+
+            font=ctk.CTkFont(size=13, weight="bold")
+
+        ).pack(anchor="w", padx=16, pady=(0, 4))
+
+        projekt_entry = ctk.CTkEntry(form_card, height=36, font=ctk.CTkFont(size=13))
+
+        projekt_entry.pack(fill="x", padx=16, pady=(0, 14))
+
+        projekt_entry.insert(0, project_info.get("projekt", ""))
+
+        pointcloud_entries = []
+
+        pointclouds = project_info.get("pointclouds", [])
+
+        if isinstance(pointclouds, list) and pointclouds:
+
+            clouds_card = ctk.CTkFrame(content, corner_radius=10)
+
+            clouds_card.pack(fill="x", pady=(0, 12))
+
+            ctk.CTkLabel(
+
+                clouds_card,
+
+                text="Punktwolkennamen",
+
+                font=ctk.CTkFont(size=13, weight="bold")
+
+            ).pack(anchor="w", padx=16, pady=(14, 8))
+
+            for index, cloud in enumerate(pointclouds, 1):
+
+                ctk.CTkLabel(
+
+                    clouds_card,
+
+                    text=f"Punktwolke {index}",
+
+                    font=ctk.CTkFont(size=11),
+
+                    text_color=COLOR_TEXT_DIM
+
+                ).pack(anchor="w", padx=16, pady=(0, 3))
+
+                cloud_entry = ctk.CTkEntry(clouds_card, height=34, font=ctk.CTkFont(size=12))
+
+                cloud_entry.pack(fill="x", padx=16, pady=(0, 10))
+
+                cloud_entry.insert(0, cloud.get("name", f"Punktwolke {index}"))
+
+                pointcloud_entries.append(cloud_entry)
+
+        status_card = ctk.CTkFrame(content, corner_radius=10)
+
+        status_card.pack(fill="x", pady=(0, 12))
+
+        rename_progress = ctk.CTkProgressBar(status_card, height=8)
+
+        rename_progress.pack(fill="x", padx=16, pady=(14, 6))
+
+        rename_progress.set(0)
+
+        rename_detail = ctk.CTkLabel(
+
+            status_card,
+
+            text="Noch nicht gespeichert.",
+
+            font=ctk.CTkFont(size=11),
+
+            text_color=COLOR_TEXT_DIM
+
+        )
+
+        rename_detail.pack(anchor="w", padx=16, pady=(0, 12))
+
+        rename_ui = {
+
+            "progress_bar": rename_progress,
+
+            "progress_detail": rename_detail
+
+        }
+
+        button_row = ctk.CTkFrame(rename_window, fg_color=COLOR_CARD, corner_radius=10)
+
+        button_row.pack(fill="x", padx=18, pady=(0, 14))
+
+        def start_rename():
+
+            new_kunde = kunde_entry.get().strip()
+
+            new_projekt = projekt_entry.get().strip()
+
+            pointcloud_names = [entry.get().strip() for entry in pointcloud_entries]
+
+            if not new_kunde:
+
+                messagebox.showwarning("Eingabe fehlt", "Bitte einen Kundennamen eingeben.")
+
+                return
+
+            if not new_projekt:
+
+                messagebox.showwarning("Eingabe fehlt", "Bitte einen Projektnamen eingeben.")
+
+                return
+
+            if any(not name for name in pointcloud_names):
+
+                messagebox.showwarning("Eingabe fehlt", "Bitte alle Punktwolkennamen ausfüllen.")
+
+                return
+
+            btn_save.configure(state="disabled", text="Speichert...")
+
+            btn_cancel.configure(state="disabled")
+
+            rename_window.protocol("WM_DELETE_WINDOW", lambda: None)
+
+            def on_success():
+
+                load_projects(customer_filter.get(), search_entry.get().strip())
+
+                messagebox.showinfo("Gespeichert", "Projekt-Metadaten wurden aktualisiert.")
+
+                if rename_window.winfo_exists():
+
+                    close_rename_window()
+
+            thread = threading.Thread(
+
+                target=rename_project_metadata_process,
+
+                args=(project_info, new_kunde, new_projekt, pointcloud_names, aws_access, aws_secret),
+
+                kwargs={"on_success": on_success, "ui": rename_ui},
+
+                daemon=True
+
+            )
+
+            thread.start()
+
+            def check_thread():
+
+                if thread.is_alive():
+
+                    root.after(100, check_thread)
+
+                    return
+
+                if rename_window.winfo_exists():
+
+                    rename_window.protocol("WM_DELETE_WINDOW", close_rename_window)
+
+                    btn_save.configure(state="normal", text="Speichern")
+
+                    btn_cancel.configure(state="normal")
+
+            root.after(100, check_thread)
+
+        btn_save = ctk.CTkButton(
+
+            button_row,
+
+            text="Speichern",
+
+            fg_color=COLOR_SUCCESS,
+
+            hover_color=COLOR_SUCCESS_HOVER,
+
+            font=ctk.CTkFont(size=13, weight="bold"),
+
+            height=38,
+
+            command=start_rename
+
+        )
+
+        btn_save.pack(side="left", padx=(0, 8))
+
+        btn_cancel = ctk.CTkButton(
+
+            button_row,
+
+            text="Abbrechen",
+
+            fg_color=COLOR_CARD,
+
+            hover_color="#3a3a4c",
+
+            font=ctk.CTkFont(size=13),
+
+            height=38,
+
+            command=close_rename_window
+
+        )
+
+        btn_cancel.pack(side="right")
+
+
+
     ctk.CTkButton(
 
         btn_frame,
@@ -7966,7 +8360,7 @@ def show_projects_view():
 
         btn_frame,
 
-        text="Herunterladen",
+        text="Umbenennen",
 
         fg_color=COLOR_SUCCESS,
 
@@ -7976,9 +8370,65 @@ def show_projects_view():
 
         height=36,
 
-        command=open_download_dialog_main
+        command=open_rename_dialog_main
 
     ).pack(side="left", padx=(0, 8))
+
+
+
+    project_context_menu = tk.Menu(tree, tearoff=0)
+
+    project_context_menu.add_command(label="Im Browser öffnen", command=open_in_browser)
+
+    project_context_menu.add_command(label="Link kopieren", command=copy_link)
+
+    project_context_menu.add_separator()
+
+    project_context_menu.add_command(label="Punktwolke austauschen", command=open_replace_dialog)
+
+    project_context_menu.add_command(label="Umbenennen", command=open_rename_dialog_main)
+
+    project_context_menu.add_command(label="Duplizieren", command=open_duplicate_dialog_main)
+
+    project_context_menu.add_command(label="Herunterladen", command=open_download_dialog_main)
+
+    project_context_menu.add_separator()
+
+    project_context_menu.add_command(label="Löschen", command=delete_project)
+
+
+
+    def show_project_context_menu(event):
+
+        row_id = tree.identify_row(event.y)
+
+        if not row_id:
+
+            return
+
+        item = tree.item(row_id)
+
+        values = item.get("values", [])
+
+        if not values or not values[0]:
+
+            return
+
+        tree.selection_set(row_id)
+
+        tree.focus(row_id)
+
+        try:
+
+            project_context_menu.tk_popup(event.x_root, event.y_root)
+
+        finally:
+
+            project_context_menu.grab_release()
+
+
+
+    tree.bind("<Button-3>", show_project_context_menu)
 
 
 
