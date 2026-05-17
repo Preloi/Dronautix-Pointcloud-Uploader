@@ -4715,7 +4715,7 @@ def reset_progress():
 
 
 
-def replace_project_process(project_info, replacement_file, aws_access, aws_secret, on_success=None, ui=None, crs_input="", vertical_input=""):
+def replace_project_process(project_info, replacement_file, aws_access, aws_secret, on_success=None, ui=None, crs_input="", vertical_input="", target_pointcloud=None):
 
     """Tauscht die Punktwolkendaten eines bestehenden Projekts aus."""
 
@@ -4740,6 +4740,16 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
     viewer_path = project_info.get("viewer_path", "")
 
     project_format = project_info.get("format", "")
+
+    replacing_single_pointcloud = isinstance(target_pointcloud, dict)
+
+    if replacing_single_pointcloud:
+
+        s3_prefix = target_pointcloud.get("s3_path", "") or s3_prefix
+
+        viewer_path = target_pointcloud.get("viewer_path", "") or viewer_path
+
+        project_format = target_pointcloud.get("format", "") or project_format
 
 
 
@@ -4781,7 +4791,7 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
 
             message = (
 
-                "Dieses Projekt nutzt derzeit COPC. Der Austausch mit Potree-Konvertierung ist aktuell "
+                "Diese Ziel-Punktwolke nutzt derzeit COPC. Der Austausch mit Potree-Konvertierung ist aktuell "
 
                 "nur für klassische Potree-Projekte verfügbar, damit Link und Viewer-Pfad unverändert bleiben."
 
@@ -4815,7 +4825,13 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
 
 
 
+        target_label = target_pointcloud.get("name", "") if replacing_single_pointcloud else ""
+
         ui_log(f"[AUSTAUSCH] Starte Datenaustausch für Projekt '{project_name}' ({project_id})", ui)
+
+        if target_label:
+
+            ui_log(f"[AUSTAUSCH] Ziel-Punktwolke: {target_label}", ui)
 
         ui_log(f"[AUSTAUSCH] Ziel bleibt unverändert: {s3_prefix}", ui)
 
@@ -4996,13 +5012,13 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
 
             log("[AUSTAUSCH] Keine veralteten Dateien zum Löschen gefunden")
 
-        if crs_info:
+        index_data = load_projects_index(s3_client)
+
+        updated = False
+
+        if crs_info or replacing_single_pointcloud:
 
             ui_set_step("Aktualisiere Projekt-Metadaten...", 5, ui)
-
-            index_data = load_projects_index(s3_client)
-
-            updated = False
 
             for idx, project in enumerate(index_data.get("projects", [])):
 
@@ -5010,7 +5026,50 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
 
                     updated_project = dict(project)
 
-                    apply_crs_metadata(updated_project, crs_info)
+                    if replacing_single_pointcloud:
+
+                        pointclouds = updated_project.get("pointclouds", [])
+
+                        if isinstance(pointclouds, list):
+
+                            for cloud_idx, cloud in enumerate(pointclouds):
+
+                                if not isinstance(cloud, dict):
+
+                                    continue
+
+                                same_cloud = (
+                                    cloud.get("s3_path") == target_pointcloud.get("s3_path")
+                                    or cloud.get("viewer_path") == target_pointcloud.get("viewer_path")
+                                    or (
+                                        cloud.get("name") == target_pointcloud.get("name")
+                                        and cloud_idx == target_pointcloud.get("_index")
+                                    )
+                                )
+
+                                if same_cloud:
+
+                                    updated_cloud = dict(cloud)
+
+                                    updated_cloud["format"] = "potree"
+
+                                    updated_cloud["s3_path"] = s3_prefix
+
+                                    updated_cloud["viewer_path"] = viewer_path
+
+                                    if crs_info:
+
+                                        apply_crs_metadata(updated_cloud, crs_info)
+
+                                    pointclouds[cloud_idx] = updated_cloud
+
+                                    break
+
+                            updated_project["pointclouds"] = pointclouds
+
+                    elif crs_info:
+
+                        apply_crs_metadata(updated_project, crs_info)
 
                     index_data["projects"][idx] = updated_project
 
@@ -5022,7 +5081,9 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
 
                 save_projects_index(s3_client, index_data)
 
-                ui_log(f"[CRS] Projekt-Metadaten aktualisiert: {get_crs_summary_text(crs_info)}", ui)
+                if crs_info:
+
+                    ui_log(f"[CRS] Projekt-Metadaten aktualisiert: {get_crs_summary_text(crs_info)}", ui)
 
 
 
@@ -6875,6 +6936,87 @@ def show_projects_view():
 
         ).pack(anchor="w", padx=16, pady=(4, 14))
 
+        pointclouds = current_project.get("pointclouds", [])
+
+        if not isinstance(pointclouds, list):
+
+            pointclouds = []
+
+        target_placeholder = "Bitte Punktwolke auswählen"
+
+        replace_all_label = "Gesamtes Projekt ersetzen"
+
+        target_options = [target_placeholder]
+
+        target_map = {}
+
+        if len(pointclouds) > 1:
+
+            target_options.append(replace_all_label)
+
+            target_map[replace_all_label] = None
+
+            target_card = ctk.CTkFrame(content_frame, corner_radius=12)
+
+            target_card.pack(fill="x", pady=(0, 12))
+
+            ctk.CTkLabel(
+                target_card,
+                text="Ziel-Punktwolke",
+                font=ctk.CTkFont(size=14, weight="bold")
+            ).pack(anchor="w", padx=16, pady=(16, 6))
+
+            ctk.CTkLabel(
+                target_card,
+                text="Dieses Projekt enthält mehrere Punktwolken. Wählen Sie aus, welche Punktwolke ersetzt werden soll.",
+                font=ctk.CTkFont(size=11),
+                text_color=COLOR_TEXT_DIM,
+                wraplength=820,
+                justify="left"
+            ).pack(anchor="w", padx=16, pady=(0, 8))
+
+            for idx, cloud in enumerate(pointclouds):
+
+                if not isinstance(cloud, dict):
+
+                    continue
+
+                cloud_name = cloud.get("name", "") or f"Punktwolke {idx + 1}"
+
+                cloud_format = str(cloud.get("format", "") or "potree").upper()
+
+                label = f"{idx + 1}. {cloud_name}  ·  {cloud_format}"
+
+                target_options.append(label)
+
+                target_cloud = dict(cloud)
+
+                target_cloud["_index"] = idx
+
+                target_map[label] = target_cloud
+
+            selected_target_var = tk.StringVar(value=target_placeholder)
+
+            ctk.CTkOptionMenu(
+                target_card,
+                variable=selected_target_var,
+                values=target_options,
+                height=36,
+                fg_color=COLOR_CARD,
+                button_color=COLOR_ACCENT,
+                button_hover_color=COLOR_ACCENT_HOVER,
+                dropdown_fg_color=COLOR_CARD,
+                dropdown_hover_color="#3a3a4c",
+                dropdown_text_color="#e2e8f0",
+                text_color="#e2e8f0"
+            ).pack(fill="x", padx=16, pady=(0, 14))
+
+        else:
+
+            selected_target_var = tk.StringVar(value=replace_all_label)
+
+            target_map[replace_all_label] = None
+
 
 
         upload_card = ctk.CTkFrame(content_frame, corner_radius=12)
@@ -7426,6 +7568,27 @@ def show_projects_view():
 
                 return
 
+            target_choice = selected_target_var.get()
+
+            if len(pointclouds) > 1 and target_choice == target_placeholder:
+
+                messagebox.showwarning("Fehler", "Bitte auswählen, welche Punktwolke ersetzt werden soll.")
+
+                return
+
+            selected_target_pointcloud = target_map.get(target_choice)
+
+            replace_entire_project = selected_target_pointcloud is None
+
+            if not replace_entire_project and len(replacement_sources) != 1:
+
+                messagebox.showwarning(
+                    "Fehler",
+                    "Für den Austausch einer einzelnen Ziel-Punktwolke bitte genau eine neue Quelle auswählen."
+                )
+
+                return
+
 
 
             crs_input = replacement_crs_entry.get().strip()
@@ -7442,11 +7605,11 @@ def show_projects_view():
 
 
 
-            use_multi_replacement = len(replacement_sources) > 1
+            use_multi_replacement = replace_entire_project and len(replacement_sources) > 1
 
             single_source = replacement_sources[0]
 
-            if not use_multi_replacement:
+            if replace_entire_project and not use_multi_replacement:
 
                 valid, message = validate_replacement_source(single_source)
 
@@ -7456,7 +7619,7 @@ def show_projects_view():
 
 
 
-            if use_multi_replacement:
+            if replace_entire_project and use_multi_replacement:
 
                 multi_entries = [
 
@@ -7538,11 +7701,19 @@ def show_projects_view():
 
 
 
+            selected_target_name = selected_target_pointcloud.get("name", "") if selected_target_pointcloud else ""
+
+            confirm_target_text = (
+                f"Die Punktwolke '{selected_target_name}' wird ersetzt.\n\n"
+                if selected_target_name
+                else f"Die Punktwolkendaten von '{current_project.get('projekt', '')}' werden ersetzt.\n\n"
+            )
+
             if not messagebox.askyesno(
 
                 "Austausch bestaetigen",
 
-                f"Die Punktwolkendaten von '{current_project.get('projekt', '')}' werden ersetzt.\n\n"
+                confirm_target_text +
 
                 "Projektname, Projekt-ID und Link bleiben unverändert.\n\n"
 
@@ -7568,7 +7739,12 @@ def show_projects_view():
 
                 args=(current_project, single_source, aws_access, aws_secret, load_projects),
 
-                kwargs={"ui": dialog_ui, "crs_input": crs_input, "vertical_input": vertical_input},
+                kwargs={
+                    "ui": dialog_ui,
+                    "crs_input": crs_input,
+                    "vertical_input": vertical_input,
+                    "target_pointcloud": selected_target_pointcloud
+                },
 
                 daemon=True
 
