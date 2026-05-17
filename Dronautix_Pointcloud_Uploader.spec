@@ -2,11 +2,11 @@
 
 
 a = Analysis(
-    ['Dronautix_Pointcloud_Uploader_v7.py'],
+    ['Dronautix_Pointcloud_Uploader.py'],
     pathex=[],
     binaries=[],
     datas=[('icon.ico', '.'), ('bundled_tools', 'bundled_tools')],
-    hiddenimports=[],
+    hiddenimports=['keyring', 'keyring.backends.Windows'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

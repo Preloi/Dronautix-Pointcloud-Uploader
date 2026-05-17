@@ -14,12 +14,6 @@ import uuid
 
 import csv
 
-import base64
-
-import ctypes
-
-from ctypes import wintypes
-
 import hashlib
 
 import urllib.error
@@ -34,6 +28,16 @@ import re
 
 import boto3
 
+from botocore.config import Config
+
+try:
+
+    import keyring
+
+except ImportError:
+
+    keyring = None
+
 import mimetypes
 
 import threading
@@ -47,6 +51,8 @@ import webbrowser
 import time
 
 import sys
+
+import traceback
 
 import unicodedata
 
@@ -65,6 +71,8 @@ APPDATA_DIR = os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), '
 CONFIG_FILE = os.path.join(APPDATA_DIR, 'config.json')
 
 CSV_FILE = os.path.join(APPDATA_DIR, 'Projekt_Liste.csv')
+
+KEYRING_SERVICE = "DronautixUploader"
 
 
 
@@ -97,8 +105,6 @@ UPDATE_MANIFEST_URL = (
 )
 
 UPDATE_DOWNLOAD_DIR = os.path.join(APPDATA_DIR, "updates")
-
-SECRET_STORAGE_PREFIX = "dpapi:"
 
 
 
@@ -272,7 +278,13 @@ def show_main_view(view_name):
 
             continue
 
-        button.configure(fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER)
+        if name == view_name:
+
+            button.configure(fg_color="#1e3a5f", hover_color="#1e3a5f")
+
+        else:
+
+            button.configure(fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER)
 
 
 
@@ -434,7 +446,7 @@ def sanitize_folder_name(name):
 
     name = (name or "").strip().lower()
 
-    name = name.replace("ae", "ae").replace("oe", "oe").replace("ue", "ue").replace("ss", "ss")
+    name = name.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
 
     name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
 
@@ -466,183 +478,61 @@ def log(message):
 
 
 
-class _DataBlob(ctypes.Structure):
-
-    _fields_ = [
-
-        ("cbData", wintypes.DWORD),
-
-        ("pbData", ctypes.POINTER(ctypes.c_byte)),
-
-    ]
-
-
-
-def _dpapi_transform(secret_value, protect=True):
-
-    """Verschluesselt/entschluesselt Secrets mit Windows DPAPI fuer den aktuellen Benutzer."""
-
-    if not secret_value or sys.platform != "win32":
-
-        return ""
-
-    data = secret_value.encode("utf-8") if protect else base64.b64decode(secret_value)
-
-    input_buffer = ctypes.create_string_buffer(data)
-
-    input_blob = _DataBlob(
-
-        len(data),
-
-        ctypes.cast(input_buffer, ctypes.POINTER(ctypes.c_byte))
-
-    )
-
-    output_blob = _DataBlob()
-
-    crypt32 = ctypes.windll.crypt32
-
-    kernel32 = ctypes.windll.kernel32
-
-    if protect:
-
-        ok = crypt32.CryptProtectData(
-
-            ctypes.byref(input_blob), None, None, None, None, 0, ctypes.byref(output_blob)
-
-        )
-
-    else:
-
-        ok = crypt32.CryptUnprotectData(
-
-            ctypes.byref(input_blob), None, None, None, None, 0, ctypes.byref(output_blob)
-
-        )
-
-    if not ok:
-
-        return ""
-
-    try:
-
-        result = ctypes.string_at(output_blob.pbData, output_blob.cbData)
-
-        return base64.b64encode(result).decode("ascii") if protect else result.decode("utf-8")
-
-    finally:
-
-        kernel32.LocalFree(output_blob.pbData)
-
-
-
-def protect_secret(secret_value):
-
-    """Speichert Secrets nicht im Klartext, sondern per DPAPI geschuetzt."""
-
-    secret_value = str(secret_value or "")
-
-    if not secret_value:
-
-        return ""
-
-    if secret_value.startswith(SECRET_STORAGE_PREFIX):
-
-        return secret_value
-
-    encrypted = _dpapi_transform(secret_value, protect=True)
-
-    return f"{SECRET_STORAGE_PREFIX}{encrypted}" if encrypted else ""
-
-
-
-def unprotect_secret(stored_value):
-
-    """Liest ein DPAPI-Secret fuer die Laufzeit wieder ein."""
-
-    stored_value = str(stored_value or "")
-
-    if not stored_value:
-
-        return ""
-
-    if not stored_value.startswith(SECRET_STORAGE_PREFIX):
-
-        return stored_value
-
-    encrypted = stored_value[len(SECRET_STORAGE_PREFIX):]
-
-    return _dpapi_transform(encrypted, protect=False)
-
-
-
-def normalize_config(config):
-
-    """Normalisiert alte und neue Config-Dateien fuer die App-Laufzeit."""
-
-    if not isinstance(config, dict):
-
-        return {"first_run": True}
-
-    encrypted_secret = config.get("aws_secret_encrypted", "")
-
-    if encrypted_secret:
-
-        config["aws_secret"] = unprotect_secret(encrypted_secret)
-
-    else:
-
-        config["aws_secret"] = str(config.get("aws_secret", ""))
-
-    return config
-
-
-
-def persistable_config(config):
-
-    """Entfernt Klartext-Secrets vor dem Schreiben der Config-Datei."""
-
-    clean_config = dict(config)
-
-    plain_secret = str(clean_config.get("aws_secret", ""))
-
-    if plain_secret:
-
-        protected_secret = protect_secret(plain_secret)
-
-        if protected_secret:
-
-            clean_config["aws_secret_encrypted"] = protected_secret
-
-        else:
-
-            clean_config.pop("aws_secret_encrypted", None)
-
-    else:
-
-        clean_config.pop("aws_secret_encrypted", None)
-
-    clean_config.pop("aws_secret", None)
-
-    return clean_config
-
-
-
 def save_config(aws_access=None, aws_secret=None, converter_path=None, output_dir=None):
 
     """Speichert die Einstellungen in AppData"""
 
     config = load_config()
 
-    
+    access_saved_to_keyring = False
+
+    secret_saved_to_keyring = False
+
+
 
     if aws_access is not None:
 
-        config["aws_access"] = aws_access
+        if keyring is not None:
+
+            try:
+
+                keyring.set_password(KEYRING_SERVICE, "aws_access", aws_access)
+
+                access_saved_to_keyring = True
+
+            except Exception:
+
+                config["aws_access"] = aws_access
+
+        else:
+
+            config["aws_access"] = aws_access
 
     if aws_secret is not None:
 
-        config["aws_secret"] = aws_secret
+        if keyring is not None:
+
+            try:
+
+                keyring.set_password(KEYRING_SERVICE, "aws_secret", aws_secret)
+
+                secret_saved_to_keyring = True
+
+            except Exception:
+
+                config["aws_secret"] = aws_secret
+
+        else:
+
+            config["aws_secret"] = aws_secret
+
+    if access_saved_to_keyring:
+
+        config.pop("aws_access", None)
+
+    if secret_saved_to_keyring:
+
+        config.pop("aws_secret", None)
 
     if converter_path is not None:
 
@@ -652,17 +542,17 @@ def save_config(aws_access=None, aws_secret=None, converter_path=None, output_di
 
         config["output_base_dir"] = output_dir
 
-    
+
 
     config["first_run"] = False
 
-    
+
 
     try:
 
         with open(CONFIG_FILE, "w") as f:
 
-            json.dump(persistable_config(config), f, indent=2)
+            json.dump(config, f, indent=2)
 
         return True
 
@@ -686,13 +576,97 @@ def load_config():
 
             with open(CONFIG_FILE, "r") as f:
 
-                return normalize_config(json.load(f))
+                config = json.load(f)
 
-        except:
+            return migrate_aws_credentials_to_keyring(config)
+
+        except Exception:
 
             return {"first_run": True}
 
     return {"first_run": True}
+
+
+
+def migrate_aws_credentials_to_keyring(config):
+
+    """Verschiebt vorhandene Klartext-AWS-Keys aus der JSON in den Credential Store."""
+
+    if keyring is None:
+
+        return config
+
+    legacy_access = config.get("aws_access")
+
+    legacy_secret = config.get("aws_secret")
+
+    if not legacy_access and not legacy_secret:
+
+        return config
+
+    try:
+
+        if legacy_access:
+
+            keyring.set_password(KEYRING_SERVICE, "aws_access", legacy_access)
+
+        if legacy_secret:
+
+            keyring.set_password(KEYRING_SERVICE, "aws_secret", legacy_secret)
+
+    except Exception:
+
+        return config
+
+    config.pop("aws_access", None)
+
+    config.pop("aws_secret", None)
+
+    try:
+
+        with open(CONFIG_FILE, "w") as f:
+
+            json.dump(config, f, indent=2)
+
+    except Exception:
+
+        pass
+
+    return config
+
+
+
+def get_aws_credentials():
+
+    """Liest AWS-Zugangsdaten aus Keyring, mit JSON-Fallback fuer alte Installationen."""
+
+    access = ""
+
+    secret = ""
+
+    if keyring is not None:
+
+        try:
+
+            access = keyring.get_password(KEYRING_SERVICE, "aws_access") or ""
+
+            secret = keyring.get_password(KEYRING_SERVICE, "aws_secret") or ""
+
+        except Exception:
+
+            access = ""
+
+            secret = ""
+
+    if not access or not secret:
+
+        config = load_config()
+
+        access = access or config.get("aws_access", "")
+
+        secret = secret or config.get("aws_secret", "")
+
+    return access, secret
 
 
 
@@ -706,7 +680,15 @@ def get_app_base_dir():
 
         return sys._MEIPASS
 
-    return os.path.dirname(os.path.abspath(__file__))
+    package_dir = os.path.dirname(os.path.abspath(__file__))
+
+    project_root = os.path.dirname(package_dir)
+
+    if os.path.exists(os.path.join(project_root, BUNDLED_CONVERTER_DIR)) or os.path.exists(os.path.join(project_root, "icon.ico")):
+
+        return project_root
+
+    return package_dir
 
 
 
@@ -891,7 +873,6 @@ def get_update_installer_url(manifest):
         f"{urllib.parse.quote(release_tag, safe='')}/{urllib.parse.quote(installer_name)}"
 
     )
-
 
 
 def is_safe_installer_name(installer_name):
@@ -1200,6 +1181,142 @@ def detect_input_format(filepath):
 
 
 
+
+
+def validate_replacement_file(filepath):
+
+    """Prueft ob eine Datei für den Projektaustausch geeignet ist."""
+
+    valid, message = validate_file(filepath)
+
+    if not valid:
+
+        return False, message
+
+
+
+    if os.path.basename(filepath).lower().endswith(".copc.laz"):
+
+        return False, "Für den Projektaustausch sind nur klassische .las oder .laz Dateien erlaubt"
+
+
+
+    return True, "OK"
+
+
+
+
+
+def resolve_replacement_source(source_path):
+
+    """Ordnet eine Austauschquelle einem unterstützten Typ zu."""
+
+    normalized_path = (source_path or "").strip().strip('"')
+
+    if not normalized_path:
+
+        return "", ""
+
+    if os.path.isdir(normalized_path):
+
+        return "potree_dir", normalized_path
+
+    if os.path.isfile(normalized_path):
+
+        if os.path.basename(normalized_path).lower() == "metadata.json":
+
+            return "potree_dir", os.path.dirname(normalized_path)
+
+        return "raw_file", normalized_path
+
+    return "", normalized_path
+
+
+
+def validate_potree_output_dir(directory_path):
+
+    """Prueft ob ein vorhandener Ordner wie ein Potree-Projekt aussieht."""
+
+    if not directory_path or not os.path.isdir(directory_path):
+
+        return False, "Bitte einen gueltigen Potree-Ordner auswählen."
+
+    metadata_path = os.path.join(directory_path, "metadata.json")
+
+    if not os.path.isfile(metadata_path):
+
+        return False, (
+
+            "Im gewählten Ordner wurde keine metadata.json gefunden. "
+
+            "Bitte den Hauptordner des konvertierten Potree-Projekts auswählen."
+
+        )
+
+    return True, "OK"
+
+
+
+def validate_replacement_source(source_path):
+
+    """Prueft ob eine Austauschquelle als LAS/LAZ oder Potree-Ordner geeignet ist."""
+
+    source_type, normalized_path = resolve_replacement_source(source_path)
+
+    if source_type == "raw_file":
+
+        return validate_replacement_file(normalized_path)
+
+    if source_type == "potree_dir":
+
+        return validate_potree_output_dir(normalized_path)
+
+    return False, "Bitte eine gueltige LAS/LAZ-Datei oder einen Potree-Ordner auswählen."
+
+
+
+def cleanup_local_files(output_path):
+
+    """Loescht die lokalen konvertierten Dateien nach erfolgreichem Upload"""
+
+    try:
+
+        if os.path.exists(output_path):
+
+            shutil.rmtree(output_path)
+
+            log(f"[CLEANUP] [OK] Temporaere Dateien gelöscht: {output_path}")
+
+            return True
+
+    except Exception as e:
+
+        log(f"[WARNUNG] Cleanup fehlgeschlagen: {e}")
+
+        return False
+
+    return False
+
+
+
+
+
+def format_bytes(bytes_size):
+
+    """Formatiert Bytes zu lesbarer Größe"""
+
+    for unit in ['B', 'KB', 'MB', 'GB']:
+
+        if bytes_size < 1024.0:
+
+            return f"{bytes_size:.1f} {unit}"
+
+        bytes_size /= 1024.0
+
+    return f"{bytes_size:.1f} TB"
+
+
+
 def clean_las_text(raw_value):
 
     """Dekodiert nullterminierte LAS/VLR-Textfelder robust."""
@@ -1289,6 +1406,52 @@ def normalize_crs_value(crs_value, source="manual", name=None, wkt=None):
         crs_info["wkt"] = clean_las_text(wkt)
 
     return crs_info
+
+
+
+def normalize_vertical_crs_value(vertical_value, source="manual"):
+
+    """Normalisiert ein manuell gesetztes vertikales Datum/CRS."""
+
+    raw_value = clean_las_text(vertical_value)
+
+    if not raw_value:
+
+        return {}
+
+    vertical_info = {
+
+        "vertical_source": source
+
+    }
+
+    epsg_match = re.fullmatch(r"(?:EPSG[:\s-]*)?(\d{3,6})", raw_value, re.IGNORECASE)
+
+    if epsg_match:
+
+        vertical_epsg = f"EPSG:{epsg_match.group(1)}"
+
+        vertical_info.update({
+
+            "vertical_crs": vertical_epsg,
+
+            "vertical_epsg": vertical_epsg,
+
+            "vertical_projection": vertical_epsg
+
+        })
+
+    else:
+
+        vertical_info.update({
+
+            "vertical_name": raw_value,
+
+            "vertical_datum": raw_value
+
+        })
+
+    return vertical_info
 
 
 
@@ -1588,9 +1751,183 @@ def decode_geo_key_value(entry, ascii_params, double_params):
 
 
 
+def attach_vertical_metadata(crs_info, metadata_source):
+
+    """Uebernimmt vertikale CRS-/Datum-Felder aus Potree- oder Index-Metadaten."""
+
+    if not isinstance(metadata_source, dict):
+
+        return crs_info
+
+    merged = dict(crs_info or {"source": "auto"})
+
+    srs = metadata_source.get("srs") if isinstance(metadata_source.get("srs"), dict) else {}
+
+    vertical_value = (
+
+        metadata_source.get("vertical_crs")
+
+        or metadata_source.get("vertical_epsg")
+
+        or metadata_source.get("vertical_projection")
+
+        or srs.get("vertical")
+
+    )
+
+    vertical_name = (
+
+        metadata_source.get("vertical_name")
+
+        or metadata_source.get("vertical_datum")
+
+        or srs.get("vertical_name")
+
+    )
+
+    if vertical_value:
+
+        vertical_text = clean_las_text(vertical_value)
+
+        if vertical_text and vertical_text.isdigit():
+
+            vertical_text = f"EPSG:{vertical_text}"
+
+        if vertical_text:
+
+            merged["vertical_crs"] = vertical_text
+
+            merged["vertical_epsg"] = vertical_text
+
+            merged["vertical_projection"] = vertical_text
+
+    if vertical_name:
+
+        merged["vertical_name"] = clean_las_text(vertical_name)
+
+        merged["vertical_datum"] = clean_las_text(vertical_name)
+
+    return merged if len(merged) > 1 else crs_info
+
+
+
+def detect_crs_from_metadata_dict(metadata):
+
+    """Erkennt CRS-Informationen aus Potree metadata.json/cloud.js oder Index-Metadaten."""
+
+    if not isinstance(metadata, dict):
+
+        return None
+
+    srs = metadata.get("srs") if isinstance(metadata.get("srs"), dict) else {}
+
+    horizontal = (
+
+        metadata.get("projection")
+
+        or metadata.get("crs")
+
+        or metadata.get("epsg")
+
+        or srs.get("projection")
+
+        or srs.get("horizontal")
+
+        or srs.get("wkt")
+
+    )
+
+    if horizontal and str(horizontal).isdigit():
+
+        horizontal = f"EPSG:{horizontal}"
+
+    if srs.get("authority") == "EPSG" and srs.get("horizontal"):
+
+        horizontal = f"EPSG:{srs.get('horizontal')}"
+
+    crs_info = normalize_crs_value(horizontal, source="auto") if horizontal else None
+
+    if not crs_info and srs.get("wkt"):
+
+        crs_info = normalize_crs_value(srs.get("wkt"), source="auto", wkt=srs.get("wkt"))
+
+    return attach_vertical_metadata(crs_info, metadata)
+
+
+
+def read_cloudjs_json(cloudjs_path):
+
+    """Liest klassische Potree cloud.js Dateien als JSON."""
+
+    with open(cloudjs_path, "r", encoding="utf-8") as f:
+
+        cloudjs_text = f.read().strip()
+
+    if cloudjs_text.startswith("cloud.js"):
+
+        cloudjs_text = cloudjs_text[len("cloud.js"):].strip()
+
+    if cloudjs_text.startswith("="):
+
+        cloudjs_text = cloudjs_text[1:].strip()
+
+    return json.loads(cloudjs_text.rstrip(";").strip())
+
+
+
+def detect_potree_crs(directory_path):
+
+    """Erkennt CRS aus vorhandenen Potree metadata.json/cloud.js Dateien."""
+
+    if not directory_path or not os.path.isdir(directory_path):
+
+        return None
+
+    metadata_path = os.path.join(directory_path, "metadata.json")
+
+    if os.path.isfile(metadata_path):
+
+        try:
+
+            with open(metadata_path, "r", encoding="utf-8") as f:
+
+                crs_info = detect_crs_from_metadata_dict(json.load(f))
+
+            if crs_info:
+
+                return crs_info
+
+        except Exception as e:
+
+            log(f"[CRS] Potree metadata.json konnte nicht gelesen werden: {e}")
+
+    cloudjs_path = os.path.join(directory_path, "cloud.js")
+
+    if os.path.isfile(cloudjs_path):
+
+        try:
+
+            return detect_crs_from_metadata_dict(read_cloudjs_json(cloudjs_path))
+
+        except Exception as e:
+
+            log(f"[CRS] Potree cloud.js konnte nicht gelesen werden: {e}")
+
+    return None
+
+
+
 def detect_pointcloud_crs(source_path):
 
     """Erkennt EPSG/WKT-CRS aus LAS/LAZ/COPC-Headern, wenn die Datei referenziert ist."""
+
+    if source_path and os.path.isdir(source_path):
+
+        return detect_potree_crs(source_path)
+
+    if not source_path or not os.path.isfile(source_path):
+
+        return None
 
     records = read_las_projection_records(source_path)
 
@@ -1660,24 +1997,16 @@ def detect_pointcloud_crs(source_path):
 
             crs_info = normalize_crs_value(f"EPSG:{epsg_code}", source="auto", name=wkt_name, wkt=wkt)
 
-            if vertical_epsg_code:
-
-                crs_info["vertical_epsg"] = f"EPSG:{vertical_epsg_code}"
-
-                crs_info["vertical_crs"] = f"EPSG:{vertical_epsg_code}"
-
-            if vertical_name:
-
-                crs_info["vertical_name"] = vertical_name
-
-                crs_info["vertical_datum"] = vertical_name
-
-            return crs_info
-
-        if wkt_name:
+        elif wkt_name:
 
             crs_info = normalize_crs_value(wkt_name, source="auto", name=wkt_name, wkt=wkt)
 
+        else:
+
+            crs_info = None
+
+        if crs_info:
+
             if vertical_epsg_code:
 
                 crs_info["vertical_epsg"] = f"EPSG:{vertical_epsg_code}"
@@ -1690,9 +2019,7 @@ def detect_pointcloud_crs(source_path):
 
                 crs_info["vertical_datum"] = vertical_name
 
-            return crs_info
-
-        return None
+        return crs_info
 
     geo_keys = {
 
@@ -1812,7 +2139,7 @@ def get_crs_summary_text(crs_info):
 
 def merge_detected_vertical_crs(crs_info, detected_crs_info):
 
-    """Ergaenzt ein manuell gesetztes Lage-CRS um erkannte vertikale CRS-Felder."""
+    """Ergaenzt ein manuell gesetztes Lage-CRS um erkannte Hoehenreferenzen."""
 
     if not crs_info or not detected_crs_info:
 
@@ -1838,9 +2165,27 @@ def merge_detected_vertical_crs(crs_info, detected_crs_info):
 
 
 
-def resolve_pointcloud_crs(source_path, crs_input=""):
+def merge_manual_vertical_crs(crs_info, vertical_input):
 
-    """Nutzt manuelle Lage-CRS-Eingaben und uebernimmt erkannte Hoehenreferenzen."""
+    """Setzt ein manuell eingegebenes Vertikaldatum auf ein erkanntes oder manuelles CRS."""
+
+    vertical_info = normalize_vertical_crs_value(vertical_input, source="manual")
+
+    if not vertical_info:
+
+        return crs_info
+
+    merged = dict(crs_info or {"source": "manual"})
+
+    merged.update(vertical_info)
+
+    return merged
+
+
+
+def resolve_pointcloud_crs(source_path, crs_input="", vertical_input=""):
+
+    """Nutzt manuelle Lage-/Hoehen-CRS-Eingaben und automatische LAS/LAZ-Metadaten."""
 
     detected_crs_info = detect_pointcloud_crs(source_path)
 
@@ -1848,9 +2193,13 @@ def resolve_pointcloud_crs(source_path, crs_input=""):
 
     if manual_crs_info:
 
-        return merge_detected_vertical_crs(manual_crs_info, detected_crs_info)
+        resolved = merge_detected_vertical_crs(manual_crs_info, detected_crs_info)
 
-    return detected_crs_info
+    else:
+
+        resolved = detected_crs_info
+
+    return merge_manual_vertical_crs(resolved, vertical_input)
 
 
 
@@ -1898,22 +2247,6 @@ def apply_crs_metadata(target, crs_info, include_projection=True):
 
 
 
-def copy_existing_crs_metadata(source, target):
-
-    """Uebernimmt vorhandene CRS-Felder beim Duplizieren von Projekten."""
-
-    if not isinstance(source, dict) or not isinstance(target, dict):
-
-        return
-
-    for key in ("crs", "projection", "epsg", "vertical_crs", "vertical_epsg", "vertical_projection", "vertical_datum", "crs_info"):
-
-        if key in source:
-
-            target[key] = source[key]
-
-
-
 def write_potree_metadata_crs(output_dir, crs_info, ui=None):
 
     """Ergaenzt Potree metadata.json/cloud.js um die vom Viewer gelesene Projektion."""
@@ -1923,10 +2256,6 @@ def write_potree_metadata_crs(output_dir, crs_info, ui=None):
         return
 
     projection = crs_info.get("projection") or crs_info.get("value")
-
-    if not projection:
-
-        return
 
     metadata_path = os.path.join(output_dir, "metadata.json")
 
@@ -1938,43 +2267,33 @@ def write_potree_metadata_crs(output_dir, crs_info, ui=None):
 
                 metadata = json.load(f)
 
-            metadata["projection"] = projection
+            if projection:
+
+                metadata["projection"] = projection
 
             apply_crs_metadata(metadata, crs_info, include_projection=False)
 
-            if crs_info.get("epsg"):
+            srs = metadata.get("srs") if isinstance(metadata.get("srs"), dict) else {}
 
-                srs = metadata.get("srs") if isinstance(metadata.get("srs"), dict) else {}
+            if crs_info.get("epsg"):
 
                 srs["authority"] = "EPSG"
 
                 srs["horizontal"] = crs_info.get("code")
 
-                if crs_info.get("wkt"):
+            if crs_info.get("wkt"):
 
-                    srs["wkt"] = crs_info.get("wkt")
+                srs["wkt"] = crs_info.get("wkt")
 
-                if crs_info.get("vertical_epsg"):
+            if crs_info.get("vertical_epsg"):
 
-                    srs["vertical"] = crs_info.get("vertical_epsg").replace("EPSG:", "")
+                srs["vertical"] = crs_info.get("vertical_epsg").replace("EPSG:", "")
 
-                if crs_info.get("vertical_name") or crs_info.get("vertical_datum"):
+            if crs_info.get("vertical_name") or crs_info.get("vertical_datum"):
 
-                    srs["vertical_name"] = crs_info.get("vertical_name") or crs_info.get("vertical_datum")
+                srs["vertical_name"] = crs_info.get("vertical_name") or crs_info.get("vertical_datum")
 
-                metadata["srs"] = srs
-
-            elif crs_info.get("wkt"):
-
-                srs = {"wkt": crs_info.get("wkt")}
-
-                if crs_info.get("vertical_epsg"):
-
-                    srs["vertical"] = crs_info.get("vertical_epsg").replace("EPSG:", "")
-
-                if crs_info.get("vertical_name") or crs_info.get("vertical_datum"):
-
-                    srs["vertical_name"] = crs_info.get("vertical_name") or crs_info.get("vertical_datum")
+            if srs:
 
                 metadata["srs"] = srs
 
@@ -1982,7 +2301,7 @@ def write_potree_metadata_crs(output_dir, crs_info, ui=None):
 
                 json.dump(metadata, f, indent=2, ensure_ascii=False)
 
-            ui_log(f"[CRS] Potree metadata.json aktualisiert: {projection}", ui)
+            ui_log(f"[CRS] Potree metadata.json aktualisiert: {get_crs_summary_text(crs_info)}", ui)
 
         except Exception as e:
 
@@ -2014,7 +2333,9 @@ def write_potree_metadata_crs(output_dir, crs_info, ui=None):
 
             cloudjs = json.loads(json_text)
 
-            cloudjs["projection"] = projection
+            if projection:
+
+                cloudjs["projection"] = projection
 
             apply_crs_metadata(cloudjs, crs_info, include_projection=False)
 
@@ -2026,7 +2347,7 @@ def write_potree_metadata_crs(output_dir, crs_info, ui=None):
 
                 f.write(";")
 
-            ui_log(f"[CRS] Potree cloud.js aktualisiert: {projection}", ui)
+            ui_log(f"[CRS] Potree cloud.js aktualisiert: {get_crs_summary_text(crs_info)}", ui)
 
         except Exception as e:
 
@@ -2036,7 +2357,7 @@ def write_potree_metadata_crs(output_dir, crs_info, ui=None):
 
 def get_common_crs_info(crs_infos):
 
-    """Ermittelt ein gemeinsames CRS fuer Projekt-Metadaten, falls alle Punktwolken gleich sind."""
+    """Ermittelt ein gemeinsames CRS, falls alle Punktwolken gleich referenziert sind."""
 
     crs_info_list = list(crs_infos)
 
@@ -2044,13 +2365,11 @@ def get_common_crs_info(crs_infos):
 
         return None
 
-    cleaned_infos = crs_info_list
+    first_value = get_crs_summary_text(crs_info_list[0])
 
-    first_value = get_crs_summary_text(cleaned_infos[0])
+    if all(get_crs_summary_text(info) == first_value for info in crs_info_list):
 
-    if all(get_crs_summary_text(info) == first_value for info in cleaned_infos):
-
-        return cleaned_infos[0]
+        return crs_info_list[0]
 
     return None
 
@@ -2157,198 +2476,6 @@ def create_pointcloud_index_entry(name, input_format, viewer_path, s3_path, crs_
     apply_crs_metadata(entry, crs_info)
 
     return entry
-
-
-
-def rewrite_project_pointclouds_for_duplicate(project_info, source_s3_path, new_s3_prefix):
-
-    """Schreibt Multi-Punktwolken-Pfade beim Duplizieren auf den neuen Projektpfad um."""
-
-    pointclouds = project_info.get("pointclouds")
-
-    if not isinstance(pointclouds, list):
-
-        return None
-
-    source_viewer_root = source_s3_path
-
-    if source_viewer_root.startswith("pointclouds/"):
-
-        source_viewer_root = source_viewer_root[len("pointclouds/"):]
-
-    new_viewer_root = new_s3_prefix
-
-    if new_viewer_root.startswith("pointclouds/"):
-
-        new_viewer_root = new_viewer_root[len("pointclouds/"):]
-
-    rewritten_entries = []
-
-    for pointcloud in pointclouds:
-
-        if not isinstance(pointcloud, dict):
-
-            continue
-
-        rewritten = dict(pointcloud)
-
-        for key in ("viewer_path", "viewerPath", "path", "url"):
-
-            value = str(rewritten.get(key, "")).strip()
-
-            if value.startswith(source_viewer_root):
-
-                rewritten[key] = f"{new_viewer_root}{value[len(source_viewer_root):]}"
-
-            elif value.startswith(source_s3_path):
-
-                rewritten[key] = f"{new_s3_prefix}{value[len(source_s3_path):]}"
-
-        s3_value = str(rewritten.get("s3_path", "")).strip()
-
-        if s3_value.startswith(source_s3_path):
-
-            rewritten["s3_path"] = f"{new_s3_prefix}{s3_value[len(source_s3_path):]}"
-
-        rewritten_entries.append(rewritten)
-
-    return rewritten_entries
-
-
-
-
-
-def validate_replacement_file(filepath):
-
-    """Prueft ob eine Datei für den Projektaustausch geeignet ist."""
-
-    valid, message = validate_file(filepath)
-
-    if not valid:
-
-        return False, message
-
-
-
-    if os.path.basename(filepath).lower().endswith(".copc.laz"):
-
-        return False, "Für den Projektaustausch sind nur klassische .las oder .laz Dateien erlaubt"
-
-
-
-    return True, "OK"
-
-
-
-
-
-def resolve_replacement_source(source_path):
-
-    """Ordnet eine Austauschquelle einem unterstützten Typ zu."""
-
-    normalized_path = (source_path or "").strip().strip('"')
-
-    if not normalized_path:
-
-        return "", ""
-
-    if os.path.isdir(normalized_path):
-
-        return "potree_dir", normalized_path
-
-    if os.path.isfile(normalized_path):
-
-        if os.path.basename(normalized_path).lower() == "metadata.json":
-
-            return "potree_dir", os.path.dirname(normalized_path)
-
-        return "raw_file", normalized_path
-
-    return "", normalized_path
-
-
-
-def validate_potree_output_dir(directory_path):
-
-    """Prueft ob ein vorhandener Ordner wie ein Potree-Projekt aussieht."""
-
-    if not directory_path or not os.path.isdir(directory_path):
-
-        return False, "Bitte einen gueltigen Potree-Ordner auswählen."
-
-    metadata_path = os.path.join(directory_path, "metadata.json")
-
-    if not os.path.isfile(metadata_path):
-
-        return False, (
-
-            "Im gewählten Ordner wurde keine metadata.json gefunden. "
-
-            "Bitte den Hauptordner des konvertierten Potree-Projekts auswählen."
-
-        )
-
-    return True, "OK"
-
-
-
-def validate_replacement_source(source_path):
-
-    """Prueft ob eine Austauschquelle als LAS/LAZ oder Potree-Ordner geeignet ist."""
-
-    source_type, normalized_path = resolve_replacement_source(source_path)
-
-    if source_type == "raw_file":
-
-        return validate_replacement_file(normalized_path)
-
-    if source_type == "potree_dir":
-
-        return validate_potree_output_dir(normalized_path)
-
-    return False, "Bitte eine gueltige LAS/LAZ-Datei oder einen Potree-Ordner auswählen."
-
-
-
-def cleanup_local_files(output_path):
-
-    """Loescht die lokalen konvertierten Dateien nach erfolgreichem Upload"""
-
-    try:
-
-        if os.path.exists(output_path):
-
-            shutil.rmtree(output_path)
-
-            log(f"[CLEANUP] [OK] Temporaere Dateien gelöscht: {output_path}")
-
-            return True
-
-    except Exception as e:
-
-        log(f"[WARNUNG] Cleanup fehlgeschlagen: {e}")
-
-        return False
-
-    return False
-
-
-
-
-
-def format_bytes(bytes_size):
-
-    """Formatiert Bytes zu lesbarer Größe"""
-
-    for unit in ['B', 'KB', 'MB', 'GB']:
-
-        if bytes_size < 1024.0:
-
-            return f"{bytes_size:.1f} {unit}"
-
-        bytes_size /= 1024.0
-
-    return f"{bytes_size:.1f} TB"
 
 
 
@@ -2947,7 +3074,17 @@ def create_s3_client(aws_access, aws_secret):
 
         aws_secret_access_key=aws_secret,
 
-        region_name=REGION_NAME
+        region_name=REGION_NAME,
+
+        config=Config(
+
+            retries={'max_attempts': 3, 'mode': 'adaptive'},
+
+            connect_timeout=10,
+
+            read_timeout=30
+
+        )
 
     )
 
@@ -3089,6 +3226,127 @@ def collect_upload_files(input_format, s3_prefix, source_file=None, output_dir=N
 
 
 
+def infer_cloud_name(source_path):
+
+    """Leitet einen sprechenden Punktwolken-Namen aus Datei oder Ordner ab."""
+
+    source_type, normalized_source = resolve_replacement_source(source_path)
+
+    if source_type == "potree_dir":
+
+        return os.path.basename(normalized_source.rstrip("\\/")) or "Punktwolke"
+
+    base_name = os.path.basename(normalized_source or source_path)
+
+    if base_name.lower().endswith(".copc.laz"):
+
+        return base_name[:-len(".copc.laz")]
+
+    return os.path.splitext(base_name)[0] or "Punktwolke"
+
+
+
+
+def make_unique_slug(name, used_slugs):
+
+    """Erzeugt einen eindeutigen, S3-tauglichen Slug innerhalb eines Projekts."""
+
+    base_slug = sanitize_folder_name(name) or "punktwolke"
+
+    slug = base_slug
+
+    counter = 2
+
+    while slug in used_slugs:
+
+        slug = f"{base_slug}_{counter}"
+
+        counter += 1
+
+    used_slugs.add(slug)
+
+    return slug
+
+
+
+
+def prepare_multi_replacement_sources(source_entries):
+
+    """Validiert und normalisiert mehrere Austauschquellen."""
+
+    if not source_entries:
+
+        raise ValueError("Bitte mindestens eine Punktwolke zur Multi-Liste hinzufügen.")
+
+    prepared_sources = []
+
+    used_names = set()
+
+    used_slugs = set()
+
+    for idx, entry in enumerate(source_entries, 1):
+
+        raw_source = str(entry.get("source", "")).strip()
+
+        if not raw_source:
+
+            raise ValueError(f"Punktwolke {idx}: Quelle fehlt.")
+
+        source_type, normalized_source = resolve_replacement_source(raw_source)
+
+        if source_type == "potree_dir":
+
+            valid, message = validate_potree_output_dir(normalized_source)
+
+            input_format = "potree"
+
+        elif source_type == "raw_file":
+
+            valid, message = validate_file(normalized_source)
+
+            input_format = detect_input_format(normalized_source)
+
+        else:
+
+            valid, message = False, "Quelle muss eine LAS/LAZ/COPC-Datei oder ein Potree-Ordner sein."
+
+            input_format = ""
+
+        if not valid:
+
+            raise ValueError(f"Punktwolke {idx}: {message}")
+
+        cloud_name = str(entry.get("name", "")).strip() or infer_cloud_name(normalized_source)
+
+        name_key = cloud_name.casefold()
+
+        if name_key in used_names:
+
+            raise ValueError(f"Punktwolke '{cloud_name}' ist doppelt vorhanden.")
+
+        used_names.add(name_key)
+
+        cloud_slug = make_unique_slug(cloud_name, used_slugs)
+
+        prepared_sources.append({
+
+            "name": cloud_name,
+
+            "slug": cloud_slug,
+
+            "source": normalized_source,
+
+            "source_type": source_type,
+
+            "format": input_format,
+
+        })
+
+    return prepared_sources
+
+
+
+
 def upload_files_to_s3(s3_client, files_to_upload, ui=None):
 
     """Laedt Dateien nach S3 hoch und aktualisiert die passende Fortschrittsanzeige."""
@@ -3177,30 +3435,6 @@ def upload_files_to_s3(s3_client, files_to_upload, ui=None):
 
 
 
-def get_hidden_converter_process_kwargs():
-
-    """Verhindert, dass der PotreeConverter unter Windows ein Konsolenfenster in den Vordergrund bringt."""
-
-    if os.name != "nt":
-
-        return {}
-
-    startupinfo = subprocess.STARTUPINFO()
-
-    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-
-    startupinfo.wShowWindow = subprocess.SW_HIDE
-
-    return {
-
-        "startupinfo": startupinfo,
-
-        "creationflags": subprocess.CREATE_NO_WINDOW,
-
-    }
-
-
-
 def run_potree_conversion(laz_file, converter_path, output_dir, ui=None):
 
     """Fuehrt den Potree Converter aus und schreibt den Fortschritt ins passende Log."""
@@ -3233,9 +3467,7 @@ def run_potree_conversion(laz_file, converter_path, output_dir, ui=None):
 
         universal_newlines=True,
 
-        bufsize=1,
-
-        **get_hidden_converter_process_kwargs()
+        bufsize=1
 
     )
 
@@ -3335,7 +3567,7 @@ class UploadProgress:
 
 
 
-def run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_secret, converter_path, output_base_dir, crs_input=""):
+def run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_secret, converter_path, output_base_dir, crs_input="", vertical_input=""):
 
     """Laedt mehrere Punktwolken als ein Viewer-Projekt hoch."""
 
@@ -3369,7 +3601,7 @@ def run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_sec
 
         needs_converter = False
 
-        for source_path in upload_sources:
+        for source_path in normalize_upload_sources(upload_sources):
 
             valid, msg = validate_file(source_path)
 
@@ -3385,7 +3617,7 @@ def run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_sec
 
             needs_converter = needs_converter or input_format == "potree"
 
-            crs_info = resolve_pointcloud_crs(source_path, crs_input)
+            crs_info = resolve_pointcloud_crs(source_path, crs_input, vertical_input)
 
             crs_display = get_crs_summary_text(crs_info)
 
@@ -3408,6 +3640,12 @@ def run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_sec
                 "crs": crs_info
 
             })
+
+        if not validated_sources:
+
+            messagebox.showwarning("Fehler", "Bitte mindestens eine Punktwolke auswählen!")
+
+            return
 
         if needs_converter and not converter_path:
 
@@ -3435,7 +3673,7 @@ def run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_sec
 
         folder_kunde = sanitize_folder_name(kunde)
 
-        folder_id = uuid.uuid4().hex[:6]
+        folder_id = uuid.uuid4().hex[:8]
 
         folder_projekt = sanitize_folder_name(projekt)
 
@@ -3679,8 +3917,6 @@ def run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_sec
 
         log(f"[FEHLER] {str(e)}")
 
-        import traceback
-
         log(traceback.format_exc())
 
         root.after(0, lambda: messagebox.showerror("Fehler", f"Unerwarteter Fehler:\n{e}"))
@@ -3695,7 +3931,27 @@ def run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_sec
 
 
 
-def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input=""):
+def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input="", vertical_input=""):
+
+    upload_sources = normalize_upload_sources(laz_file)
+
+    if len(upload_sources) > 1:
+
+        config = load_config()
+
+        configured_converter_path = config.get("converter_path", "")
+
+        converter_path = resolve_converter_path(configured_converter_path)
+
+        output_base_dir = config.get("output_base_dir", "")
+
+        run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_secret, converter_path, output_base_dir, crs_input, vertical_input)
+
+        return
+
+    if upload_sources:
+
+        laz_file = upload_sources[0]
 
     config = load_config()
 
@@ -3705,19 +3961,7 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input=""):
 
     output_base_dir = config.get("output_base_dir", "")
 
-    
 
-    upload_sources = normalize_upload_sources(laz_file)
-
-    if len(upload_sources) > 1:
-
-        run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_secret, converter_path, output_base_dir, crs_input)
-
-        return
-
-    if upload_sources:
-
-        laz_file = upload_sources[0]
 
     try:
 
@@ -3741,7 +3985,7 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input=""):
 
             log(f"[FEHLER] {msg}")
 
-            messagebox.showerror("Fehler", msg)
+            root.after(0, lambda m=msg: messagebox.showerror("Fehler", m))
 
             return
 
@@ -3751,7 +3995,7 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input=""):
 
         is_copc = input_format == "copc"
 
-        crs_info = resolve_pointcloud_crs(laz_file, crs_input)
+        crs_info = resolve_pointcloud_crs(laz_file, crs_input, vertical_input)
 
         crs_display = get_crs_summary_text(crs_info)
 
@@ -3769,7 +4013,7 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input=""):
 
             log("[FEHLER] Bitte AWS Keys in den Einstellungen eingeben!")
 
-            messagebox.showwarning("Fehler", "Bitte AWS Zugangsdaten in den Einstellungen eingeben!")
+            root.after(0, lambda: messagebox.showwarning("Fehler", "Bitte AWS Zugangsdaten in den Einstellungen eingeben!"))
 
             return
 
@@ -3779,7 +4023,7 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input=""):
 
             log("[FEHLER] Kein Potree Converter verfügbar")
 
-            messagebox.showwarning(
+            root.after(0, lambda: messagebox.showwarning(
 
                 "Fehler",
 
@@ -3787,7 +4031,7 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input=""):
 
                 "Bitte Build/Projektdateien pruefen oder optional einen Override-Pfad konfigurieren!"
 
-            )
+            ))
 
             return
 
@@ -3797,7 +4041,7 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input=""):
 
             log("[FEHLER] Output-Ordner nicht konfiguriert!")
 
-            messagebox.showwarning("Fehler", "Bitte einen Output-Ordner in den Einstellungen angeben!")
+            root.after(0, lambda: messagebox.showwarning("Fehler", "Bitte einen Output-Ordner in den Einstellungen angeben!"))
 
             return
 
@@ -3817,7 +4061,7 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input=""):
 
         folder_kunde = sanitize_folder_name(kunde)
 
-        folder_id = uuid.uuid4().hex[:6]  # 6 Zeichen ID
+        folder_id = uuid.uuid4().hex[:8]  # 8 Zeichen ID
 
         folder_projekt = sanitize_folder_name(projekt)
 
@@ -3857,81 +4101,7 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input=""):
 
 
 
-            log(f"[KONVERTIERUNG] Starte Potree Converter...")
-
-            log(f"[CONVERTER] {converter_path}")
-
-            log(f"[OUTPUT] {output_dir}")
-
-
-
-            cmd = [converter_path, laz_file, "-o", output_dir, "--overwrite"]
-
-            
-
-            process = subprocess.Popen(
-
-                cmd,
-
-                cwd=os.path.dirname(converter_path),
-
-                stdout=subprocess.PIPE,
-
-                stderr=subprocess.STDOUT,
-
-                universal_newlines=True,
-
-                bufsize=1,
-
-                **get_hidden_converter_process_kwargs()
-
-            )
-
-
-
-            for line in process.stdout:
-
-                line = line.strip()
-
-                if line:
-
-                    log(f"[POTREE] {line}")
-
-                    if "%" in line:
-
-                        try:
-
-                            percent_str = re.search(r'(\d+)%', line)
-
-                            if percent_str:
-
-                                percent = int(percent_str.group(1))
-
-                                root.after(0, lambda p=percent: progress_bar.set(p / 100))
-
-                        except:
-
-                            pass
-
-
-
-            process.wait()
-
-
-
-            if process.returncode != 0:
-
-                log(f"[FEHLER] Potree Converter fehlgeschlagen (Exit Code: {process.returncode})")
-
-                messagebox.showerror("Fehler", "Potree Konvertierung fehlgeschlagen!")
-
-                return
-
-
-
-            log("[KONVERTIERUNG] Potree Konvertierung abgeschlossen")
-
-            root.after(0, lambda: progress_bar.set(1))
+            run_potree_conversion(laz_file, converter_path, output_dir)
 
             write_potree_metadata_crs(output_dir, crs_info)
 
@@ -3947,17 +4117,7 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input=""):
 
         try:
 
-            s3_client = boto3.client(
-
-                's3',
-
-                aws_access_key_id=aws_access,
-
-                aws_secret_access_key=aws_secret,
-
-                region_name=REGION_NAME
-
-            )
+            s3_client = create_s3_client(aws_access, aws_secret)
 
             log("[S3] Verbindung hergestellt")
 
@@ -3965,7 +4125,7 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input=""):
 
             log(f"[FEHLER] S3 Verbindung fehlgeschlagen: {e}")
 
-            messagebox.showerror("Fehler", f"AWS Verbindung fehlgeschlagen:\n{e}")
+            root.after(0, lambda err=e: messagebox.showerror("Fehler", f"AWS Verbindung fehlgeschlagen:\n{err}"))
 
             return
 
@@ -4007,7 +4167,7 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input=""):
 
             log("[FEHLER] Keine Dateien zum Upload gefunden!")
 
-            messagebox.showwarning("Fehler", "Keine Dateien zum Upload gefunden!")
+            root.after(0, lambda: messagebox.showwarning("Fehler", "Keine Dateien zum Upload gefunden!"))
 
             return
 
@@ -4186,7 +4346,7 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input=""):
 
             log("[CLEANUP] Loesche temporaere Dateien...")
 
-            
+
 
             cleanup_success = cleanup_local_files(output_dir)
 
@@ -4244,8 +4404,6 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input=""):
 
         log(f"[FEHLER] {str(e)}")
 
-        import traceback
-
         log(traceback.format_exc())
 
         root.after(0, lambda: messagebox.showerror("Fehler", f"Unerwarteter Fehler:\n{e}"))
@@ -4276,13 +4434,19 @@ def select_file():
 
 
 
-def set_selected_upload_files(file_paths):
+def set_selected_upload_files(file_paths, append=False):
 
     """Speichert die aktuell ausgewaehlten Upload-Dateien und aktualisiert die UI."""
 
     global selected_upload_files
 
-    selected_upload_files = normalize_upload_sources(file_paths)
+    if append:
+
+        selected_upload_files = normalize_upload_sources([*selected_upload_files, *normalize_upload_sources(file_paths)])
+
+    else:
+
+        selected_upload_files = normalize_upload_sources(file_paths)
 
     entry_file.delete(0, tk.END)
 
@@ -4416,9 +4580,10 @@ def extract_dropped_file(event_data):
 
 
 
+
 def extract_dropped_files(event_data):
 
-    """Extrahiert Dateien aus einem Drag-and-Drop Event."""
+    """Extrahiert alle Dateien/Ordner aus einem Drag-and-Drop Event."""
 
     try:
 
@@ -4428,15 +4593,27 @@ def extract_dropped_files(event_data):
 
         file_list = [event_data]
 
+    dropped_paths = [str(file_path).strip('{}') for file_path in file_list if str(file_path).strip('{}')]
 
+    if len(dropped_paths) == 1 and not os.path.exists(dropped_paths[0]):
 
-    if not file_list:
+        raw_value = dropped_paths[0]
 
-        return []
+        split_candidates = re.findall(
 
+            r"[A-Za-z]:[\\/].*?\.(?:copc\.laz|laz|las)(?=\s+[A-Za-z]:[\\/]|$)",
 
+            raw_value,
 
-    return [file_path.strip('{}') for file_path in file_list if file_path.strip('{}')]
+            flags=re.IGNORECASE
+
+        )
+
+        if split_candidates:
+
+            dropped_paths = split_candidates
+
+    return dropped_paths
 
 
 
@@ -4517,9 +4694,9 @@ def drop_file(event):
 
     if file_paths:
 
-        set_selected_upload_files(file_paths)
+        set_selected_upload_files(file_paths, append=True)
 
-        log(f"[DRAG & DROP] {len(file_paths)} Datei(en)")
+        log(f"[DRAG & DROP] {len(file_paths)} Datei(en) hinzugefügt, insgesamt {len(selected_upload_files)}")
 
 
 
@@ -4529,13 +4706,9 @@ def test_aws_connection():
 
     """Testet die AWS Verbindung"""
 
-    config = load_config()
+    access, secret = get_aws_credentials()
 
-    access = config.get("aws_access", "")
 
-    secret = config.get("aws_secret", "")
-
-    
 
     if not access or not secret:
 
@@ -4549,17 +4722,7 @@ def test_aws_connection():
 
         log("[TEST] Teste AWS Verbindung...")
 
-        s3 = boto3.client(
-
-            's3',
-
-            aws_access_key_id=access,
-
-            aws_secret_access_key=secret,
-
-            region_name=REGION_NAME
-
-        )
+        s3 = create_s3_client(access, secret)
 
         s3.head_bucket(Bucket=BUCKET_NAME)
 
@@ -4609,11 +4772,7 @@ def start_thread():
 
 
 
-    config = load_config()
-
-    aws_access = config.get("aws_access", "")
-
-    aws_secret = config.get("aws_secret", "")
+    aws_access, aws_secret = get_aws_credentials()
 
 
 
@@ -4675,7 +4834,7 @@ def reset_progress():
 
 
 
-def replace_project_process(project_info, replacement_file, aws_access, aws_secret, on_success=None, ui=None):
+def replace_project_process(project_info, replacement_file, aws_access, aws_secret, on_success=None, ui=None, crs_input="", vertical_input=""):
 
     """Tauscht die Punktwolkendaten eines bestehenden Projekts aus."""
 
@@ -4707,6 +4866,7 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
     prepared_output_dir = ""
     replacement_source_type = ""
     replacement_source_label = ""
+    crs_info = None
 
 
 
@@ -4743,22 +4903,6 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
                 "Dieses Projekt nutzt derzeit COPC. Der Austausch mit Potree-Konvertierung ist aktuell "
 
                 "nur für klassische Potree-Projekte verfügbar, damit Link und Viewer-Pfad unverändert bleiben."
-
-            )
-
-            ui_log(f"[AUSTAUSCH] [FEHLER] {message}", ui)
-
-            root.after(0, lambda msg=message: messagebox.showerror("Fehler", msg))
-
-            return
-
-        if project_format == "multi" or isinstance(project_info.get("pointclouds"), list):
-
-            message = (
-
-                "Dieses Projekt enthält mehrere Punktwolken. Der Austausch-Dialog ist aktuell "
-
-                "nur für klassische Einzel-Potree-Projekte verfügbar, damit Multi-Projekte nicht versehentlich überschrieben werden."
 
             )
 
@@ -4813,6 +4957,16 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
 
             replacement_source_label = os.path.basename(normalized_replacement_source)
 
+            crs_info = resolve_pointcloud_crs(normalized_replacement_source, crs_input, vertical_input)
+            crs_display = get_crs_summary_text(crs_info)
+            if crs_display:
+
+                ui_log(f"[CRS] {crs_display}", ui)
+
+            else:
+
+                ui_log("[CRS] Kein CRS gefunden oder gesetzt", ui)
+
             if not converter_path:
 
                 ui_log("[AUSTAUSCH] [FEHLER] Kein Potree Converter verfügbar", ui)
@@ -4862,6 +5016,22 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
             prepared_output_dir = temp_output_dir
 
             run_potree_conversion(normalized_replacement_source, converter_path, temp_output_dir, ui=ui)
+
+        if replacement_source_type == "potree_dir":
+
+            crs_info = resolve_pointcloud_crs(normalized_replacement_source, crs_input, vertical_input)
+            crs_display = get_crs_summary_text(crs_info)
+            if crs_display:
+
+                ui_log(f"[CRS] {crs_display}", ui)
+
+            else:
+
+                ui_log("[CRS] Kein CRS im Potree-Ordner gefunden oder gesetzt", ui)
+
+        if crs_info:
+
+            write_potree_metadata_crs(prepared_output_dir, crs_info, ui=ui)
 
 
 
@@ -4945,6 +5115,34 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
 
             log("[AUSTAUSCH] Keine veralteten Dateien zum Löschen gefunden")
 
+        if crs_info:
+
+            ui_set_step("Aktualisiere Projekt-Metadaten...", 5, ui)
+
+            index_data = load_projects_index(s3_client)
+
+            updated = False
+
+            for idx, project in enumerate(index_data.get("projects", [])):
+
+                if project.get("id") == project_id:
+
+                    updated_project = dict(project)
+
+                    apply_crs_metadata(updated_project, crs_info)
+
+                    index_data["projects"][idx] = updated_project
+
+                    updated = True
+
+                    break
+
+            if updated:
+
+                save_projects_index(s3_client, index_data)
+
+                ui_log(f"[CRS] Projekt-Metadaten aktualisiert: {get_crs_summary_text(crs_info)}", ui)
+
 
 
         ui_set_step("Raeume auf...", 5, ui)
@@ -5023,8 +5221,6 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
 
         log(f"[AUSTAUSCH] [FEHLER] {e}")
 
-        import traceback
-
         ui_log(traceback.format_exc(), ui)
 
         log(traceback.format_exc())
@@ -5037,6 +5233,309 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
 
             cleanup_local_files(temp_output_dir)
 
+
+
+
+
+def replace_project_with_multi_pointclouds(project_info, replacement_entries, aws_access, aws_secret, on_success=None, ui=None, crs_input="", vertical_input=""):
+
+    """Ersetzt ein Projekt durch mehrere Punktwolken und schreibt pointclouds[] in den Index."""
+
+    config = load_config()
+
+    configured_converter_path = config.get("converter_path", "")
+
+    converter_path = resolve_converter_path(configured_converter_path)
+
+    output_base_dir = config.get("output_base_dir", "")
+
+    project_name = project_info.get("projekt", "")
+
+    project_id = project_info.get("id", "")
+
+    project_link = project_info.get("link", "")
+
+    s3_prefix = project_info.get("s3_path", "")
+
+    temp_output_dirs = []
+
+    try:
+
+        ui_reset_progress(ui)
+
+        ui_set_step("Pruefe Multi-Punktwolken...", 1, ui)
+
+        ui_set_progress(0, ui)
+
+        prepared_sources = prepare_multi_replacement_sources(replacement_entries)
+
+        needs_converter = any(
+
+            source["source_type"] == "raw_file" and source["format"] == "potree"
+
+            for source in prepared_sources
+
+        )
+
+        if not aws_access or not aws_secret:
+
+            raise ValueError("Bitte AWS Zugangsdaten in den Einstellungen eingeben!")
+
+        if needs_converter and not converter_path:
+
+            raise ValueError("Kein Potree Converter verfügbar.")
+
+        if needs_converter and not output_base_dir:
+
+            raise ValueError("Bitte einen Output-Ordner in den Einstellungen angeben.")
+
+        if not s3_prefix or not project_id:
+
+            raise ValueError("Projektdaten sind unvollständig.")
+
+        base_viewer_path = s3_prefix[len("pointclouds/"):] if s3_prefix.startswith("pointclouds/") else s3_prefix
+
+        ui_log(f"[MULTI] Ersetze Projekt '{project_name}' ({project_id}) mit {len(prepared_sources)} Punktwolken", ui)
+
+        ui_log(f"[MULTI] Zielbasis: {s3_prefix}", ui)
+
+        ui_set_step("Verbinde mit S3...", 2, ui)
+
+        ui_set_detail("Verbinde mit dem Projekt-Storage...", ui)
+
+        s3_client = create_s3_client(aws_access, aws_secret)
+
+        existing_keys = collect_project_objects(s3_client, s3_prefix)
+
+        uploaded_keys = set()
+
+        pointcloud_entries = []
+
+        pointcloud_crs_infos = []
+
+        total_sources = len(prepared_sources)
+
+        for source_index, source in enumerate(prepared_sources, 1):
+
+            source_name = source["name"]
+
+            source_slug = source["slug"]
+
+            source_path = source["source"]
+
+            source_crs_path = source_path if os.path.isfile(source_path) or os.path.isdir(source_path) else ""
+
+            crs_info = resolve_pointcloud_crs(source_crs_path, crs_input, vertical_input)
+
+            crs_display = get_crs_summary_text(crs_info)
+
+            if crs_display:
+
+                ui_log(f"[CRS] {source_name}: {crs_display}", ui)
+
+            else:
+
+                ui_log(f"[CRS] {source_name}: kein CRS gefunden oder gesetzt", ui)
+
+            child_s3_prefix = f"{s3_prefix}/{source_slug}"
+
+            child_viewer_path = f"{base_viewer_path}/{source_slug}"
+
+            ui_set_step(f"Bereite Punktwolke {source_index}/{total_sources} vor...", 2, ui)
+
+            ui_set_detail(source_name, ui)
+
+            ui_log(f"[MULTI] Punktwolke {source_index}/{total_sources}: {source_name}", ui)
+
+            if source["source_type"] == "potree_dir":
+
+                upload_source_dir = source_path
+
+                input_format = "potree"
+
+                ui_log(f"[MULTI] Verwende Potree-Ordner: {upload_source_dir}", ui)
+
+            elif source["format"] == "copc":
+
+                upload_source_dir = ""
+
+                input_format = "copc"
+
+                child_viewer_path = f"{child_viewer_path}/source.copc.laz"
+
+                ui_log(f"[MULTI] Verwende COPC-Direktupload: {os.path.basename(source_path)}", ui)
+
+            else:
+
+                input_format = "potree"
+
+                output_dir = os.path.join(
+
+                    output_base_dir,
+
+                    "_multi_project_replacements",
+
+                    f"{project_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+
+                    source_slug
+
+                )
+
+                temp_output_dirs.append(output_dir)
+
+                ui_set_step(f"Konvertiere Punktwolke {source_index}/{total_sources}...", 2, ui)
+
+                ui_set_detail(f"{source_name} wird in das Potree-Format umgewandelt", ui)
+
+                run_potree_conversion(source_path, converter_path, output_dir, ui=ui)
+
+                upload_source_dir = output_dir
+
+            if input_format == "potree" and crs_info:
+
+                write_potree_metadata_crs(upload_source_dir, crs_info, ui=ui)
+
+            ui_set_step(f"Lade Punktwolke {source_index}/{total_sources} hoch...", 3, ui)
+
+            if input_format == "copc":
+
+                files_to_upload = collect_upload_files("copc", child_s3_prefix, source_file=source_path)
+
+            else:
+
+                files_to_upload = collect_upload_files("potree", child_s3_prefix, output_dir=upload_source_dir)
+
+            if not files_to_upload:
+
+                raise RuntimeError(f"Keine Dateien zum Upload fuer '{source_name}' gefunden.")
+
+            upload_files_to_s3(s3_client, files_to_upload, ui=ui)
+
+            uploaded_keys.update(s3_key for _, s3_key in files_to_upload)
+
+            pointcloud_entries.append(create_pointcloud_index_entry(
+
+                source_name,
+
+                input_format,
+
+                child_viewer_path,
+
+                child_s3_prefix if input_format != "copc" else f"{child_s3_prefix}/source.copc.laz",
+
+                crs_info
+
+            ))
+
+            pointcloud_crs_infos.append(crs_info)
+
+        ui_set_step("Bereinige alte Projektdateien...", 4, ui)
+
+        obsolete_keys = [key for key in existing_keys if key not in uploaded_keys]
+
+        if obsolete_keys:
+
+            ui_set_detail(f"Entferne {len(obsolete_keys)} alte Dateien...", ui)
+
+            ui_log(f"[MULTI] Entferne {len(obsolete_keys)} alte Dateien aus dem Projekt", ui)
+
+            delete_s3_objects(s3_client, obsolete_keys)
+
+        ui_set_step("Aktualisiere Projekt-Index...", 5, ui)
+
+        index_data = load_projects_index(s3_client)
+
+        updated = False
+
+        for idx, project in enumerate(index_data.get("projects", [])):
+
+            if project.get("id") == project_id:
+
+                updated_project = dict(project)
+
+                updated_project.update({
+
+                    "format": "multi",
+
+                    "viewer_path": base_viewer_path,
+
+                    "s3_path": s3_prefix,
+
+                    "pointclouds": pointcloud_entries,
+
+                })
+
+                common_crs = get_common_crs_info(pointcloud_crs_infos)
+
+                if common_crs:
+
+                    apply_crs_metadata(updated_project, common_crs)
+
+                index_data["projects"][idx] = updated_project
+
+                updated = True
+
+                break
+
+        if not updated:
+
+            raise RuntimeError("Projekt wurde im Index nicht gefunden.")
+
+        save_projects_index(s3_client, index_data)
+
+        ui_set_progress(1, ui)
+
+        ui_set_detail("Multi-Projekt wurde aktualisiert.", ui)
+
+        ui_log("=" * 50, ui)
+
+        ui_log("MULTI-PUNKTWOLKEN ERFOLGREICH AUSGETAUSCHT", ui)
+
+        ui_log(f"Projekt: {project_name} ({project_id})", ui)
+
+        ui_log(f"Punktwolken: {len(pointcloud_entries)}", ui)
+
+        ui_log(f"Link unverändert: {project_link}", ui)
+
+        ui_log("=" * 50, ui)
+
+        root.after(0, lambda: root.clipboard_clear())
+
+        root.after(0, lambda: root.clipboard_append(project_link))
+
+        root.after(0, lambda: messagebox.showinfo(
+
+            "Erfolg",
+
+            f"'{project_name}' wurde als Multi-Punktwolken-Projekt aktualisiert.\n\n"
+
+            f"Punktwolken: {len(pointcloud_entries)}\n\nLink bleibt unverändert."
+
+        ))
+
+        if on_success:
+
+            root.after(0, on_success)
+
+    except Exception as e:
+
+        ui_log(f"[MULTI] [FEHLER] {e}", ui)
+
+        log(f"[MULTI] [FEHLER] {e}")
+
+        ui_log(traceback.format_exc(), ui)
+
+        log(traceback.format_exc())
+
+        root.after(0, lambda err=e: messagebox.showerror("Fehler", f"Multi-Austausch fehlgeschlagen:\n{err}"))
+
+    finally:
+
+        for temp_dir in temp_output_dirs:
+
+            if temp_dir and os.path.exists(temp_dir):
+
+                cleanup_local_files(temp_dir)
 
 
 
@@ -5091,7 +5590,7 @@ def duplicate_project_process(project_info, new_kunde, new_projekt, aws_access, 
 
         folder_kunde = sanitize_folder_name(new_kunde)
 
-        folder_id = uuid.uuid4().hex[:6]
+        folder_id = uuid.uuid4().hex[:8]
 
         folder_projekt = sanitize_folder_name(new_projekt)
 
@@ -5188,16 +5687,6 @@ def duplicate_project_process(project_info, new_kunde, new_projekt, aws_access, 
             "s3_path": new_s3_prefix
 
         }
-
-        copy_existing_crs_metadata(project_info, new_project)
-
-        rewritten_pointclouds = rewrite_project_pointclouds_for_duplicate(project_info, source_s3_path, new_s3_prefix)
-
-        if rewritten_pointclouds:
-
-            new_project["pointclouds"] = rewritten_pointclouds
-
-            new_project["pointcloud_count"] = len(rewritten_pointclouds)
 
         index_data["projects"].insert(0, new_project)
 
@@ -5435,6 +5924,86 @@ def download_project_data_process(project_info, target_dir, aws_access, aws_secr
 
         root.after(0, lambda err=e: messagebox.showerror("Fehler", f"Download fehlgeschlagen:\n{err}"))
 
+
+
+
+def rename_project_metadata_process(project_info, new_kunde, new_projekt, pointcloud_names, aws_access, aws_secret, on_success=None, ui=None):
+
+    """Benennt Projekt- und Punktwolken-Metadaten um, ohne S3-Dateipfade zu ändern."""
+
+    try:
+
+        project_id = str(project_info.get("id", "")).strip()
+
+        if not project_id:
+
+            raise ValueError("Projekt-ID fehlt.")
+
+        ui_set_step("Aktualisiere Projektnamen...", 1, ui)
+
+        ui_set_detail("Lade Projekt-Index...", ui)
+
+        ui_set_progress(0.15, ui)
+
+        s3_client = create_s3_client(aws_access, aws_secret)
+
+        index_data = load_projects_index(s3_client)
+
+        target_project = None
+
+        for project in index_data.get("projects", []):
+
+            if str(project.get("id", "")).strip() == project_id:
+
+                target_project = project
+
+                break
+
+        if not target_project:
+
+            raise RuntimeError("Projekt wurde im aktuellen Index nicht gefunden.")
+
+        ui_set_progress(0.45, ui)
+
+        target_project["kunde"] = new_kunde
+
+        target_project["projekt"] = new_projekt
+
+        pointclouds = target_project.get("pointclouds", [])
+
+        for index, name in enumerate(pointcloud_names):
+
+            if index < len(pointclouds):
+
+                pointclouds[index]["name"] = name
+
+        ui_set_detail("Speichere Projekt-Index...", ui)
+
+        ui_set_progress(0.75, ui)
+
+        if not save_projects_index(s3_client, index_data):
+
+            raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
+
+        ui_set_progress(1.0, ui)
+
+        ui_set_detail("Umbenennung gespeichert.", ui)
+
+        ui_log(f"[UMBENENNEN] Projekt {project_id} umbenannt: {new_kunde} / {new_projekt}", ui)
+
+        if on_success:
+
+            root.after(0, on_success)
+
+    except Exception as e:
+
+        ui_log(f"[UMBENENNEN] [FEHLER] {e}", ui)
+
+        log(f"[UMBENENNEN] [FEHLER] {e}")
+
+        log(traceback.format_exc())
+
+        root.after(0, lambda err=e: messagebox.showerror("Fehler", f"Umbenennen fehlgeschlagen:\n{err}"))
 
 
 
@@ -5788,11 +6357,7 @@ def show_projects_view():
 
     """Rendert die Projektübersicht als Hauptansicht im Hauptfenster."""
 
-    config = load_config()
-
-    aws_access = config.get("aws_access", "")
-
-    aws_secret = config.get("aws_secret", "")
+    aws_access, aws_secret = get_aws_credentials()
 
 
 
@@ -6006,15 +6571,63 @@ def show_projects_view():
 
     )
 
-    tree.heading("id", text="ID")
+    sort_state = {"column": "datum", "reverse": True}
 
-    tree.heading("kunde", text="Kunde")
+    heading_labels = {
+        "id": "ID",
+        "kunde": "Kunde",
+        "projekt": "Projekt",
+        "datum": "Datum",
+        "url": "Web-Link",
+    }
 
-    tree.heading("projekt", text="Projekt")
+    def update_project_headings():
 
-    tree.heading("datum", text="Datum")
+        for column, label in heading_labels.items():
 
-    tree.heading("url", text="Web-Link")
+            marker = ""
+
+            if sort_state["column"] == column:
+
+                marker = " v" if sort_state["reverse"] else " ^"
+
+            if column in ("kunde", "projekt", "datum"):
+
+                tree.heading(
+
+                    column,
+
+                    text=f"{label}{marker}",
+
+                    command=lambda col=column: sort_projects_by(col)
+
+                )
+
+            else:
+
+                tree.heading(column, text=label)
+
+
+
+    def sort_projects_by(column):
+
+        if sort_state["column"] == column:
+
+            sort_state["reverse"] = not sort_state["reverse"]
+
+        else:
+
+            sort_state["column"] = column
+
+            sort_state["reverse"] = column == "datum"
+
+        update_project_headings()
+
+        load_projects(customer_filter.get(), search_entry.get().strip())
+
+
+
+    update_project_headings()
 
     tree.column("id", width=90, anchor="center")
 
@@ -6389,71 +7002,128 @@ def show_projects_view():
 
 
 
-        replacement_entry = ctk.CTkEntry(
+        replacement_sources = []
+        replacement_crs_auto_value = {"crs": "", "vertical": ""}
+
+
+
+        sources_box = ctk.CTkTextbox(
 
             upload_card,
 
+            height=118,
+
             font=ctk.CTkFont(family="Consolas", size=11),
 
-            height=34,
-
-            placeholder_text="Neue LAS/LAZ-Datei oder Potree-Ordner für dieses Projekt auswählen"
+            state="disabled"
 
         )
 
-        replacement_entry.pack(fill="x", padx=16, pady=(16, 10))
+        sources_box.pack(fill="x", padx=16, pady=(16, 10))
 
 
 
-        def set_replacement_source(source_path):
+        def render_replacement_sources():
 
-            replacement_entry.delete(0, tk.END)
+            sources_box.configure(state="normal")
 
-            replacement_entry.insert(0, source_path)
+            sources_box.delete("1.0", tk.END)
 
-            source_type, normalized_source = resolve_replacement_source(source_path)
+            if not replacement_sources:
 
-            source_name = os.path.basename(normalized_source.rstrip("\\/")) if normalized_source else source_path
+                sources_box.insert(tk.END, "Noch keine Punktwolke ausgewählt.")
 
-            source_caption = "Potree-Ordner erkannt" if source_type == "potree_dir" else "Datei erkannt"
+            else:
+
+                for idx, source in enumerate(replacement_sources, 1):
+
+                    sources_box.insert(tk.END, f"{idx}. {infer_cloud_name(source)}  ->  {source}\n")
+
+            sources_box.configure(state="disabled")
+
+
+
+        def add_replacement_sources(source_paths):
+
+            added = 0
+
+            for source_path in source_paths:
+
+                if not source_path or source_path in replacement_sources:
+
+                    continue
+
+                if not os.path.isfile(source_path) and not os.path.isdir(source_path):
+
+                    messagebox.showerror("Fehler", f"Quelle nicht gefunden:\n{source_path}")
+
+                    continue
+
+                replacement_sources.append(source_path)
+
+                added += 1
+
+            if added:
+
+                render_replacement_sources()
+                update_replacement_crs_from_sources()
+
+                drop_label_replace.configure(
+
+                    text=f"{len(replacement_sources)} Punktwolke(n) ausgewählt\n\nWeitere Dateien/Ordner hier ablegen oder Austausch starten"
+
+                )
+
+                drop_frame_replace.configure(border_color=COLOR_SUCCESS)
+
+            return added > 0
+
+
+
+        def clear_replacement_sources():
+
+            replacement_sources.clear()
+
+            render_replacement_sources()
+            update_replacement_crs_from_sources(force=True)
 
             drop_label_replace.configure(
 
-                text=f"{source_caption}\n\n{source_name}\n\nAustausch unten manuell per Button starten"
+                text="Eine oder mehrere Punktwolken hier hineinziehen\n\n.las, .laz, .copc.laz oder Potree-Ordner"
 
             )
 
-            drop_frame_replace.configure(border_color=COLOR_SUCCESS)
+            drop_frame_replace.configure(border_color="#334155")
 
 
 
-        def select_replacement_file():
+        def choose_replacement_files():
 
-            file_path = filedialog.askopenfilename(
+            files = filedialog.askopenfilenames(
 
-                title="Neue LAS/LAZ-Datei für den Projektaustausch wählen",
+                title="Punktwolke(n) auswählen",
 
-                filetypes=[("LAS/LAZ", "*.laz *.las"), ("Alle Dateien", "*.*")]
-
-            )
-
-            if file_path:
-
-                set_replacement_source(file_path)
-
-
-
-        def select_replacement_folder():
-
-            folder_path = filedialog.askdirectory(
-
-                title="Konvertierten Potree-Ordner für den Projektaustausch wählen"
+                filetypes=[("Point Cloud", "*.copc.laz *.laz *.las"), ("Alle Dateien", "*.*")]
 
             )
 
-            if folder_path:
+            if files:
 
-                set_replacement_source(folder_path)
+                add_replacement_sources(files)
+
+
+
+        def choose_replacement_folder():
+
+            folder = filedialog.askdirectory(title="Potree-Ordner auswählen")
+
+            if folder:
+
+                add_replacement_sources([folder])
+
+
+
+        render_replacement_sources()
 
 
 
@@ -6467,9 +7137,9 @@ def show_projects_view():
 
             source_button_row,
 
-            text="LAS/LAZ-Datei wählen",
+            text="Dateien hinzufügen",
 
-            command=select_replacement_file,
+            command=choose_replacement_files,
 
             fg_color=COLOR_ACCENT,
 
@@ -6485,9 +7155,27 @@ def show_projects_view():
 
             source_button_row,
 
-            text="Potree-Ordner wählen",
+            text="Potree-Ordner hinzufügen",
 
-            command=select_replacement_folder,
+            command=choose_replacement_folder,
+
+            fg_color=COLOR_ACCENT,
+
+            hover_color=COLOR_ACCENT_HOVER,
+
+            height=34
+
+        ).pack(side="left", padx=(0, 8))
+
+
+
+        ctk.CTkButton(
+
+            source_button_row,
+
+            text="Auswahl löschen",
+
+            command=clear_replacement_sources,
 
             fg_color=COLOR_ACCENT,
 
@@ -6525,7 +7213,7 @@ def show_projects_view():
 
             drop_frame_replace,
 
-            text="Datei oder Potree-Ordner hier hineinziehen\n\n(.las, .laz oder konvertierter Potree-Ordner)",
+            text="Eine oder mehrere Punktwolken hier hineinziehen\n\n.las, .laz, .copc.laz oder Potree-Ordner",
 
             bg="#1e1e2e",
 
@@ -6551,23 +7239,243 @@ def show_projects_view():
 
         def handle_replacement_drop(event):
 
-            source_path = extract_dropped_file(event.data)
-
-            if os.path.isfile(source_path) or os.path.isdir(source_path):
-
-                set_replacement_source(source_path)
-
-                valid, message = validate_replacement_source(source_path)
-
-                if not valid:
-
-                    messagebox.showerror("Fehler", message)
+            add_replacement_sources(extract_dropped_files(event.data))
 
 
 
         drop_label_replace.dnd_bind("<<Drop>>", handle_replacement_drop)
 
         drop_frame_replace.dnd_bind("<<Drop>>", handle_replacement_drop)
+
+
+
+        crs_card = ctk.CTkFrame(content_frame, corner_radius=12)
+
+        crs_card.pack(fill="x", pady=(0, 12))
+
+
+
+        ctk.CTkLabel(
+
+            crs_card,
+
+            text="Koordinatensystem und vertikales Datum",
+
+            font=ctk.CTkFont(size=14, weight="bold")
+
+        ).pack(anchor="w", padx=16, pady=(16, 6))
+
+
+
+        ctk.CTkLabel(
+
+            crs_card,
+
+            text="Automatisch aus LAS/LAZ/COPC lesen oder manuell eintragen. Leer lassen, wenn die Punktwolke nicht referenziert ist.",
+
+            font=ctk.CTkFont(size=11),
+
+            text_color=COLOR_TEXT_DIM,
+
+            wraplength=820,
+
+            justify="left"
+
+        ).pack(anchor="w", padx=16, pady=(0, 8))
+
+
+
+        crs_row = ctk.CTkFrame(crs_card, fg_color="transparent")
+
+        crs_row.pack(fill="x", padx=16, pady=(0, 8))
+
+
+
+        replacement_crs_entry = ctk.CTkEntry(
+
+            crs_row,
+
+            placeholder_text="Lage-CRS: Automatisch, EPSG:25832 oder CRS-Name",
+
+            font=ctk.CTkFont(size=12),
+
+            height=34
+
+        )
+
+        replacement_crs_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+
+
+        ctk.CTkButton(
+
+            crs_row,
+
+            text="Erkennen",
+
+            width=120,
+
+            height=34,
+
+            fg_color=COLOR_ACCENT,
+
+            hover_color=COLOR_ACCENT_HOVER,
+
+            command=lambda: update_replacement_crs_from_sources(force=True)
+
+        ).pack(side="right")
+
+
+
+        vertical_row = ctk.CTkFrame(crs_card, fg_color="transparent")
+
+        vertical_row.pack(fill="x", padx=16, pady=(0, 8))
+
+
+
+        replacement_vertical_entry = ctk.CTkEntry(
+
+            vertical_row,
+
+            placeholder_text="Vertikales Datum: Automatisch, EPSG:7837, DHHN2016, Adria, ellipsoidisch ...",
+
+            font=ctk.CTkFont(size=12),
+
+            height=34
+
+        )
+
+        replacement_vertical_entry.pack(side="left", fill="x", expand=True)
+
+
+
+        replacement_crs_status = ctk.CTkLabel(
+
+            crs_card,
+
+            text="",
+
+            font=ctk.CTkFont(size=11),
+
+            text_color=COLOR_TEXT_DIM,
+
+            wraplength=820,
+
+            justify="left"
+
+        )
+
+        replacement_crs_status.pack(anchor="w", padx=16, pady=(0, 14))
+
+
+
+        def update_replacement_crs_from_sources(force=False):
+
+            current_crs = replacement_crs_entry.get().strip() if widget_exists(replacement_crs_entry) else ""
+
+            current_vertical = replacement_vertical_entry.get().strip() if widget_exists(replacement_vertical_entry) else ""
+
+            if not force and current_crs and current_crs != replacement_crs_auto_value["crs"]:
+
+                return
+
+            crs_sources = [
+
+                source for source in replacement_sources
+
+                if os.path.isfile(source) or os.path.isdir(source)
+
+            ]
+
+            if not replacement_sources:
+
+                replacement_crs_auto_value.update({"crs": "", "vertical": ""})
+
+                replacement_crs_entry.delete(0, tk.END)
+
+                replacement_vertical_entry.delete(0, tk.END)
+
+                replacement_crs_status.configure(
+
+                    text="Bitte zuerst eine Austauschquelle auswählen.",
+
+                    text_color=COLOR_TEXT_DIM
+
+                )
+
+                return
+
+            crs_infos = [detect_pointcloud_crs(source) for source in crs_sources]
+
+            common_crs = get_common_crs_info(crs_infos)
+
+            crs_value = get_crs_display_value(common_crs)
+
+            vertical_value = get_vertical_crs_display_value(common_crs)
+
+            replacement_crs_entry.delete(0, tk.END)
+
+            if crs_value:
+
+                replacement_crs_entry.insert(0, crs_value)
+
+            if force or not current_vertical or current_vertical == replacement_crs_auto_value["vertical"]:
+
+                replacement_vertical_entry.delete(0, tk.END)
+
+                if vertical_value:
+
+                    replacement_vertical_entry.insert(0, vertical_value)
+
+            replacement_crs_auto_value.update({"crs": crs_value, "vertical": vertical_value})
+
+            if crs_value or vertical_value:
+
+                replacement_crs_status.configure(
+
+                    text=f"Erkannt: {get_crs_summary_text(common_crs)}",
+
+                    text_color=COLOR_SUCCESS
+
+                )
+
+            elif any(crs_infos):
+
+                replacement_crs_status.configure(
+
+                    text="Unterschiedliche CRS erkannt. Sie werden je Punktwolke gespeichert; bei Bedarf manuell überschreiben.",
+
+                    text_color=COLOR_TEXT_DIM
+
+                )
+
+            elif crs_sources:
+
+                replacement_crs_status.configure(
+
+                    text="Kein CRS in den Quellen gefunden. Bei Bedarf Lage-CRS und vertikales Datum manuell eintragen.",
+
+                    text_color=COLOR_TEXT_DIM
+
+                )
+
+            else:
+
+                replacement_crs_status.configure(
+
+                    text="Keine lesbare CRS-Quelle gefunden. Bei Bedarf Lage-CRS und vertikales Datum manuell eintragen.",
+
+                    text_color=COLOR_TEXT_DIM
+
+                )
+
+
+
+        replacement_crs_entry.bind("<KeyRelease>", lambda _event: replacement_crs_auto_value.update({"crs": ""}))
+
+        replacement_vertical_entry.bind("<KeyRelease>", lambda _event: replacement_crs_auto_value.update({"vertical": ""}))
+
+        update_replacement_crs_from_sources(force=True)
 
 
 
@@ -6631,21 +7539,119 @@ def show_projects_view():
 
         def start_replacement():
 
-            replacement_file = replacement_entry.get().strip()
+            if not replacement_sources:
 
-            if not replacement_file:
-
-                messagebox.showwarning("Fehler", "Bitte eine LAS- oder LAZ-Datei auswählen!")
+                messagebox.showwarning("Fehler", "Bitte mindestens eine Punktwolke in das Feld ziehen!")
 
                 return
 
 
 
-            valid, message = validate_replacement_source(replacement_file)
+            crs_input = replacement_crs_entry.get().strip()
 
-            if not valid:
+            vertical_input = replacement_vertical_entry.get().strip()
 
-                messagebox.showerror("Fehler", message)
+            if crs_input == replacement_crs_auto_value["crs"]:
+
+                crs_input = ""
+
+            if vertical_input == replacement_crs_auto_value["vertical"]:
+
+                vertical_input = ""
+
+
+
+            use_multi_replacement = len(replacement_sources) > 1
+
+            single_source = replacement_sources[0]
+
+            if not use_multi_replacement:
+
+                valid, message = validate_replacement_source(single_source)
+
+                if not valid:
+
+                    use_multi_replacement = True
+
+
+
+            if use_multi_replacement:
+
+                multi_entries = [
+
+                    {
+
+                        "name": infer_cloud_name(source_path),
+
+                        "source": source_path
+
+                    }
+
+                    for source_path in replacement_sources
+
+                ]
+
+                try:
+
+                    prepare_multi_replacement_sources(multi_entries)
+
+                except Exception as e:
+
+                    messagebox.showerror("Fehler", str(e))
+
+                    return
+
+                if not messagebox.askyesno(
+
+                    "Austausch bestaetigen",
+
+                    f"'{current_project.get('projekt', '')}' wird mit {len(multi_entries)} Punktwolke(n) aktualisiert.\n\n"
+
+                    "Projektname, Projekt-ID und Link bleiben unverändert.\n\n"
+
+                    "Moechten Sie fortfahren?"
+
+                ):
+
+                    return
+
+                btn_replace.configure(state="disabled", text="Austausch läuft...")
+
+                btn_cancel.configure(state="disabled")
+
+                replace_window.protocol("WM_DELETE_WINDOW", lambda: None)
+
+                thread = threading.Thread(
+
+                    target=replace_project_with_multi_pointclouds,
+
+                    args=(current_project, multi_entries, aws_access, aws_secret, load_projects),
+
+                    kwargs={"ui": dialog_ui, "crs_input": crs_input, "vertical_input": vertical_input},
+
+                    daemon=True
+
+                )
+
+                thread.start()
+
+                def check_multi_thread():
+
+                    if thread.is_alive():
+
+                        root.after(100, check_multi_thread)
+
+                        return
+
+                    if replace_window.winfo_exists():
+
+                        replace_window.protocol("WM_DELETE_WINDOW", close_replace_window)
+
+                        btn_replace.configure(state="normal", text="Punktwolke austauschen")
+
+                        btn_cancel.configure(state="normal")
+
+                root.after(100, check_multi_thread)
 
                 return
 
@@ -6679,9 +7685,9 @@ def show_projects_view():
 
                 target=replace_project_process,
 
-                args=(current_project, replacement_file, aws_access, aws_secret, load_projects),
+                args=(current_project, single_source, aws_access, aws_secret, load_projects),
 
-                kwargs={"ui": dialog_ui},
+                kwargs={"ui": dialog_ui, "crs_input": crs_input, "vertical_input": vertical_input},
 
                 daemon=True
 
@@ -7135,6 +8141,320 @@ def show_projects_view():
 
 
 
+    def open_rename_dialog_main():
+
+        existing_rename_window = getattr(projects_page, "_rename_window", None)
+
+        if focus_existing_window(existing_rename_window):
+
+            return
+
+        project_info = get_selected_project()
+
+        if not project_info:
+
+            return
+
+        rename_window = ctk.CTkToplevel(root)
+
+        projects_page._rename_window = rename_window
+
+        rename_window.title("Projekt umbenennen")
+
+        rename_window.geometry("760x680")
+
+        rename_window.minsize(700, 560)
+
+        rename_window.transient(root)
+
+        rename_window.lift()
+
+        rename_window.focus_force()
+
+        rename_window.grab_set()
+
+        def close_rename_window():
+
+            if getattr(projects_page, "_rename_window", None) is rename_window:
+
+                projects_page._rename_window = None
+
+            try:
+
+                rename_window.grab_release()
+
+            except tk.TclError:
+
+                pass
+
+            rename_window.destroy()
+
+        rename_window.protocol("WM_DELETE_WINDOW", close_rename_window)
+
+        content = ctk.CTkScrollableFrame(rename_window, fg_color="transparent")
+
+        content.pack(fill="both", expand=True, padx=18, pady=(14, 8))
+
+        header = ctk.CTkFrame(content, fg_color=COLOR_CARD, corner_radius=8)
+
+        header.pack(fill="x", pady=(0, 12))
+
+        ctk.CTkLabel(
+
+            header,
+
+            text="Projekt umbenennen",
+
+            font=ctk.CTkFont(size=18, weight="bold")
+
+        ).pack(anchor="w", padx=16, pady=(14, 4))
+
+        ctk.CTkLabel(
+
+            header,
+
+            text="Nur Metadaten werden geändert. Projekt-ID, Link und S3-Dateipfade bleiben unverändert.",
+
+            font=ctk.CTkFont(size=11),
+
+            text_color=COLOR_TEXT_DIM,
+
+            wraplength=680,
+
+            justify="left"
+
+        ).pack(anchor="w", padx=16, pady=(0, 14))
+
+        form_card = ctk.CTkFrame(content, corner_radius=10)
+
+        form_card.pack(fill="x", pady=(0, 12))
+
+        ctk.CTkLabel(
+
+            form_card,
+
+            text="Kundenname",
+
+            font=ctk.CTkFont(size=13, weight="bold")
+
+        ).pack(anchor="w", padx=16, pady=(14, 4))
+
+        kunde_entry = ctk.CTkEntry(form_card, height=36, font=ctk.CTkFont(size=13))
+
+        kunde_entry.pack(fill="x", padx=16, pady=(0, 12))
+
+        kunde_entry.insert(0, project_info.get("kunde", ""))
+
+        ctk.CTkLabel(
+
+            form_card,
+
+            text="Projektname",
+
+            font=ctk.CTkFont(size=13, weight="bold")
+
+        ).pack(anchor="w", padx=16, pady=(0, 4))
+
+        projekt_entry = ctk.CTkEntry(form_card, height=36, font=ctk.CTkFont(size=13))
+
+        projekt_entry.pack(fill="x", padx=16, pady=(0, 14))
+
+        projekt_entry.insert(0, project_info.get("projekt", ""))
+
+        pointcloud_entries = []
+
+        pointclouds = project_info.get("pointclouds", [])
+
+        if isinstance(pointclouds, list) and pointclouds:
+
+            clouds_card = ctk.CTkFrame(content, corner_radius=10)
+
+            clouds_card.pack(fill="x", pady=(0, 12))
+
+            ctk.CTkLabel(
+
+                clouds_card,
+
+                text="Punktwolkennamen",
+
+                font=ctk.CTkFont(size=13, weight="bold")
+
+            ).pack(anchor="w", padx=16, pady=(14, 8))
+
+            for index, cloud in enumerate(pointclouds, 1):
+
+                ctk.CTkLabel(
+
+                    clouds_card,
+
+                    text=f"Punktwolke {index}",
+
+                    font=ctk.CTkFont(size=11),
+
+                    text_color=COLOR_TEXT_DIM
+
+                ).pack(anchor="w", padx=16, pady=(0, 3))
+
+                cloud_entry = ctk.CTkEntry(clouds_card, height=34, font=ctk.CTkFont(size=12))
+
+                cloud_entry.pack(fill="x", padx=16, pady=(0, 10))
+
+                cloud_entry.insert(0, cloud.get("name", f"Punktwolke {index}"))
+
+                pointcloud_entries.append(cloud_entry)
+
+        status_card = ctk.CTkFrame(content, corner_radius=10)
+
+        status_card.pack(fill="x", pady=(0, 12))
+
+        rename_progress = ctk.CTkProgressBar(status_card, height=8)
+
+        rename_progress.pack(fill="x", padx=16, pady=(14, 6))
+
+        rename_progress.set(0)
+
+        rename_detail = ctk.CTkLabel(
+
+            status_card,
+
+            text="Noch nicht gespeichert.",
+
+            font=ctk.CTkFont(size=11),
+
+            text_color=COLOR_TEXT_DIM
+
+        )
+
+        rename_detail.pack(anchor="w", padx=16, pady=(0, 12))
+
+        rename_ui = {
+
+            "progress_bar": rename_progress,
+
+            "progress_detail": rename_detail
+
+        }
+
+        button_row = ctk.CTkFrame(rename_window, fg_color=COLOR_CARD, corner_radius=10)
+
+        button_row.pack(fill="x", padx=18, pady=(0, 14))
+
+        def start_rename():
+
+            new_kunde = kunde_entry.get().strip()
+
+            new_projekt = projekt_entry.get().strip()
+
+            pointcloud_names = [entry.get().strip() for entry in pointcloud_entries]
+
+            if not new_kunde:
+
+                messagebox.showwarning("Eingabe fehlt", "Bitte einen Kundennamen eingeben.")
+
+                return
+
+            if not new_projekt:
+
+                messagebox.showwarning("Eingabe fehlt", "Bitte einen Projektnamen eingeben.")
+
+                return
+
+            if any(not name for name in pointcloud_names):
+
+                messagebox.showwarning("Eingabe fehlt", "Bitte alle Punktwolkennamen ausfüllen.")
+
+                return
+
+            btn_save.configure(state="disabled", text="Speichert...")
+
+            btn_cancel.configure(state="disabled")
+
+            rename_window.protocol("WM_DELETE_WINDOW", lambda: None)
+
+            def on_success():
+
+                load_projects(customer_filter.get(), search_entry.get().strip())
+
+                messagebox.showinfo("Gespeichert", "Projekt-Metadaten wurden aktualisiert.")
+
+                if rename_window.winfo_exists():
+
+                    close_rename_window()
+
+            thread = threading.Thread(
+
+                target=rename_project_metadata_process,
+
+                args=(project_info, new_kunde, new_projekt, pointcloud_names, aws_access, aws_secret),
+
+                kwargs={"on_success": on_success, "ui": rename_ui},
+
+                daemon=True
+
+            )
+
+            thread.start()
+
+            def check_thread():
+
+                if thread.is_alive():
+
+                    root.after(100, check_thread)
+
+                    return
+
+                if rename_window.winfo_exists():
+
+                    rename_window.protocol("WM_DELETE_WINDOW", close_rename_window)
+
+                    btn_save.configure(state="normal", text="Speichern")
+
+                    btn_cancel.configure(state="normal")
+
+            root.after(100, check_thread)
+
+        btn_save = ctk.CTkButton(
+
+            button_row,
+
+            text="Speichern",
+
+            fg_color=COLOR_SUCCESS,
+
+            hover_color=COLOR_SUCCESS_HOVER,
+
+            font=ctk.CTkFont(size=13, weight="bold"),
+
+            height=38,
+
+            command=start_rename
+
+        )
+
+        btn_save.pack(side="left", padx=(0, 8))
+
+        btn_cancel = ctk.CTkButton(
+
+            button_row,
+
+            text="Abbrechen",
+
+            fg_color=COLOR_CARD,
+
+            hover_color="#3a3a4c",
+
+            font=ctk.CTkFont(size=13),
+
+            height=38,
+
+            command=close_rename_window
+
+        )
+
+        btn_cancel.pack(side="right")
+
+
+
     ctk.CTkButton(
 
         btn_frame,
@@ -7159,7 +8479,7 @@ def show_projects_view():
 
         btn_frame,
 
-        text="Herunterladen",
+        text="Umbenennen",
 
         fg_color=COLOR_SUCCESS,
 
@@ -7169,9 +8489,65 @@ def show_projects_view():
 
         height=36,
 
-        command=open_download_dialog_main
+        command=open_rename_dialog_main
 
     ).pack(side="left", padx=(0, 8))
+
+
+
+    project_context_menu = tk.Menu(tree, tearoff=0)
+
+    project_context_menu.add_command(label="Im Browser öffnen", command=open_in_browser)
+
+    project_context_menu.add_command(label="Link kopieren", command=copy_link)
+
+    project_context_menu.add_separator()
+
+    project_context_menu.add_command(label="Punktwolke austauschen", command=open_replace_dialog)
+
+    project_context_menu.add_command(label="Umbenennen", command=open_rename_dialog_main)
+
+    project_context_menu.add_command(label="Duplizieren", command=open_duplicate_dialog_main)
+
+    project_context_menu.add_command(label="Herunterladen", command=open_download_dialog_main)
+
+    project_context_menu.add_separator()
+
+    project_context_menu.add_command(label="Löschen", command=delete_project)
+
+
+
+    def show_project_context_menu(event):
+
+        row_id = tree.identify_row(event.y)
+
+        if not row_id:
+
+            return
+
+        item = tree.item(row_id)
+
+        values = item.get("values", [])
+
+        if not values or not values[0]:
+
+            return
+
+        tree.selection_set(row_id)
+
+        tree.focus(row_id)
+
+        try:
+
+            project_context_menu.tk_popup(event.x_root, event.y_root)
+
+        finally:
+
+            project_context_menu.grab_release()
+
+
+
+    tree.bind("<Button-3>", show_project_context_menu)
 
 
 
@@ -7211,8 +8587,6 @@ def show_projects_view():
 
 
 
-            projects.sort(key=lambda x: x.get("datum", ""), reverse=True)
-
             filtered_projects = []
 
             search_lower = search_term.lower()
@@ -7246,6 +8620,32 @@ def show_projects_view():
                 tree.insert("", "end", values=("", "", "Keine passenden Projekte gefunden", "", ""))
 
                 return
+
+
+
+            def project_sort_key(project):
+
+                column = sort_state["column"]
+
+                if column == "datum":
+
+                    parsed_date = parse_iso_datetime(project.get("datum", ""))
+
+                    return parsed_date.timestamp() if parsed_date else float("-inf")
+
+                if column == "kunde":
+
+                    return str(project.get("kunde", "")).casefold()
+
+                if column == "projekt":
+
+                    return str(project.get("projekt", "")).casefold()
+
+                return str(project.get(column, "")).casefold()
+
+
+
+            filtered_projects.sort(key=project_sort_key, reverse=sort_state["reverse"])
 
 
 
@@ -7353,9 +8753,9 @@ def show_local_conversion_view():
     )
     source_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
 
-    ui_context = {}
+    output_entry_ref = {"widget": None}
     local_auto_output_dir = {"value": ""}
-    local_auto_crs_value = {"value": ""}
+    ui_context = {}
 
     def build_local_output_dir(source_path, output_base_dir):
         source_name = os.path.splitext(os.path.basename(source_path))[0]
@@ -7363,8 +8763,12 @@ def show_local_conversion_view():
         return os.path.join(output_base_dir, f"{folder_name}_potree")
 
     def update_local_output_from_source(force=False):
+        output_widget = output_entry_ref["widget"]
+        if not widget_exists(output_widget):
+            return
+
         source_path = source_entry.get().strip()
-        current_output = output_entry.get().strip()
+        current_output = output_widget.get().strip()
         if current_output and current_output != local_auto_output_dir["value"] and not force:
             return
 
@@ -7373,58 +8777,15 @@ def show_local_conversion_view():
             return
 
         output_dir = os.path.abspath(build_local_output_dir(source_path, configured_base_dir))
-        output_entry.delete(0, tk.END)
-        output_entry.insert(0, output_dir)
+        output_widget.delete(0, tk.END)
+        output_widget.insert(0, output_dir)
         local_auto_output_dir["value"] = output_dir
-
-    def update_local_crs_from_source(force=False):
-        source_path = source_entry.get().strip()
-        current_crs = local_crs_entry.get().strip()
-        if current_crs and current_crs != local_auto_crs_value["value"] and not force:
-            return
-
-        if not source_path:
-            local_crs_status.configure(
-                text="Bitte zuerst eine LAS/LAZ-Datei auswählen.",
-                text_color=COLOR_TEXT_DIM
-            )
-            ui_log("[CRS] Keine Quelldatei ausgewählt.", ui_context)
-            return
-
-        if not os.path.isfile(source_path):
-            local_crs_status.configure(
-                text="Quelldatei nicht gefunden.",
-                text_color=COLOR_DANGER
-            )
-            ui_log("[CRS] Quelldatei nicht gefunden.", ui_context)
-            return
-
-        crs_info = detect_pointcloud_crs(source_path)
-        crs_value = get_crs_display_value(crs_info)
-        crs_summary = get_crs_summary_text(crs_info)
-
-        local_crs_entry.delete(0, tk.END)
-        if crs_value:
-            local_crs_entry.insert(0, crs_value)
-            local_crs_status.configure(
-                text=f"Erkannt: {crs_summary}",
-                text_color=COLOR_SUCCESS
-            )
-            ui_log(f"[CRS] Automatisch erkannt: {crs_summary}", ui_context)
-        else:
-            local_crs_status.configure(
-                text="Kein CRS in der Datei gefunden. Bei Bedarf manuell eintragen.",
-                text_color=COLOR_TEXT_DIM
-            )
-            ui_log("[CRS] Keine CRS-Referenz in der Quelldatei gefunden.", ui_context)
-        local_auto_crs_value["value"] = crs_value
 
     def set_source_file(file_path):
         source_entry.delete(0, tk.END)
         source_entry.insert(0, file_path)
         set_drop_zone_text(drop_label, file_path)
         update_local_output_from_source()
-        update_local_crs_from_source()
 
     def browse_source_file():
         file_path = filedialog.askopenfilename(
@@ -7489,7 +8850,7 @@ def show_local_conversion_view():
 
     ctk.CTkLabel(
         target_card,
-        text="Das Potree-Projekt wird direkt in diesen Ordner geschrieben.",
+        text="Das Potree-Projekt wird direkt in diesen Ausgabeordner geschrieben.",
         font=ctk.CTkFont(size=11),
         text_color=COLOR_TEXT_DIM,
         wraplength=760,
@@ -7506,9 +8867,10 @@ def show_local_conversion_view():
         height=34
     )
     output_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+    output_entry_ref["widget"] = output_entry
 
     def browse_output_dir():
-        folder = filedialog.askdirectory(title="Ausgabeordner für das Potree-Projekt wählen")
+        folder = filedialog.askdirectory(title="Lokalen Zielordner wählen")
         if folder:
             output_entry.delete(0, tk.END)
             output_entry.insert(0, folder)
@@ -7524,52 +8886,25 @@ def show_local_conversion_view():
         command=browse_output_dir
     ).pack(side="right")
 
-    crs_card = ctk.CTkFrame(convert_scroll, corner_radius=12)
-    crs_card.pack(fill="x", pady=(0, 12))
-
-    ctk.CTkLabel(
-        crs_card,
-        text="Koordinatensystem",
-        font=ctk.CTkFont(size=15, weight="bold")
-    ).pack(anchor="w", padx=16, pady=(14, 8))
-
-    ctk.CTkLabel(
-        crs_card,
-        text="Leer lassen, wenn die Punktwolke nicht referenziert ist.",
-        font=ctk.CTkFont(size=11),
-        text_color=COLOR_TEXT_DIM,
-        wraplength=760,
-        justify="left"
-    ).pack(anchor="w", padx=16, pady=(0, 8))
-
-    crs_row = ctk.CTkFrame(crs_card, fg_color="transparent")
-    crs_row.pack(fill="x", padx=16, pady=(0, 14))
-
-    local_crs_entry = ctk.CTkEntry(
-        crs_row,
-        placeholder_text="Automatisch, EPSG:25832 oder CRS-Name",
-        font=ctk.CTkFont(size=12),
-        height=34
-    )
-    local_crs_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+    def open_result_folder():
+        result_path = output_entry.get().strip()
+        if not result_path:
+            messagebox.showwarning("Fehler", "Es ist noch kein Ausgabeordner vorhanden.")
+            return
+        if not os.path.isdir(result_path):
+            messagebox.showwarning("Fehler", "Der Ausgabeordner existiert noch nicht.")
+            return
+        os.startfile(result_path)
 
     ctk.CTkButton(
-        crs_row,
-        text="Erkennen",
-        width=120,
+        target_card,
+        text="Ausgabeordner öffnen",
+        width=190,
         font=ctk.CTkFont(size=12),
         fg_color=COLOR_ACCENT,
         hover_color=COLOR_ACCENT_HOVER,
-        command=lambda: update_local_crs_from_source(force=True)
-    ).pack(side="right")
-
-    local_crs_status = ctk.CTkLabel(
-        crs_card,
-        text="",
-        font=ctk.CTkFont(size=11),
-        text_color=COLOR_TEXT_DIM
-    )
-    local_crs_status.pack(anchor="w", padx=16, pady=(0, 14))
+        command=open_result_folder
+    ).pack(anchor="w", padx=16, pady=(0, 14))
 
     progress_card = ctk.CTkFrame(convert_scroll, corner_radius=12)
     progress_card.pack(fill="x", pady=(0, 12))
@@ -7617,7 +8952,7 @@ def show_local_conversion_view():
         "log": log_box,
     })
 
-    def run_local_conversion(source_file, output_dir, converter_path, crs_input):
+    def run_local_conversion(source_file, output_dir, converter_path):
         try:
             ui_log("[KONVERTIERUNG] Starte lokale Potree-Konvertierung", ui_context)
             ui_log(f"[QUELLE] {source_file}", ui_context)
@@ -7630,19 +8965,14 @@ def show_local_conversion_view():
             output_parent_dir = os.path.dirname(output_dir)
             if output_parent_dir:
                 os.makedirs(output_parent_dir, exist_ok=True)
-            os.makedirs(output_dir, exist_ok=True)
 
-            crs_info = resolve_pointcloud_crs(source_file, crs_input)
-            crs_display = get_crs_summary_text(crs_info)
-            if crs_display:
-                ui_log(f"[CRS] {crs_display}", ui_context)
-            else:
-                ui_log("[CRS] Kein CRS gefunden", ui_context)
+            if os.path.isdir(output_dir):
+                ui_log("[CLEANUP] Vorhandenen Ausgabeordner entfernen", ui_context)
+                shutil.rmtree(output_dir)
 
             ui_set_step("Konvertiere mit Potree...", 2, ui_context)
             ui_set_detail("Die Punktwolke wird lokal in das Potree-Format umgewandelt", ui_context)
             run_potree_conversion(source_file, converter_path, output_dir, ui=ui_context)
-            write_potree_metadata_crs(output_dir, crs_info, ui=ui_context)
 
             ui_set_step("Prüfe Ergebnis...", 3, ui_context)
             ui_set_detail("Die konvertierten Daten werden lokal bereitgestellt", ui_context)
@@ -7663,7 +8993,6 @@ def show_local_conversion_view():
             )
         except Exception as e:
             ui_log(f"[FEHLER] {e}", ui_context)
-            import traceback
             ui_log(traceback.format_exc(), ui_context)
             root.after(
                 0,
@@ -7683,10 +9012,7 @@ def show_local_conversion_view():
 
     def start_local_conversion():
         source_file = source_entry.get().strip()
-        output_dir = output_entry.get().strip()
-        crs_input = local_crs_entry.get().strip()
-        if crs_input == local_auto_crs_value["value"]:
-            crs_input = ""
+        output_dir_value = output_entry.get().strip()
 
         if not source_file or not os.path.isfile(source_file):
             messagebox.showwarning("Fehler", "Bitte eine gültige LAS/LAZ Datei auswählen.")
@@ -7697,7 +9023,7 @@ def show_local_conversion_view():
             messagebox.showwarning("Fehler", "Es können nur .las oder .laz Dateien lokal konvertiert werden.")
             return
 
-        if not output_dir:
+        if not output_dir_value:
             messagebox.showwarning("Fehler", "Bitte einen lokalen Zielordner auswählen.")
             return
 
@@ -7710,16 +9036,20 @@ def show_local_conversion_view():
             )
             return
 
-        output_dir = os.path.abspath(output_dir)
+        output_dir = os.path.abspath(output_dir_value)
 
-        if os.path.isfile(output_dir):
-            messagebox.showerror("Fehler", "Der lokale Zielpfad ist eine Datei. Bitte einen Ordner wählen.")
+        try:
+            output_parent_dir = os.path.dirname(output_dir) or output_dir
+            if os.path.commonpath([output_parent_dir, output_dir]) != output_parent_dir:
+                raise ValueError("Ungültiger Zielordner")
+        except ValueError:
+            messagebox.showerror("Fehler", "Der Zielordner für die lokale Konvertierung ist ungültig.")
             return
 
-        if os.path.isdir(output_dir) and os.listdir(output_dir):
+        if os.path.isdir(output_dir):
             overwrite = messagebox.askyesno(
                 "Ausgabeordner existiert bereits",
-                f"Der Ausgabeordner enthält bereits Dateien. Potree schreibt mit --overwrite in diesen Ordner:\n\n{output_dir}\n\nMöchtest du fortfahren?"
+                f"Der Ausgabeordner existiert bereits und wird überschrieben:\n\n{output_dir}\n\nMöchtest du fortfahren?"
             )
             if not overwrite:
                 return
@@ -7729,7 +9059,7 @@ def show_local_conversion_view():
 
         thread = threading.Thread(
             target=run_local_conversion,
-            args=(source_file, output_dir, converter_path, crs_input),
+            args=(source_file, output_dir, converter_path),
             daemon=True
         )
         thread.start()
@@ -7747,12 +9077,8 @@ def show_local_conversion_view():
     )
     start_convert_button.pack(anchor="w", pady=(0, 12))
 
-    source_entry.bind("<KeyRelease>", lambda _event: (
-        update_local_output_from_source(),
-        update_local_crs_from_source()
-    ))
+    source_entry.bind("<KeyRelease>", lambda _event: update_local_output_from_source())
     output_entry.bind("<KeyRelease>", lambda _event: local_auto_output_dir.update({"value": ""}))
-    local_crs_entry.bind("<KeyRelease>", lambda _event: local_auto_crs_value.update({"value": ""}))
 
 
 
@@ -7924,17 +9250,7 @@ def show_settings_view(first_run=False):
 
             log("[TEST] Teste AWS Verbindung...")
 
-            s3 = boto3.client(
-
-                "s3",
-
-                aws_access_key_id=access,
-
-                aws_secret_access_key=secret,
-
-                region_name=REGION_NAME
-
-            )
+            s3 = create_s3_client(access, secret)
 
             s3.head_bucket(Bucket=BUCKET_NAME)
 
@@ -8180,13 +9496,15 @@ def show_settings_view(first_run=False):
 
     config = load_config()
 
-    if config.get("aws_access"):
+    aws_access, aws_secret = get_aws_credentials()
 
-        entry_aws_access.insert(0, config["aws_access"])
+    if aws_access:
 
-    if config.get("aws_secret"):
+        entry_aws_access.insert(0, aws_access)
 
-        entry_aws_secret.insert(0, config["aws_secret"])
+    if aws_secret:
+
+        entry_aws_secret.insert(0, aws_secret)
 
     if config.get("converter_path"):
 
@@ -8318,7 +9636,7 @@ try:
 
     root.iconbitmap(get_bundled_resource_path("icon.ico"))
 
-except:
+except Exception:
 
     pass
 
@@ -8364,20 +9682,6 @@ sidebar.pack_propagate(False)
 
 
 
-ctk.CTkLabel(
-
-    sidebar,
-
-    text=f"Version {APP_VERSION}",
-
-    font=ctk.CTkFont(size=12),
-
-    text_color=COLOR_TEXT_DIM
-
-).pack(anchor="w", padx=20, pady=(24, 20))
-
-
-
 content_area = ctk.CTkFrame(app_shell, fg_color=COLOR_SURFACE, corner_radius=0)
 
 content_area.pack(side="left", fill="both", expand=True)
@@ -8412,7 +9716,7 @@ nav_buttons["upload"] = ctk.CTkButton(
 
     sidebar,
 
-    text="Upload",
+    text="Projekt erstellen",
 
     anchor="w",
 
@@ -8428,7 +9732,7 @@ nav_buttons["upload"] = ctk.CTkButton(
 
 )
 
-nav_buttons["upload"].pack(fill="x", padx=12, pady=(0, 8))
+nav_buttons["upload"].pack(fill="x", padx=12, pady=(24, 8))
 
 
 
@@ -8640,6 +9944,10 @@ lbl_drop.drop_target_register(DND_FILES)
 
 lbl_drop.dnd_bind('<<Drop>>', drop_file)
 
+drop_frame.drop_target_register(DND_FILES)
+
+drop_frame.dnd_bind('<<Drop>>', drop_file)
+
 
 
 # Kunde
@@ -8664,7 +9972,8 @@ entry_kunde.pack(side="left", padx=(10, 0))
 
 row_proj = ctk.CTkFrame(card_data, fg_color="transparent")
 
-row_proj.pack(fill="x", padx=16, pady=(0, 6))
+row_proj.pack(fill="x", padx=16, pady=(0, 14))
+row_proj.pack_configure(pady=(0, 6))
 
 ctk.CTkLabel(row_proj, text="Projekt", width=80, anchor="e",
 
@@ -8947,8 +10256,6 @@ try:
     root.mainloop()
 
 except Exception as e:
-
-    import traceback
 
     traceback.print_exc()
 

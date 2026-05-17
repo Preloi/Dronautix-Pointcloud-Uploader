@@ -187,7 +187,7 @@ except ImportError:
 
 # Prüfe ob alle erforderlichen Dateien vorhanden sind
 required_files = [
-    "Dronautix_Pointcloud_Uploader_v7.py",
+    "Dronautix_Pointcloud_Uploader.py",
     "icon.ico",
     VERSION_INFO_FILE,
     INSTALLER_VERSION_FILE,
@@ -223,7 +223,9 @@ cmd = [
     f"--version-file={VERSION_INFO_FILE}",    # Windows-Dateiversion
     "--add-data=icon.ico;.",                  # Icon als Ressource
     "--add-data=bundled_tools;bundled_tools", # Integrierten PotreeConverter mitnehmen
-    "Dronautix_Pointcloud_Uploader_v7.py"
+    "--hidden-import=keyring",
+    "--hidden-import=keyring.backends.Windows",
+    "Dronautix_Pointcloud_Uploader.py"
 ]
 
 # Für Windows muss das add-data Format angepasst werden
