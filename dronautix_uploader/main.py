@@ -14,6 +14,8 @@ import uuid
 
 import csv
 
+import hashlib
+
 import urllib.error
 
 import urllib.parse
@@ -873,6 +875,97 @@ def get_update_installer_url(manifest):
     )
 
 
+def is_safe_installer_name(installer_name):
+
+    """Verhindert Pfadtricks im Manifest-Installername."""
+
+    if not installer_name or os.path.basename(installer_name) != installer_name:
+
+        return False
+
+    return installer_name.lower().endswith(".exe")
+
+
+
+def validate_update_download_info(manifest, installer_url, installer_name):
+
+    """Prueft, dass Updates nur aus dem gepinnten GitHub-Release-Pfad kommen."""
+
+    remote_version = str(manifest.get("version", "")).strip()
+
+    expected_tag = f"v{remote_version}"
+
+    if not remote_version or not is_safe_installer_name(installer_name):
+
+        return False, "ungueltige Versions- oder Installerangabe"
+
+    repo_owner = str(manifest.get("repo_owner", UPDATE_REPO_OWNER)).strip()
+
+    repo_name = str(manifest.get("repo_name", UPDATE_REPO_NAME)).strip()
+
+    release_tag = str(manifest.get("release_tag", expected_tag)).strip()
+
+    if repo_owner != UPDATE_REPO_OWNER or repo_name != UPDATE_REPO_NAME or release_tag != expected_tag:
+
+        return False, "Update-Manifest verweist nicht auf das erwartete Release"
+
+    parsed_url = urllib.parse.urlparse(installer_url)
+
+    expected_path = (
+
+        f"/{UPDATE_REPO_OWNER}/{UPDATE_REPO_NAME}/releases/download/"
+
+        f"{urllib.parse.quote(expected_tag, safe='')}/{urllib.parse.quote(installer_name, safe='')}"
+
+    )
+
+    if parsed_url.scheme != "https" or parsed_url.netloc.lower() != "github.com":
+
+        return False, "Installer-URL muss auf https://github.com zeigen"
+
+    if parsed_url.path != expected_path:
+
+        return False, "Installer-URL passt nicht zum erwarteten Release-Pfad"
+
+    return True, "OK"
+
+
+
+def calculate_file_sha256(file_path):
+
+    """Berechnet den SHA-256 Hash einer Datei."""
+
+    sha256 = hashlib.sha256()
+
+    with open(file_path, "rb") as file:
+
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+
+            sha256.update(chunk)
+
+    return sha256.hexdigest()
+
+
+
+def verify_installer_hash(installer_path, expected_sha256):
+
+    """Validiert den Installer gegen den Hash aus dem Release-Manifest."""
+
+    expected_sha256 = str(expected_sha256 or "").strip().lower()
+
+    if not re.fullmatch(r"[a-f0-9]{64}", expected_sha256):
+
+        return False, "Update-Manifest enthaelt keinen gueltigen SHA-256 Hash"
+
+    actual_sha256 = calculate_file_sha256(installer_path)
+
+    if actual_sha256.lower() != expected_sha256:
+
+        return False, "Installer-Hash stimmt nicht mit dem Release-Manifest ueberein"
+
+    return True, "OK"
+
+
 
 def download_update_installer(installer_url, installer_name):
 
@@ -950,7 +1043,13 @@ def check_for_available_update():
 
         installer_url = get_update_installer_url(manifest)
 
-        if not installer_name or not installer_url:
+        download_valid, download_message = validate_update_download_info(
+
+            manifest, installer_url, installer_name
+
+        )
+
+        if not installer_name or not installer_url or not download_valid:
 
             log(f"[UPDATE] Neue Version {remote_version} gefunden, aber keine gueltige Installer-URL im Manifest")
 
@@ -958,7 +1057,9 @@ def check_for_available_update():
 
                 "Update verfügbar",
 
-                f"Version {remote_version} ist verfügbar, aber die Download-Informationen sind unvollständig."
+                f"Version {remote_version} ist verfügbar, aber die Download-Informationen sind ungueltig.\n\n"
+
+                f"{download_message}"
 
             )
 
@@ -999,6 +1100,24 @@ def check_for_available_update():
             log(f"[UPDATE] Lade Installer herunter: {installer_url}")
 
             installer_path = download_update_installer(installer_url, installer_name)
+
+            hash_ok, hash_message = verify_installer_hash(
+
+                installer_path, manifest.get("installer_sha256", "")
+
+            )
+
+            if not hash_ok:
+
+                try:
+
+                    os.remove(installer_path)
+
+                except OSError:
+
+                    pass
+
+                raise RuntimeError(hash_message)
 
             subprocess.Popen([installer_path, "/CLOSEAPPLICATIONS"], shell=False)
 
