@@ -63,6 +63,27 @@ Stand: 2026-05-01
   - Teilfehler werden explizit gemeldet
 - Neue Viewer-Links nutzen fuer neue Uploads Kurz-IDs statt sprechender Projektpfade.
 
+## Geplante Online-Konvertierung
+
+- Online-Konvertierung soll weiterhin mit PotreeConverter erfolgen.
+- Fuer den aktuellen gebuendelten `PotreeConverter.exe` ist ein Windows-x86_64-Worker naheliegend.
+- Die Verarbeitung soll als Warteschlange laufen: genau ein aktiver Konvertierungsjob pro Worker, keine parallelen Konvertierungen auf derselben Instanz.
+- Empfohlener Startpunkt fuer robuste Jobs mit mehreren GB grossen LAZ/LAS-Dateien:
+  - EC2 `r7i.4xlarge` Windows
+  - 16 vCPU, 128 GiB RAM
+  - 500 GB bis 1 TB `gp3` als temporaerer Arbeitsbereich
+- Kostenannahme fuer Frankfurt/Windows grob:
+  - ca. 2,00-2,20 USD pro EC2-Stunde fuer `r7i.4xlarge` Windows
+  - ca. 0,13 USD pro Stunde fuer 1 TB temporaeres gp3-Volume
+  - S3 Requests meist nur Cent-Bereich; dauerhafte S3-Speicherkosten separat nach Ergebnisgroesse
+  - praktische Daumenregel: ca. 2-3 USD pro Konvertierungsstunde
+- Kostensteuerung:
+  - Worker nur bei Bedarf starten
+  - nach erfolgreichem Upload Ergebnis nach S3 schreiben
+  - temporaere Arbeitsdaten immer loeschen
+  - Worker nach Queue-Leerlauf stoppen oder terminieren
+- 24/7-Betrieb derselben Windows-Instanz vermeiden, da das grob im Bereich 1.500+ USD/Monat liegen kann.
+
 ## Wichtige Viewer-Details
 
 - `server_viewer/index.html` in diesem Repo ist nur die lokale Test-/Deploy-Kopie.
