@@ -305,20 +305,30 @@
                 return null;
             }
 
-            if (projectId.includes('/')) {
-                return {
-                    displayName: projectId,
-                    pointclouds: [{
-                        viewerPath: projectId,
-                        displayName: projectId,
-                    }],
-                };
+            const normalizedProjectPath = normalizeViewerPath(projectId);
+            let legacyShortId = '';
+
+            if (normalizedProjectPath.includes('/')) {
+                const idParts = normalizedProjectPath.split('/');
+                if (idParts.length >= 2) {
+                    legacyShortId = idParts[1];
+                }
             }
 
             const indexUrl = new URL('./projects_index.json', window.location.href);
             indexUrl.searchParams.set('t', Date.now());
             const response = await fetch(indexUrl.toString(), { cache: 'no-store' });
             if (!response.ok) {
+                if (normalizedProjectPath.includes('/')) {
+                    return {
+                        displayName: projectId,
+                        pointclouds: [{
+                            viewerPath: normalizedProjectPath,
+                            displayName: projectId,
+                        }],
+                    };
+                }
+
                 return {
                     viewerPath: '',
                     displayName: projectId,
@@ -327,8 +337,27 @@
 
             const indexData = await response.json();
             const projects = Array.isArray(indexData.projects) ? indexData.projects : [];
-            const matchedProject = projects.find(project => String(project.id) === projectId);
+            const matchedProject = projects.find(project => {
+                const indexedId = String(project.id || '');
+                const indexedViewerPath = normalizeViewerPath(project.viewer_path || '');
+                const indexedS3Path = normalizeViewerPath(project.s3_path || '');
+
+                return indexedId === projectId ||
+                    (legacyShortId && indexedId === legacyShortId) ||
+                    (normalizedProjectPath && indexedViewerPath === normalizedProjectPath) ||
+                    (normalizedProjectPath && indexedS3Path === normalizedProjectPath);
+            });
             if (!matchedProject) {
+                if (normalizedProjectPath.includes('/')) {
+                    return {
+                        displayName: projectId,
+                        pointclouds: [{
+                            viewerPath: normalizedProjectPath,
+                            displayName: projectId,
+                        }],
+                    };
+                }
+
                 return {
                     viewerPath: '',
                     displayName: projectId,
