@@ -30,6 +30,8 @@ import boto3
 
 from botocore.config import Config
 
+from botocore.exceptions import ClientError
+
 try:
 
     import keyring
@@ -116,6 +118,12 @@ S3_DELETED_JSON = "deleted_projects.json"
 
 S3_DELETE_BATCH_SIZE = 1000
 
+PROJECTS_INDEX_ETAG_KEY = "_s3_etag"
+
+PROJECTS_INDEX_MISSING_KEY = "_s3_missing"
+
+PROJECTS_INDEX_LOAD_FAILED_KEY = "_s3_load_failed"
+
 DELETED_PROJECT_RETENTION_DAYS = 30
 
 BUNDLED_CONVERTER_DIR = os.path.join("bundled_tools", "PotreeConverter")
@@ -165,6 +173,8 @@ app_views = {}
 current_view_name = "upload"
 
 selected_upload_files = []
+
+upload_process_lock = threading.Lock()
 
 last_auto_crs_entry_value = ""
 
@@ -500,11 +510,15 @@ def save_config(aws_access=None, aws_secret=None, converter_path=None, output_di
 
                 access_saved_to_keyring = True
 
-            except Exception:
+            except Exception as e:
+
+                log(f"[WARNUNG] AWS Access Key konnte nicht im Credential Store gespeichert werden; Klartext-Fallback wird verwendet: {e}")
 
                 config["aws_access"] = aws_access
 
         else:
+
+            log("[WARNUNG] Keyring ist nicht verfügbar; AWS Access Key wird in config.json gespeichert")
 
             config["aws_access"] = aws_access
 
@@ -518,11 +532,15 @@ def save_config(aws_access=None, aws_secret=None, converter_path=None, output_di
 
                 secret_saved_to_keyring = True
 
-            except Exception:
+            except Exception as e:
+
+                log(f"[WARNUNG] AWS Secret Key konnte nicht im Credential Store gespeichert werden; Klartext-Fallback wird verwendet: {e}")
 
                 config["aws_secret"] = aws_secret
 
         else:
+
+            log("[WARNUNG] Keyring ist nicht verfügbar; AWS Secret Key wird in config.json gespeichert")
 
             config["aws_secret"] = aws_secret
 
@@ -533,6 +551,14 @@ def save_config(aws_access=None, aws_secret=None, converter_path=None, output_di
     if secret_saved_to_keyring:
 
         config.pop("aws_secret", None)
+
+    if config.get("aws_access") or config.get("aws_secret"):
+
+        config["aws_credentials_storage"] = "plaintext"
+
+    elif access_saved_to_keyring or secret_saved_to_keyring:
+
+        config["aws_credentials_storage"] = "keyring"
 
     if converter_path is not None:
 
@@ -622,6 +648,8 @@ def migrate_aws_credentials_to_keyring(config):
 
     config.pop("aws_secret", None)
 
+    config["aws_credentials_storage"] = "keyring"
+
     try:
 
         with open(CONFIG_FILE, "w") as f:
@@ -652,7 +680,9 @@ def get_aws_credentials():
 
             secret = keyring.get_password(KEYRING_SERVICE, "aws_secret") or ""
 
-        except Exception:
+        except Exception as e:
+
+            log(f"[WARNUNG] AWS-Zugangsdaten konnten nicht aus dem Credential Store gelesen werden: {e}")
 
             access = ""
 
@@ -1019,7 +1049,15 @@ def download_update_installer(installer_url, installer_name):
 
 def check_for_available_update():
 
-    """Prueft beim Start, ob im GitHub-Repo eine neuere Version bereitliegt."""
+    """Prueft beim Start im Hintergrund, ob im GitHub-Repo eine neuere Version bereitliegt."""
+
+    threading.Thread(target=check_for_available_update_worker, daemon=True).start()
+
+
+
+def check_for_available_update_worker():
+
+    """Fuehrt die Netzwerk-Update-Pruefung ausserhalb des UI-Threads aus."""
 
     try:
 
@@ -1031,7 +1069,7 @@ def check_for_available_update():
 
 
 
-        remote_version = manifest.get("version", "").strip()
+        remote_version = str(manifest.get("version", "")).strip()
 
         if not remote_version or not is_remote_version_newer(remote_version, APP_VERSION):
 
@@ -1049,97 +1087,135 @@ def check_for_available_update():
 
         )
 
-        if not installer_name or not installer_url or not download_valid:
+        root.after(
 
-            log(f"[UPDATE] Neue Version {remote_version} gefunden, aber keine gueltige Installer-URL im Manifest")
+            0,
 
-            messagebox.showwarning(
+            lambda m=manifest, rv=remote_version, iname=installer_name, iurl=installer_url,
 
-                "Update verfügbar",
+                   valid=download_valid, msg=download_message: handle_available_update(
 
-                f"Version {remote_version} ist verfügbar, aber die Download-Informationen sind ungueltig.\n\n"
+                       m, rv, iname, iurl, valid, msg
 
-                f"{download_message}"
-
-            )
-
-            return
-
-
-
-        install_now = messagebox.askyesno(
-
-            "Update verfügbar",
-
-            f"Es ist eine neue Version verfügbar.\n\n"
-
-            f"Installierte Version: {APP_VERSION}\n"
-
-            f"Verfuegbare Version: {remote_version}\n\n"
-
-            f"Soll das Update jetzt installiert werden?"
+                   )
 
         )
-
-
-
-        log(f"[UPDATE] Neue Version verfügbar: {remote_version} ({installer_url})")
-
-
-
-        if not install_now:
-
-            log("[UPDATE] Benutzer hat das Update verschoben")
-
-            return
-
-
-
-        try:
-
-            log(f"[UPDATE] Lade Installer herunter: {installer_url}")
-
-            installer_path = download_update_installer(installer_url, installer_name)
-
-            hash_ok, hash_message = verify_installer_hash(
-
-                installer_path, manifest.get("installer_sha256", "")
-
-            )
-
-            if not hash_ok:
-
-                try:
-
-                    os.remove(installer_path)
-
-                except OSError:
-
-                    pass
-
-                raise RuntimeError(hash_message)
-
-            subprocess.Popen([installer_path, "/CLOSEAPPLICATIONS"], shell=False)
-
-            log(f"[UPDATE] Installer gestartet: {installer_path}")
-
-            root.after(200, root.destroy)
-
-        except Exception as install_error:
-
-            log(f"[UPDATE] Installer konnte nicht heruntergeladen oder gestartet werden: {install_error}")
-
-            messagebox.showerror(
-
-                "Update fehlgeschlagen",
-
-                f"Der Installer konnte nicht heruntergeladen oder gestartet werden:\n{installer_url}\n\n{install_error}"
-
-            )
 
     except Exception as e:
 
         log(f"[UPDATE] Update-Pruefung fehlgeschlagen: {e}")
+
+
+
+def handle_available_update(manifest, remote_version, installer_name, installer_url, download_valid, download_message):
+
+    """Fragt den Benutzer im UI-Thread, ob das gefundene Update installiert werden soll."""
+
+    if not installer_name or not installer_url or not download_valid:
+
+        log(f"[UPDATE] Neue Version {remote_version} gefunden, aber keine gueltige Installer-URL im Manifest")
+
+        messagebox.showwarning(
+
+            "Update verfügbar",
+
+            f"Version {remote_version} ist verfügbar, aber die Download-Informationen sind ungueltig.\n\n"
+
+            f"{download_message}"
+
+        )
+
+        return
+
+
+
+    log(f"[UPDATE] Neue Version verfügbar: {remote_version} ({installer_url})")
+
+    install_now = messagebox.askyesno(
+
+        "Update verfügbar",
+
+        f"Es ist eine neue Version verfügbar.\n\n"
+
+        f"Installierte Version: {APP_VERSION}\n"
+
+        f"Verfuegbare Version: {remote_version}\n\n"
+
+        f"Soll das Update jetzt installiert werden?"
+
+    )
+
+    if not install_now:
+
+        log("[UPDATE] Benutzer hat das Update verschoben")
+
+        return
+
+
+
+    threading.Thread(
+
+        target=download_and_start_update_worker,
+
+        args=(manifest, installer_url, installer_name),
+
+        daemon=True
+
+    ).start()
+
+
+
+def download_and_start_update_worker(manifest, installer_url, installer_name):
+
+    """Laedt, prueft und startet den Installer ausserhalb des UI-Threads."""
+
+    try:
+
+        log(f"[UPDATE] Lade Installer herunter: {installer_url}")
+
+        installer_path = download_update_installer(installer_url, installer_name)
+
+        hash_ok, hash_message = verify_installer_hash(
+
+            installer_path, manifest.get("installer_sha256", "")
+
+        )
+
+        if not hash_ok:
+
+            try:
+
+                os.remove(installer_path)
+
+            except OSError:
+
+                pass
+
+            raise RuntimeError(hash_message)
+
+        subprocess.Popen([installer_path, "/CLOSEAPPLICATIONS"], shell=False)
+
+        log(f"[UPDATE] Installer gestartet: {installer_path}")
+
+        root.after(200, root.destroy)
+
+    except Exception as install_error:
+
+        log(f"[UPDATE] Installer konnte nicht heruntergeladen oder gestartet werden: {install_error}")
+
+        root.after(
+
+            0,
+
+            lambda err=install_error, url=installer_url: messagebox.showerror(
+
+                "Update fehlgeschlagen",
+
+                f"Der Installer konnte nicht heruntergeladen oder gestartet werden:\n{url}\n\n{err}"
+
+            )
+
+        )
 
 
 
@@ -1279,23 +1355,33 @@ def cleanup_local_files(output_path):
 
     """Loescht die lokalen konvertierten Dateien nach erfolgreichem Upload"""
 
-    try:
+    for attempt in range(3):
 
-        if os.path.exists(output_path):
+        try:
 
-            shutil.rmtree(output_path)
+            if os.path.exists(output_path):
 
-            log(f"[CLEANUP] [OK] Temporaere Dateien gelöscht: {output_path}")
+                shutil.rmtree(output_path)
 
-            return True
+                log(f"[CLEANUP] [OK] Temporaere Dateien gelöscht: {output_path}")
 
-    except Exception as e:
+                return True
 
-        log(f"[WARNUNG] Cleanup fehlgeschlagen: {e}")
+            return False
 
-        return False
+        except Exception as e:
 
-    return False
+            if attempt < 2:
+
+                log(f"[WARNUNG] Cleanup fehlgeschlagen, erneuter Versuch: {e}")
+
+                time.sleep(0.5)
+
+                continue
+
+            log(f"[WARNUNG] Cleanup fehlgeschlagen: {e}")
+
+            return False
 
 
 
@@ -2437,21 +2523,7 @@ def make_unique_cloud_slug(source_path, used_slugs):
 
     """Erzeugt einen eindeutigen Unterordner fuer eine Punktwolke im Projekt."""
 
-    base_slug = sanitize_folder_name(get_pointcloud_display_name(source_path)) or "punktwolke"
-
-    candidate = base_slug
-
-    suffix = 2
-
-    while candidate in used_slugs:
-
-        candidate = f"{base_slug}_{suffix}"
-
-        suffix += 1
-
-    used_slugs.add(candidate)
-
-    return candidate
+    return make_unique_slug(get_pointcloud_display_name(source_path), used_slugs)
 
 
 
@@ -2583,6 +2655,10 @@ def load_projects_index(s3_client):
 
         data = json.loads(response['Body'].read().decode('utf-8'))
 
+        data[PROJECTS_INDEX_ETAG_KEY] = response.get("ETag")
+
+        data[PROJECTS_INDEX_MISSING_KEY] = False
+
         project_count = len(data.get('projects', []))
 
         log(f"[INDEX] [OK] Bestehender Index geladen ({project_count} Projekte)")
@@ -2593,13 +2669,13 @@ def load_projects_index(s3_client):
 
         log("[INDEX] Index-Datei existiert noch nicht - erstelle neue")
 
-        return {"projects": [], "last_updated": None}
+        return {"projects": [], "last_updated": None, PROJECTS_INDEX_MISSING_KEY: True}
 
     except Exception as e:
 
         log(f"[INDEX] WARNUNG: Index konnte nicht geladen werden: {e}")
 
-        return {"projects": [], "last_updated": None}
+        return {"projects": [], "last_updated": None, PROJECTS_INDEX_LOAD_FAILED_KEY: True}
 
 
 
@@ -2611,25 +2687,83 @@ def save_projects_index(s3_client, index_data):
 
     try:
 
-        index_data["last_updated"] = datetime.now().isoformat()
+        if index_data.get(PROJECTS_INDEX_LOAD_FAILED_KEY):
 
-        s3_client.put_object(
+            log("[FEHLER] Index wurde nicht sicher geladen - Speichern abgebrochen")
 
-            Bucket=BUCKET_NAME,
+            return False
 
-            Key=S3_INDEX_JSON,
+        original_etag = index_data.get(PROJECTS_INDEX_ETAG_KEY)
 
-            Body=json.dumps(index_data, indent=2, ensure_ascii=False),
+        index_was_missing = index_data.get(PROJECTS_INDEX_MISSING_KEY, False)
 
-            ContentType='application/json',
+        if not original_etag and not index_was_missing:
 
-            CacheControl='no-cache'
+            log("[FEHLER] Index ohne ETag geladen - Speichern abgebrochen")
 
-        )
+            return False
 
-        log(f"[INDEX] JSON-Index gespeichert ({len(index_data['projects'])} Projekte)")
+        persisted_index = dict(index_data)
+
+        persisted_index.pop(PROJECTS_INDEX_ETAG_KEY, None)
+
+        persisted_index.pop(PROJECTS_INDEX_MISSING_KEY, None)
+
+        persisted_index.pop(PROJECTS_INDEX_LOAD_FAILED_KEY, None)
+
+        timestamp = datetime.now().isoformat()
+
+        persisted_index["last_updated"] = timestamp
+
+        put_args = {
+
+            "Bucket": BUCKET_NAME,
+
+            "Key": S3_INDEX_JSON,
+
+            "Body": json.dumps(persisted_index, indent=2, ensure_ascii=False),
+
+            "ContentType": 'application/json',
+
+            "CacheControl": 'no-cache'
+
+        }
+
+        if original_etag:
+
+            put_args["IfMatch"] = original_etag
+
+        elif index_was_missing:
+
+            put_args["IfNoneMatch"] = "*"
+
+        response = s3_client.put_object(**put_args)
+
+        index_data["last_updated"] = timestamp
+
+        index_data[PROJECTS_INDEX_ETAG_KEY] = response.get("ETag")
+
+        index_data[PROJECTS_INDEX_MISSING_KEY] = False
+
+        index_data.pop(PROJECTS_INDEX_LOAD_FAILED_KEY, None)
+
+        log(f"[INDEX] JSON-Index gespeichert ({len(persisted_index['projects'])} Projekte)")
 
         return True
+
+    except ClientError as e:
+
+        error_code = e.response.get("Error", {}).get("Code")
+
+        if error_code in ("PreconditionFailed", "ConditionalRequestConflict"):
+
+            log("[FEHLER] Index wurde zwischen Laden und Speichern geaendert. Bitte Aktion erneut ausfuehren.")
+
+        else:
+
+            log(f"[FEHLER] Index konnte nicht gespeichert werden: {e}")
+
+        return False
 
     except Exception as e:
 
@@ -3092,7 +3226,7 @@ def create_s3_client(aws_access, aws_secret):
 
 
 
-def build_project_url(folder_kunde, folder_id, folder_projekt, input_format, kunde, projekt):
+def build_project_url(folder_kunde, folder_id, folder_projekt, input_format):
 
     """Erstellt den Viewer-Link für ein Projekt."""
 
@@ -3109,6 +3243,27 @@ def build_project_url(folder_kunde, folder_id, folder_projekt, input_format, kun
     project_url = f"{DOMAIN_URL}?id={folder_id}"
 
     return path_param, project_url
+
+
+def append_project_csv_row(folder_id, kunde, projekt, project_url):
+
+    """Haengt ein Projekt an die lokale CSV an und schreibt den Header nur fuer leere Dateien."""
+
+    datum = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    with open(CSV_FILE, mode='a+', newline='', encoding='utf-8') as f:
+
+        f.seek(0, os.SEEK_END)
+
+        is_empty = f.tell() == 0
+
+        writer = csv.writer(f, delimiter=';')
+
+        if is_empty:
+
+            writer.writerow(["ID", "Kunde", "Projekt", "Datum", "Link"])
+
+        writer.writerow([folder_id, kunde, projekt, datum, project_url])
 
 
 def extract_project_identifiers_from_link(project_link):
@@ -3371,7 +3526,7 @@ def upload_files_to_s3(s3_client, files_to_upload, ui=None):
 
         nonlocal uploaded_total
 
-        progress = (uploaded_total + bytes_uploaded) / total_size
+        progress = min((uploaded_total + bytes_uploaded) / total_size, 1.0) if total_size > 0 else 1.0
 
         ui_set_progress(progress, ui)
 
@@ -3454,6 +3609,20 @@ def run_potree_conversion(laz_file, converter_path, output_dir, ui=None):
     cmd = [converter_path, laz_file, "-o", output_dir, "--overwrite"]
 
 
+    startupinfo = None
+
+    creationflags = 0
+
+    if os.name == "nt":
+
+        startupinfo = subprocess.STARTUPINFO()
+
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+        startupinfo.wShowWindow = 0
+
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 
     process = subprocess.Popen(
 
@@ -3467,7 +3636,11 @@ def run_potree_conversion(laz_file, converter_path, output_dir, ui=None):
 
         universal_newlines=True,
 
-        bufsize=1
+        bufsize=1,
+
+        startupinfo=startupinfo,
+
+        creationflags=creationflags
 
     )
 
@@ -3833,19 +4006,7 @@ def run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_sec
 
         try:
 
-            file_exists = os.path.exists(CSV_FILE)
-
-            datum = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-            with open(CSV_FILE, mode='a', newline='', encoding='utf-8') as f:
-
-                writer = csv.writer(f, delimiter=';')
-
-                if not file_exists:
-
-                    writer.writerow(["ID", "Kunde", "Projekt", "Datum", "Link"])
-
-                writer.writerow([folder_id, kunde, projekt, datum, project_url])
+            append_project_csv_row(folder_id, kunde, projekt, project_url)
 
             log("[CSV] Lokale CSV aktualisiert")
 
@@ -3919,7 +4080,7 @@ def run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_sec
 
         log(traceback.format_exc())
 
-        root.after(0, lambda: messagebox.showerror("Fehler", f"Unerwarteter Fehler:\n{e}"))
+        root.after(0, lambda err=e: messagebox.showerror("Fehler", f"Unerwarteter Fehler:\n{err}"))
 
     finally:
 
@@ -3961,6 +4122,14 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input="", 
 
     output_base_dir = config.get("output_base_dir", "")
 
+
+    s3_client = None
+
+    s3_prefix = ""
+
+    uploaded_s3_keys = []
+
+    index_saved = False
 
 
     try:
@@ -4187,7 +4356,7 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input="", 
 
             nonlocal uploaded_total
 
-            progress = (uploaded_total + bytes_uploaded) / total_size
+            progress = min((uploaded_total + bytes_uploaded) / total_size, 1.0) if total_size > 0 else 1.0
 
             root.after(0, lambda: progress_bar.set(progress))
 
@@ -4236,6 +4405,8 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input="", 
                 Callback=progress_callback
 
             )
+
+            uploaded_s3_keys.append(s3_key)
 
 
 
@@ -4304,7 +4475,11 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input="", 
 
 
 
-        save_projects_index(s3_client, index_data)
+        if not save_projects_index(s3_client, index_data):
+
+            raise RuntimeError("Projekt-Index konnte nicht gespeichert werden. Upload wird zurueckgerollt.")
+
+        index_saved = True
 
 
 
@@ -4312,19 +4487,7 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input="", 
 
         try:
 
-            file_exists = os.path.exists(CSV_FILE)
-
-            datum = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-            with open(CSV_FILE, mode='a', newline='', encoding='utf-8') as f:
-
-                writer = csv.writer(f, delimiter=';')
-
-                if not file_exists:
-
-                    writer.writerow(["ID", "Kunde", "Projekt", "Datum", "Link"])
-
-                writer.writerow([folder_id, kunde, projekt, datum, project_url])
+            append_project_csv_row(folder_id, kunde, projekt, project_url)
 
             log("[CSV] Lokale CSV aktualisiert")
 
@@ -4402,11 +4565,33 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input="", 
 
     except Exception as e:
 
+        if s3_client and s3_prefix and uploaded_s3_keys and not index_saved:
+
+            rollback_keys = [
+
+                s3_key for s3_key in uploaded_s3_keys
+
+                if str(s3_key).startswith(f"{s3_prefix}/")
+
+            ]
+
+            if rollback_keys:
+
+                try:
+
+                    deleted_count = delete_s3_objects(s3_client, rollback_keys)
+
+                    log(f"[ROLLBACK] {deleted_count} Dateien aus fehlgeschlagenem Upload entfernt")
+
+                except Exception as rollback_error:
+
+                    log(f"[ROLLBACK] Konnte fehlgeschlagene Upload-Dateien nicht entfernen: {rollback_error}")
+
         log(f"[FEHLER] {str(e)}")
 
         log(traceback.format_exc())
 
-        root.after(0, lambda: messagebox.showerror("Fehler", f"Unerwarteter Fehler:\n{e}"))
+        root.after(0, lambda err=e: messagebox.showerror("Fehler", f"Unerwarteter Fehler:\n{err}"))
 
 
 
@@ -4776,6 +4961,14 @@ def start_thread():
 
 
 
+    if not upload_process_lock.acquire(blocking=False):
+
+        log("[UPLOAD] Upload läuft bereits - neuer Start wird ignoriert")
+
+        messagebox.showwarning("Upload läuft", "Es läuft bereits ein Upload.")
+
+        return
+
     btn_start.configure(state="disabled", text="Läuft...")
 
     thread = threading.Thread(
@@ -4788,7 +4981,21 @@ def start_thread():
 
     )
 
-    thread.start()
+    try:
+
+        thread.start()
+
+    except Exception as e:
+
+        upload_process_lock.release()
+
+        btn_start.configure(state="normal", text="STARTEN - Konvertieren & Upload")
+
+        log(f"[UPLOAD] Upload-Thread konnte nicht gestartet werden: {e}")
+
+        messagebox.showerror("Fehler", f"Upload-Thread konnte nicht gestartet werden:\n{e}")
+
+        return
 
 
 
@@ -4799,6 +5006,8 @@ def start_thread():
             root.after(100, check_thread)
 
         else:
+
+            upload_process_lock.release()
 
             btn_start.configure(state="normal", text="STARTEN - Konvertieren & Upload")
 
@@ -5198,7 +5407,9 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
 
             if updated:
 
-                save_projects_index(s3_client, index_data)
+                if not save_projects_index(s3_client, index_data):
+
+                    raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
 
                 if crs_info:
 
@@ -5542,7 +5753,9 @@ def replace_project_with_multi_pointclouds(project_info, replacement_entries, aw
 
             raise RuntimeError("Projekt wurde im Index nicht gefunden.")
 
-        save_projects_index(s3_client, index_data)
+        if not save_projects_index(s3_client, index_data):
+
+            raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
 
         ui_set_progress(1, ui)
 
@@ -5681,17 +5894,21 @@ def duplicate_project_process(project_info, new_kunde, new_projekt, aws_access, 
 
 
 
-            s3_client.copy_object(
+            s3_client.copy(
 
-                Bucket=BUCKET_NAME,
+                {'Bucket': BUCKET_NAME, 'Key': source_key},
 
-                CopySource={'Bucket': BUCKET_NAME, 'Key': source_key},
+                BUCKET_NAME,
 
-                Key=dest_key,
+                dest_key,
 
-                CacheControl='no-cache, no-store, must-revalidate, max-age=0',
+                ExtraArgs={
 
-                MetadataDirective='REPLACE'
+                    'CacheControl': 'no-cache, no-store, must-revalidate, max-age=0',
+
+                    'MetadataDirective': 'REPLACE'
+
+                }
 
             )
 
@@ -5717,7 +5934,7 @@ def duplicate_project_process(project_info, new_kunde, new_projekt, aws_access, 
 
         path_param, project_url = build_project_url(
 
-            folder_kunde, folder_id, folder_projekt, source_format, new_kunde, new_projekt
+            folder_kunde, folder_id, folder_projekt, source_format
 
         )
 
@@ -5751,7 +5968,9 @@ def duplicate_project_process(project_info, new_kunde, new_projekt, aws_access, 
 
         index_data["projects"].insert(0, new_project)
 
-        save_projects_index(s3_client, index_data)
+        if not save_projects_index(s3_client, index_data):
+
+            raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
 
         ui_log("[DUPLIZIEREN] Projekt-Index aktualisiert", ui)
 
@@ -5761,19 +5980,7 @@ def duplicate_project_process(project_info, new_kunde, new_projekt, aws_access, 
 
         try:
 
-            file_exists = os.path.exists(CSV_FILE)
-
-            datum = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-            with open(CSV_FILE, mode='a', newline='', encoding='utf-8') as f:
-
-                writer = csv.writer(f, delimiter=';')
-
-                if not file_exists:
-
-                    writer.writerow(["ID", "Kunde", "Projekt", "Datum", "Link"])
-
-                writer.writerow([folder_id, new_kunde, new_projekt, datum, project_url])
+            append_project_csv_row(folder_id, new_kunde, new_projekt, project_url)
 
         except Exception as e:
 
@@ -9144,7 +9351,8 @@ def show_local_conversion_view():
 
             if os.path.isdir(output_dir):
                 ui_log("[CLEANUP] Vorhandenen Ausgabeordner entfernen", ui_context)
-                shutil.rmtree(output_dir)
+                if not cleanup_local_files(output_dir):
+                    raise RuntimeError("Vorhandener Ausgabeordner konnte nicht entfernt werden.")
 
             ui_set_step("Konvertiere mit Potree...", 2, ui_context)
             ui_set_detail("Die Punktwolke wird lokal in das Potree-Format umgewandelt", ui_context)
@@ -9752,7 +9960,25 @@ def show_settings_view(first_run=False):
 
         ):
 
-            messagebox.showinfo("Erfolg", "Einstellungen wurden gespeichert!")
+            saved_config = load_config()
+
+            if saved_config.get("aws_credentials_storage") == "plaintext" or saved_config.get("aws_access") or saved_config.get("aws_secret"):
+
+                messagebox.showwarning(
+
+                    "Einstellungen gespeichert",
+
+                    "Einstellungen wurden gespeichert.\n\n"
+
+                    "Hinweis: Der Windows Credential Store ist nicht verfügbar oder fehlgeschlagen. "
+
+                    "Die AWS-Zugangsdaten wurden deshalb in config.json gespeichert."
+
+                )
+
+            else:
+
+                messagebox.showinfo("Erfolg", "Einstellungen wurden gespeichert!")
 
             log("[CONFIG] Einstellungen gespeichert")
 
