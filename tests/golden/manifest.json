@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "captured_root": "tests/golden/captured",
+  "normalized_root": "tests/golden/captured_normalized",
+  "v2_output_root": "tests/golden/v2_outputs",
+  "provenance_file": "provenance.json",
+  "status": "pending_legacy_capture",
+  "notes": [
+    "These scenarios must be captured from the current productive CustomTkinter app before V2 cutover.",
+    "Hand-written examples under tests/fixtures/golden_examples only validate normalization helpers."
+  ],
+  "scenarios": [
+    {
+      "id": "single_potree_upload",
+      "description": "Single LAS/LAZ upload converted to Potree output.",
+      "required_files": ["projects_index.json", "metadata.json", "cloud.js"]
+    },
+    {
+      "id": "single_copc_upload",
+      "description": "Single COPC direct upload.",
+      "required_files": ["projects_index.json"]
+    },
+    {
+      "id": "multi_mix_upload",
+      "description": "Multi-cloud upload with mixed Potree and COPC sources.",
+      "required_files": ["projects_index.json", "metadata.json", "cloud.js"]
+    },
+    {
+      "id": "vertical_crs_upload",
+      "description": "Horizontal CRS plus vertical CRS/datum metadata.",
+      "required_files": ["projects_index.json", "metadata.json", "cloud.js"]
+    },
+    {
+      "id": "existing_potree_folder_upload",
+      "description": "Upload from an already converted Potree folder.",
+      "required_files": ["projects_index.json", "metadata.json", "cloud.js"]
+    },
+    {
+      "id": "duplicate_project",
+      "description": "Project duplication preserves source metadata and creates a new active clone.",
+      "required_files": ["projects_index.json"]
+    },
+    {
+      "id": "delete_project",
+      "description": "Project deletion updates active/disabled indexes and deleted_projects.json.",
+      "required_files": ["projects_index.json", "deleted_projects.json"]
+    },
+    {
+      "id": "rename_project",
+      "description": "Rename updates project and pointcloud metadata without reactivating disabled links.",
+      "required_files": ["projects_index.json"]
+    },
+    {
+      "id": "single_replace",
+      "description": "Single pointcloud replacement preserves project link and updates one cloud entry.",
+      "required_files": ["projects_index.json", "metadata.json", "cloud.js"]
+    },
+    {
+      "id": "multi_replace",
+      "description": "Complete multi-cloud replacement updates pointclouds and orphan cleanup contract.",
+      "required_files": ["projects_index.json", "metadata.json", "cloud.js"]
+    },
+    {
+      "id": "disabled_link_state",
+      "description": "Disabled project/link state remains stable across rename and replace.",
+      "required_files": ["projects_index.json", "deleted_projects.json"]
+    }
+  ]
+}

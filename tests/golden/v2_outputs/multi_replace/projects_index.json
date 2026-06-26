@@ -1,0 +1,55 @@
+{
+  "projects": [
+    {
+      "id": "active-stays",
+      "kunde": "Aktiv",
+      "projekt": "Bleibt"
+    }
+  ],
+  "disabled_projects": [
+    {
+      "id": "replace-multi",
+      "kunde": "Replace Kunde",
+      "projekt": "Multi Replace",
+      "format": "multi",
+      "link": "https://pointcloud.dronautix.at/index.html?id=replace-multi",
+      "viewer_path": "golden/replace_multi",
+      "s3_path": "pointclouds/golden/replace_multi",
+      "disabled_at": "2026-06-20T12:00:00",
+      "pointcloud_count": 2,
+      "pointclouds": [
+        {
+          "name": "Scan",
+          "format": "copc",
+          "viewer_path": "golden/replace_multi/scan/source.copc.laz",
+          "s3_path": "pointclouds/golden/replace_multi/scan/source.copc.laz",
+          "visible": true,
+          "crs": "EPSG:25832",
+          "projection": "EPSG:25832",
+          "epsg": "EPSG:25832",
+          "crs_info": {
+            "value": "EPSG:25832",
+            "projection": "EPSG:25832",
+            "epsg": "EPSG:25832"
+          }
+        },
+        {
+          "name": "Raw",
+          "format": "potree",
+          "viewer_path": "golden/replace_multi/raw",
+          "s3_path": "pointclouds/golden/replace_multi/raw",
+          "visible": true,
+          "crs": "EPSG:4326",
+          "projection": "EPSG:4326",
+          "epsg": "EPSG:4326",
+          "crs_info": {
+            "value": "EPSG:4326",
+            "projection": "EPSG:4326",
+            "epsg": "EPSG:4326"
+          }
+        }
+      ]
+    }
+  ],
+  "last_updated": "2026-06-21T12:30:00"
+}

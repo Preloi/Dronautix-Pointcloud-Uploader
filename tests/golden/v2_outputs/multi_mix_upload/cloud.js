@@ -1,0 +1,10 @@
+cloud.js = {
+  "spacing": 0.125,
+  "source": "Bestand Potree",
+  "projection": "EPSG:25832",
+  "crs": "EPSG:25832",
+  "crs_info": {
+    "value": "EPSG:25832",
+    "projection": "EPSG:25832"
+  }
+};

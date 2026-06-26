@@ -1,0 +1,30 @@
+{
+  "projects": [
+    {
+      "datum": "2026-06-21T12:00:00",
+      "kunde": "Golden Kunde",
+      "id": "abc123e3",
+      "projekt": "Vertical CRS",
+      "format": "potree",
+      "link": "https://pointcloud.dronautix.at/index.html?id=abc123e3",
+      "viewer_path": "golden_kunde/abc123e3/vertical_crs",
+      "s3_path": "pointclouds/golden_kunde/abc123e3/vertical_crs",
+      "crs": "EPSG:25832",
+      "projection": "EPSG:25832",
+      "epsg": "EPSG:25832",
+      "vertical_crs": "EPSG:7837",
+      "vertical_epsg": "EPSG:7837",
+      "vertical_projection": "EPSG:7837",
+      "vertical_datum": "DHHN2016",
+      "crs_info": {
+        "value": "EPSG:25832",
+        "projection": "EPSG:25832",
+        "epsg": "EPSG:25832",
+        "vertical_epsg": "EPSG:7837",
+        "vertical_name": "DHHN2016"
+      }
+    }
+  ],
+  "last_updated": "2026-06-21T12:30:00",
+  "disabled_projects": []
+}

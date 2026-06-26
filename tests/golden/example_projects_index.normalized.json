@@ -1,0 +1,58 @@
+{
+  "disabled_projects": [
+    {
+      "disabled_at": "<volatile>",
+      "id": "<id>",
+      "name": "Gelöschtes Beispiel"
+    }
+  ],
+  "last_updated": "<volatile>",
+  "projects": [
+    {
+      "crs": "EPSG:25832",
+      "datum": "<volatile>",
+      "epsg": 25832,
+      "format": "potree",
+      "id": "<id>",
+      "kunde": "Dronautix ÄÖÜ",
+      "name": "München Testfläche Süd",
+      "pointclouds": [
+        {
+          "bounds": {
+            "max": [
+              690223.12345678,
+              5330223.98765433,
+              455.98765432
+            ],
+            "min": [
+              690123.12345679,
+              5330123.98765432,
+              411.12345679
+            ]
+          },
+          "crs_info": {
+            "auth": "EPSG",
+            "code": 25832,
+            "name": "ETRS89 / UTM zone 32N",
+            "vertical": {
+              "auth": "EPSG",
+              "code": 7837,
+              "name": "DHHN2016 height"
+            }
+          },
+          "format": "potree",
+          "id": "<id>",
+          "last_updated": "<volatile>",
+          "metadata_path": "kunden/münchen/testfläche-süd/metadata.json",
+          "name": "Wolke Café"
+        }
+      ],
+      "project_id": "<id>",
+      "projection": "ETRS89 / UTM zone 32N",
+      "s3_path": "projects/muenchen/testflaeche-sued",
+      "vertical_crs": "EPSG:7837",
+      "vertical_datum": "DHHN2016",
+      "viewer_path": "kunden/münchen/testfläche-süd"
+    }
+  ]
+}

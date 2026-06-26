@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "scenario_id": "multi_replace",
+  "description": "Complete multi-cloud replacement updates pointclouds and orphan cleanup contract.",
+  "legacy_app_version": "1.7.12",
+  "legacy_git_ref": "dronautix/develop@2ee765e99d157dc37da869767bcfda4afc792225+dirty",
+  "captured_at_utc": "2026-06-21T20:52:54Z",
+  "captured_files": [
+    "projects_index.json",
+    "metadata.json",
+    "cloud.js"
+  ],
+  "inputs": {
+    "sources": [
+      {
+        "source": "",
+        "source_type": "",
+        "format": "",
+        "name": "",
+        "slug": ""
+      }
+    ],
+    "s3_prefix": "",
+    "crs_cases": [],
+    "disabled_state": "",
+    "notes": "",
+    "project_id": "",
+    "original_link": "",
+    "original_disabled_state": ""
+  },
+  "observed_contracts": {
+    "converter_command": "",
+    "converter_working_directory": "",
+    "s3_extra_args": "",
+    "operation_order": [
+      "prepare",
+      "collect_existing_keys",
+      "per_source_crs_convert_metadata_upload",
+      "delete_obsolete_keys",
+      "load_index",
+      "update_index",
+      "save_index"
+    ],
+    "index_update_order": "",
+    "crs_behavior": "",
+    "disabled_link_behavior": "",
+    "cleanup_behavior": "",
+    "rollback_behavior": "",
+    "common_crs_decision": "",
+    "stale_project_crs_on_mismatch": "",
+    "existing_keys": [],
+    "uploaded_keys": [],
+    "obsolete_keys": [],
+    "delete_timing": "before_index_save",
+    "delete_errors": [],
+    "legacy_uploaded_key_rollback": "none_observed"
+  }
+}

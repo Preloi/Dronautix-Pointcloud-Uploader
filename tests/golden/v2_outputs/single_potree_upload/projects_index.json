@@ -1,0 +1,24 @@
+{
+  "projects": [
+    {
+      "datum": "2026-06-21T12:00:00",
+      "kunde": "Golden Kunde",
+      "id": "abc123e1",
+      "projekt": "Single Potree",
+      "format": "potree",
+      "link": "https://pointcloud.dronautix.at/index.html?id=abc123e1",
+      "viewer_path": "golden_kunde/abc123e1/single_potree",
+      "s3_path": "pointclouds/golden_kunde/abc123e1/single_potree",
+      "crs": "EPSG:25832",
+      "projection": "EPSG:25832",
+      "epsg": "EPSG:25832",
+      "crs_info": {
+        "value": "EPSG:25832",
+        "projection": "EPSG:25832",
+        "epsg": "EPSG:25832"
+      }
+    }
+  ],
+  "last_updated": "2026-06-21T12:30:00",
+  "disabled_projects": []
+}

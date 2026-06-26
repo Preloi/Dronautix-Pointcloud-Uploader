@@ -1,0 +1,40 @@
+{
+  "projects": [
+    {
+      "id": "replace-single",
+      "kunde": "Replace Kunde",
+      "projekt": "Single Replace",
+      "format": "multi",
+      "link": "https://pointcloud.dronautix.at/index.html?id=replace-single",
+      "viewer_path": "golden/replace_single",
+      "s3_path": "pointclouds/golden/replace_single",
+      "pointcloud_count": 2,
+      "pointclouds": [
+        {
+          "name": "Cloud A",
+          "format": "potree",
+          "viewer_path": "golden/replace_single/cloud_a",
+          "s3_path": "pointclouds/golden/replace_single/cloud_a",
+          "visible": false
+        },
+        {
+          "name": "Cloud B Replacement",
+          "format": "potree",
+          "viewer_path": "golden/replace_single/cloud_b_replacement",
+          "s3_path": "pointclouds/golden/replace_single/cloud_b_replacement",
+          "visible": false,
+          "crs": "EPSG:25832",
+          "projection": "EPSG:25832",
+          "epsg": "EPSG:25832",
+          "crs_info": {
+            "value": "EPSG:25832",
+            "projection": "EPSG:25832",
+            "epsg": "EPSG:25832"
+          }
+        }
+      ]
+    }
+  ],
+  "disabled_projects": [],
+  "last_updated": "2026-06-21T12:30:00"
+}
