@@ -72,3 +72,24 @@ def test_local_conversion_controller_rejects_unknown_payload_type():
 
     with pytest.raises(ValueError, match="LocalConversionDialogState|LocalConversionRequest"):
         controller.run_conversion(object())
+
+
+def test_local_conversion_controller_cancel_removes_partial_output(tmp_path):
+    source = tmp_path / "scan.laz"
+    converter = tmp_path / "PotreeConverter.exe"
+    output = tmp_path / "scan_potree"
+    source.write_bytes(b"laz")
+    converter.write_bytes(b"exe")
+
+    def fake_runner(source_file, converter_path, output_dir, on_progress):
+        pytest.fail("Konvertierung darf nach Abbruch nicht starten")
+
+    controller = LocalConversionController(converter_runner=fake_runner)
+    summary = controller.run_conversion(
+        LocalConversionRequest(str(source), str(output), str(converter)),
+        cancel_requested=lambda: True,
+    )
+
+    assert summary.status == "cancelled"
+    assert "abgebrochen" in summary.message
+    assert not output.exists()

@@ -7,7 +7,13 @@ import os
 import re
 
 from .constants import BUCKET_NAME, COPC_OBJECT_NAME, S3_CACHE_CONTROL, S3_DELETE_BATCH_SIZE
-from .contracts import CancelCallback, ProgressCallback, ProgressEvent, UploadedKeyLedger
+from .contracts import (
+    CancelCallback,
+    OperationCancelledError,
+    ProgressCallback,
+    ProgressEvent,
+    UploadedKeyLedger,
+)
 
 UploadFile = tuple[str, str]
 
@@ -89,6 +95,7 @@ def upload_files_to_s3(
     bucket_name: str = BUCKET_NAME,
     on_progress: ProgressCallback | None = None,
     ledger: UploadedKeyLedger | None = None,
+    cancel_requested: CancelCallback | None = None,
 ) -> UploadedKeyLedger:
     """Upload files and record a key only after upload_file completed."""
 
@@ -108,6 +115,8 @@ def upload_files_to_s3(
     uploaded_total = 0
 
     for idx, (local_path, s3_key) in enumerate(files_to_upload, 1):
+        if _cancel_requested(cancel_requested):
+            raise OperationCancelledError("Upload wurde abgebrochen.")
         file_size = os.path.getsize(local_path)
         _emit(
             on_progress,
@@ -127,6 +136,8 @@ def upload_files_to_s3(
         file_progress = {"bytes": 0, "last_fraction": -1.0}
 
         def update_upload_progress(bytes_chunk, _state=file_progress, _base=uploaded_total):
+            if _cancel_requested(cancel_requested):
+                raise OperationCancelledError("Upload wurde abgebrochen.")
             if total_size <= 0:
                 return
             _state["bytes"] += int(bytes_chunk or 0)
@@ -144,16 +155,25 @@ def upload_files_to_s3(
                 ),
             )
 
-        s3_client.upload_file(
-            local_path,
-            bucket_name,
-            s3_key,
-            ExtraArgs={
-                "ContentType": content_type,
-                "CacheControl": S3_CACHE_CONTROL,
-            },
-            Callback=update_upload_progress,
-        )
+        try:
+            s3_client.upload_file(
+                local_path,
+                bucket_name,
+                s3_key,
+                ExtraArgs={
+                    "ContentType": content_type,
+                    "CacheControl": S3_CACHE_CONTROL,
+                },
+                Callback=update_upload_progress,
+            )
+        except OperationCancelledError:
+            raise
+        except Exception:
+            # boto3/s3transfer kann Callback-Exceptions einpacken; einen
+            # angeforderten Abbruch als solchen normalisieren.
+            if _cancel_requested(cancel_requested):
+                raise OperationCancelledError("Upload wurde abgebrochen.")
+            raise
         upload_ledger.record(s3_key)
         uploaded_total += file_size
 

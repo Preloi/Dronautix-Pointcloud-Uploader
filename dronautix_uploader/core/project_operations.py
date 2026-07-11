@@ -9,6 +9,7 @@ from typing import Any, Callable
 from .constants import BUCKET_NAME, COPC_OBJECT_NAME
 from .contracts import (
     CancelCallback,
+    OperationCancelledError,
     PointcloudSource,
     ProgressCallback,
     ProgressEvent,
@@ -515,11 +516,12 @@ def upload_new_project(
     delete_keys: Callable[[tuple[str, ...]], None],
     on_progress: ProgressCallback | None = None,
     bucket_name: str = BUCKET_NAME,
+    cancel_requested: CancelCallback | None = None,
 ) -> UploadResult:
     """Upload a new project and insert it into projects_index.json.
 
-    Failure before index save deletes exactly the uploaded-key ledger and restores
-    the input index snapshot.
+    Failure or cancellation before index save deletes exactly the uploaded-key
+    ledger and restores the input index snapshot.
     """
 
     snapshot = copy.deepcopy(index_data)
@@ -531,6 +533,7 @@ def upload_new_project(
             bucket_name=bucket_name,
             on_progress=on_progress,
             ledger=ledger,
+            cancel_requested=cancel_requested,
         )
         projects = index_data.get("projects")
         if not isinstance(projects, list):
@@ -539,6 +542,16 @@ def upload_new_project(
         projects.insert(0, dict(prepared_upload.project_metadata))
         if not save_index(index_data):
             raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
+    except OperationCancelledError:
+        if ledger.uploaded_keys:
+            _emit(on_progress, ProgressEvent(kind="log", message="[ABBRUCH] Entferne bereits hochgeladene Dateien..."))
+            delete_keys(ledger.as_tuple())
+        _restore_index(index_data, snapshot)
+        return UploadResult(
+            status="cancelled",
+            project_id=str(prepared_upload.project_metadata.get("id", "")),
+            message="Upload abgebrochen. Bereits hochgeladene Dateien wurden wieder entfernt.",
+        )
     except Exception:
         if ledger.uploaded_keys:
             delete_keys(ledger.as_tuple())

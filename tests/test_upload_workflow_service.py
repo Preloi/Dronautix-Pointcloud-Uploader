@@ -256,3 +256,51 @@ def test_upload_new_project_applies_crs_info_per_source_path_to_metadata(tmp_pat
     assert json.loads((potree_dir / "metadata.json").read_text(encoding="utf-8"))["projection"] == "EPSG:4326"
     cloudjs = json.loads((potree_dir / "cloud.js").read_text(encoding="utf-8").removeprefix("cloud.js = ").rstrip(";"))
     assert cloudjs["projection"] == "EPSG:4326"
+
+
+def test_upload_new_project_cancel_during_preparation_returns_cancelled_without_uploads(tmp_path):
+    source = tmp_path / "source.copc.laz"
+    source.write_bytes(b"copc")
+    repository = FakeRepository()
+    s3_client = FakeS3Client()
+
+    result = make_service(repository, s3_client=s3_client).upload_new_project(
+        NewProjectUploadWorkflowRequest(
+            source_paths=(str(source),),
+            kunde="Kunde",
+            projekt="Projekt",
+        ),
+        converter_runner=make_converter_runner(),
+        cancel_requested=lambda: True,
+    )
+
+    assert result.status == "cancelled"
+    assert s3_client.uploads == []
+    assert repository.saved_indexes == []
+
+
+def test_upload_new_project_cancel_during_upload_rolls_back_uploaded_keys(tmp_path):
+    first = tmp_path / "first.copc.laz"
+    first.write_bytes(b"copc-1")
+    second = tmp_path / "second.copc.laz"
+    second.write_bytes(b"copc-2")
+    repository = FakeRepository()
+    s3_client = FakeS3Client()
+
+    def cancel_after_first_upload():
+        return len(s3_client.uploads) >= 1
+
+    result = make_service(repository, s3_client=s3_client).upload_new_project(
+        NewProjectUploadWorkflowRequest(
+            source_paths=(str(first), str(second)),
+            kunde="Kunde",
+            projekt="Projekt",
+        ),
+        converter_runner=make_converter_runner(),
+        cancel_requested=cancel_after_first_upload,
+    )
+
+    assert result.status == "cancelled"
+    assert "entfernt" in result.message
+    assert s3_client.deleted == [upload[2] for upload in s3_client.uploads]
+    assert repository.saved_indexes == []

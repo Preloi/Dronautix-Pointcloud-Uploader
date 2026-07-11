@@ -171,12 +171,14 @@ def create_main_window(
             self.setCentralWidget(root)
             self.statusBar().showMessage(self._runtime["status"])
 
+            self._upload_cancel_event = None
             self._upload_page = self._add_page(
                 "Upload",
                 lambda: create_upload_page(
                     QtCore,
                     QtWidgets,
                     on_start=self._handle_upload_action,
+                    on_cancel=self._request_upload_cancel,
                     defaults_provider=self._settings_dialog_defaults,
                 ),
             )
@@ -368,6 +370,12 @@ def create_main_window(
             else:
                 self._run_new_upload(form)
 
+        def _request_upload_cancel(self):
+            cancel_event = self._upload_cancel_event
+            if cancel_event is not None:
+                cancel_event.set()
+                self.statusBar().showMessage("Wird abgebrochen...")
+
         def _run_new_upload(self, form):
             upload_controller = self._runtime.get("upload_controller")
             if upload_controller is None:
@@ -404,6 +412,8 @@ def create_main_window(
                 request = dataclasses.replace(request, crs_info_by_source_path=detected_crs)
 
             self._upload_page.set_running(True)
+            cancel_event = threading.Event()
+            self._upload_cancel_event = cancel_event
             progress_callback = self._make_progress_callback(
                 ACTIVITY_ACTION_UPLOAD,
                 project=request.projekt,
@@ -413,7 +423,11 @@ def create_main_window(
             )
 
             def run_upload():
-                return upload_controller.upload_new_project(request, on_progress=progress_callback)
+                return upload_controller.upload_new_project(
+                    request,
+                    on_progress=progress_callback,
+                    cancel_requested=cancel_event.is_set,
+                )
 
             def handle_result(summary: ProjectOperationSummary):
                 self._show_project_operation_summary(
@@ -427,6 +441,7 @@ def create_main_window(
                 self._refresh_projects_page()
 
             def finish_upload():
+                self._upload_cancel_event = None
                 self._upload_page.append_log("Räume temporäre Konvertierungsdateien auf...")
                 self._upload_page.set_status("Temporäre Dateien werden aufgeräumt...")
                 shutil.rmtree(temp_output_dir, ignore_errors=True)
@@ -475,6 +490,8 @@ def create_main_window(
                 return
 
             self._upload_page.set_running(True)
+            cancel_event = threading.Event()
+            self._upload_cancel_event = cancel_event
             progress_callback = self._make_progress_callback(
                 ACTIVITY_ACTION_CONVERT,
                 actor="Lokale Konvertierung",
@@ -484,7 +501,11 @@ def create_main_window(
             )
 
             def run_conversion():
-                return local_conversion_controller.run_conversion(request, on_progress=progress_callback)
+                return local_conversion_controller.run_conversion(
+                    request,
+                    on_progress=progress_callback,
+                    cancel_requested=cancel_event.is_set,
+                )
 
             def handle_result(summary: ProjectOperationSummary):
                 self._show_project_operation_summary(
@@ -497,6 +518,7 @@ def create_main_window(
                 self._notify_operation_summary(summary, "Lokale Konvertierung")
 
             def finish_conversion():
+                self._upload_cancel_event = None
                 self._upload_page.set_running(False)
                 self._release_progress_callback(progress_callback)
 

@@ -68,15 +68,22 @@ def run_potree_conversion(
         bufsize=1,
     )
 
-    stdout: Iterable[str] = process.stdout or ()
-    for raw_line in stdout:
-        line = raw_line.strip()
-        if not line:
-            continue
-        _emit(on_progress, ProgressEvent(kind="log", message=f"[POTREE] {line}"))
-        percent = parse_potree_percent(line)
-        if percent is not None:
-            _emit(on_progress, ProgressEvent(kind="progress", percent=percent))
+    try:
+        stdout: Iterable[str] = process.stdout or ()
+        for raw_line in stdout:
+            line = raw_line.strip()
+            if not line:
+                continue
+            _emit(on_progress, ProgressEvent(kind="log", message=f"[POTREE] {line}"))
+            percent = parse_potree_percent(line)
+            if percent is not None:
+                _emit(on_progress, ProgressEvent(kind="progress", percent=percent))
+    except BaseException:
+        # Ein Abbruch aus dem Progress-Callback darf keinen verwaisten
+        # PotreeConverter-Prozess zuruecklassen.
+        process.kill()
+        process.wait()
+        raise
 
     process.wait()
     if process.returncode != 0:

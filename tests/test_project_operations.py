@@ -228,6 +228,50 @@ def test_upload_new_project_forwards_progress_events(tmp_path):
     assert events[-2].percent == 1.0
 
 
+def test_upload_new_project_cancel_rolls_back_uploaded_keys_and_returns_cancelled(tmp_path):
+    first = tmp_path / "first.copc.laz"
+    first.write_bytes(b"copc-1")
+    second = tmp_path / "second.copc.laz"
+    second.write_bytes(b"copc-2")
+    prepared_upload = build_new_project_upload(
+        sources=(
+            PointcloudSource(str(first), input_format="copc"),
+            PointcloudSource(str(second), input_format="copc"),
+        ),
+        timestamp="2026-06-21T12:00:00",
+        kunde="Kunde",
+        projekt="Projekt",
+        project_id="abc123ef",
+        project_url="https://viewer/?id=abc123ef",
+        project_viewer_root="kunde/abc123ef/projekt",
+        project_s3_prefix="pointclouds/kunde/abc123ef/projekt",
+    )
+    index_data = {"projects": [{"id": "old"}]}
+    deleted_keys = []
+    saved = []
+    s3_client = FakeS3Client()
+
+    # Abbruch, sobald die erste Datei hochgeladen wurde.
+    def cancel_after_first_upload():
+        return len(s3_client.uploads) >= 1
+
+    result = upload_new_project(
+        s3_client=s3_client,
+        index_data=index_data,
+        prepared_upload=prepared_upload,
+        save_index=lambda data: saved.append(True) or True,
+        delete_keys=lambda keys: deleted_keys.extend(keys),
+        cancel_requested=cancel_after_first_upload,
+    )
+
+    assert result.status == "cancelled"
+    assert "abgebrochen" in result.message
+    # Genau die bereits hochgeladenen Keys wurden entfernt, der Index blieb unberuehrt.
+    assert deleted_keys == [key for _bucket, key, _extra in s3_client.uploads]
+    assert index_data == {"projects": [{"id": "old"}]}
+    assert saved == []
+
+
 def test_upload_new_project_rolls_back_uploaded_keys_when_index_save_fails(tmp_path):
     copc = tmp_path / "single.copc.laz"
     copc.write_bytes(b"copc")

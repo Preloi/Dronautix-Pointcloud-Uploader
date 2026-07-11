@@ -22,8 +22,10 @@ class FakeService:
         self.calls = []
         self.result = OperationResult()
 
-    def upload_new_project(self, request, on_progress=None):
+    def upload_new_project(self, request, on_progress=None, cancel_requested=None):
         self.calls.append((request, on_progress))
+        self.cancel_callbacks = getattr(self, "cancel_callbacks", [])
+        self.cancel_callbacks.append(cancel_requested)
         return self.result
 
 

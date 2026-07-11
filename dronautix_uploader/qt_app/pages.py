@@ -262,6 +262,7 @@ def create_upload_page(
     QtWidgets,
     *,
     on_start: Callable[[], None] | None = None,
+    on_cancel: Callable[[], None] | None = None,
     defaults_provider: Callable[[], object] | None = None,
 ):
     """Single-screen upload + local conversion form (no modal, no stepper)."""
@@ -464,6 +465,12 @@ def create_upload_page(
     progress_bar.setTextVisible(True)
     progress_bar.hide()
     action_row.addWidget(progress_bar, 1)
+    cancel_button = QtWidgets.QPushButton("Abbrechen")
+    cancel_button.setObjectName("ActionButton")
+    cancel_button.setCursor(QtCore.Qt.PointingHandCursor)
+    cancel_button.setToolTip("Laufenden Vorgang abbrechen; bereits hochgeladene Dateien werden entfernt")
+    cancel_button.hide()
+    action_row.addWidget(cancel_button)
     start_button = QtWidgets.QPushButton("Hochladen")
     start_button.setObjectName("PrimaryButton")
     start_button.setMinimumWidth(160)
@@ -652,11 +659,14 @@ def create_upload_page(
             progress_bar.setRange(0, 0)
             progress_bar.setFormat("Wird vorbereitet...")
             progress_bar.show()
+            cancel_button.setEnabled(on_cancel is not None)
+            cancel_button.setVisible(on_cancel is not None)
             log_view.clear()
             log_view.show()
         else:
             start_button.setEnabled(on_start is not None)
             progress_bar.hide()
+            cancel_button.hide()
 
     def set_status(text: str):
         text = str(text or "").strip()
@@ -702,6 +712,13 @@ def create_upload_page(
             if message:
                 progress_bar.setFormat(message[:60])
 
+    def request_cancel():
+        if on_cancel is None:
+            return
+        cancel_button.setEnabled(False)
+        set_status("Wird abgebrochen...")
+        on_cancel()
+
     files_button.clicked.connect(browse_files)
     folder_button.clicked.connect(browse_folder)
     remove_button.clicked.connect(remove_selected_sources)
@@ -710,6 +727,7 @@ def create_upload_page(
     mode_upload_button.clicked.connect(lambda checked=False: apply_mode(UPLOAD_MODE_UPLOAD))
     mode_convert_button.clicked.connect(lambda checked=False: apply_mode(UPLOAD_MODE_CONVERT))
     start_button.clicked.connect(lambda checked=False: on_start() if on_start else None)
+    cancel_button.clicked.connect(lambda checked=False: request_cancel())
 
     prefill_advanced_defaults()
     set_output_row_visible(False)

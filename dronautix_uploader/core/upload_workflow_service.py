@@ -9,7 +9,14 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from .constants import BUCKET_NAME
-from .contracts import PointcloudSource, ProgressCallback
+from .contracts import (
+    CancelCallback,
+    OperationCancelledError,
+    PointcloudSource,
+    ProgressCallback,
+    UploadResult,
+    make_cancel_guarded_progress,
+)
 from .local_conversion_service import ConverterRunner
 from .metadata_service import write_potree_metadata_crs_for_sources
 from .naming_service import build_project_paths
@@ -58,22 +65,31 @@ class UploadWorkflowService:
         request: NewProjectUploadWorkflowRequest,
         on_progress: ProgressCallback | None = None,
         converter_runner: ConverterRunner | None = None,
+        cancel_requested: CancelCallback | None = None,
     ):
         if not request.kunde.strip():
             raise ValueError("Kunde ist fuer den Upload erforderlich.")
         if not request.projekt.strip():
             raise ValueError("Projektname ist fuer den Upload erforderlich.")
 
-        prepared_sources = prepare_pointcloud_sources(
-            PointcloudPreparationRequest(
-                sources=tuple(request.source_paths),
-                converter_path=request.converter_path,
-                output_base_dir=request.output_base_dir,
-                overwrite=request.overwrite,
-            ),
-            on_progress=on_progress,
-            converter_runner=converter_runner,
-        )
+        # Die Konvertierungsphase kennt keinen eigenen Abbruch-Parameter;
+        # der Guard prueft bei jedem Progress-Event (Potree loggt laufend).
+        guarded_progress = make_cancel_guarded_progress(on_progress, cancel_requested)
+        try:
+            prepared_sources = prepare_pointcloud_sources(
+                PointcloudPreparationRequest(
+                    sources=tuple(request.source_paths),
+                    converter_path=request.converter_path,
+                    output_base_dir=request.output_base_dir,
+                    overwrite=request.overwrite,
+                ),
+                on_progress=guarded_progress,
+                converter_runner=converter_runner,
+            )
+        except OperationCancelledError:
+            return UploadResult(status="cancelled", message="Upload abgebrochen.")
+        if cancel_requested is not None and cancel_requested():
+            return UploadResult(status="cancelled", message="Upload abgebrochen.")
         prepared_sources = _attach_crs_info(prepared_sources, request.source_paths, request.crs_info_by_source_path)
         write_potree_metadata_crs_for_sources(prepared_sources)
 
@@ -98,6 +114,7 @@ class UploadWorkflowService:
             delete_keys=lambda keys: delete_s3_objects(self.s3_client, keys, bucket_name=self._bucket_name),
             on_progress=on_progress,
             bucket_name=self._bucket_name,
+            cancel_requested=cancel_requested,
         )
 
     def _save_projects_index(self, index_data: dict[str, Any]) -> bool:

@@ -29,6 +29,35 @@ ProgressCallback = Callable[[ProgressEvent], None]
 CancelCallback = Callable[[], bool]
 
 
+class OperationCancelledError(RuntimeError):
+    """Raised when a running operation is cancelled by the caller."""
+
+    def __init__(self, message: str = "Vorgang wurde abgebrochen.") -> None:
+        super().__init__(message)
+
+
+def make_cancel_guarded_progress(
+    on_progress: ProgressCallback | None,
+    cancel_requested: CancelCallback | None,
+) -> ProgressCallback | None:
+    """Wrap a progress callback so every emitted event checks for cancellation.
+
+    Long-running phases (e.g. PotreeConverter) emit progress continuously, so
+    raising from the callback stops them promptly without changing their API.
+    """
+
+    if cancel_requested is None:
+        return on_progress
+
+    def guarded(event: ProgressEvent) -> None:
+        if cancel_requested():
+            raise OperationCancelledError()
+        if on_progress is not None:
+            on_progress(event)
+
+    return guarded
+
+
 @dataclass(frozen=True)
 class PointcloudSource:
     source_path: str
