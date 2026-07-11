@@ -16,10 +16,8 @@ from dronautix_uploader.qt_app.dashboard_settings_model import example_settings_
 from dronautix_uploader.qt_app.pages import (
     _dispatch_project_action,
     _resolve_activity_preview,
-    _resolve_local_conversion_preview,
     _resolve_project_previews,
     _resolve_settings_preview,
-    _resolve_upload_preview,
 )
 from dronautix_uploader.qt_app.project_management import example_project_previews
 
@@ -38,7 +36,6 @@ def test_qt_preview_modules_import_without_pyside6():
         "dronautix_uploader.qt_app.pages",
         "dronautix_uploader.qt_app.local_conversion_controller",
         "dronautix_uploader.qt_app.local_conversion_dialog_models",
-        "dronautix_uploader.qt_app.local_conversion_dialogs",
         "dronautix_uploader.qt_app.path_drop",
         "dronautix_uploader.qt_app.project_management_actions",
         "dronautix_uploader.qt_app.project_management_controller",
@@ -50,7 +47,6 @@ def test_qt_preview_modules_import_without_pyside6():
         "dronautix_uploader.qt_app.task_worker",
         "dronautix_uploader.qt_app.style",
         "dronautix_uploader.qt_app.upload_dialog_models",
-        "dronautix_uploader.qt_app.upload_dialogs",
         "dronautix_uploader.qt_app.upload_workflow_controller",
         "dronautix_uploader.qt_app.upload_wizard_model",
     ):
@@ -135,7 +131,8 @@ def test_projects_page_preview_source_can_be_injected_without_qt():
     assert _resolve_project_previews(project_previews=injected) == injected
     assert _resolve_project_previews(project_provider=lambda: injected) == injected
     assert _resolve_project_previews(project_provider=Provider())[0].project_id == "provided"
-    assert _resolve_project_previews()
+    # Ohne Provider bleibt die Liste leer; es werden keine Beispieldaten angezeigt.
+    assert _resolve_project_previews() == ()
 
 
 def test_projects_page_provider_errors_do_not_break_preview_resolution():
@@ -165,7 +162,8 @@ def test_activity_page_preview_source_can_be_injected_without_qt():
     assert _resolve_activity_preview(activity_preview=preview) is preview
     assert _resolve_activity_preview(activity_provider=lambda: (entry,)).entries == (entry,)
     assert _resolve_activity_preview(activity_provider=lambda: preview) is preview
-    assert _resolve_activity_preview().entries
+    # Ohne Provider startet das Protokoll leer statt mit Beispieldaten.
+    assert _resolve_activity_preview().entries == ()
 
 
 def test_settings_page_preview_source_can_be_injected_without_qt():
@@ -174,59 +172,6 @@ def test_settings_page_preview_source_can_be_injected_without_qt():
     assert _resolve_settings_preview(settings_preview=preview) is preview
     assert _resolve_settings_preview(settings_provider=lambda: preview) is preview
     assert _resolve_settings_preview().settings_status
-
-
-def test_upload_page_preview_source_can_be_injected_without_qt():
-    from dronautix_uploader.qt_app.upload_wizard_model import example_upload_wizard_preview
-
-    preview = example_upload_wizard_preview()
-
-    assert _resolve_upload_preview(upload_preview=preview) is preview
-    assert _resolve_upload_preview(upload_preview_provider=lambda: preview) is preview
-    assert _resolve_upload_preview().steps
-
-
-def test_local_conversion_page_preview_source_can_be_injected_without_qt():
-    from dronautix_uploader.qt_app.local_conversion_model import build_local_conversion_preview
-
-    preview = build_local_conversion_preview(output_dir="C:/Output", converter_path="converter.exe")
-
-    assert _resolve_local_conversion_preview(local_conversion_preview=preview) is preview
-    assert _resolve_local_conversion_preview(local_conversion_preview_provider=lambda: preview) is preview
-    assert _resolve_local_conversion_preview().steps
-
-
-def test_runtime_upload_preview_uses_settings_defaults_without_example_sources():
-    from dronautix_uploader.qt_app.main_window import build_runtime_upload_preview
-    from dronautix_uploader.qt_app.settings_controller import SettingsFormState
-
-    preview = build_runtime_upload_preview(
-        SettingsFormState(
-            converter_path="C:/Tools/PotreeConverter.exe",
-            output_base_dir="C:/Output",
-        )
-    )
-
-    assert preview.project_name == "Unbenanntes Projekt"
-    assert preview.customer == "Ohne Kunde"
-    assert preview.sources == ()
-    assert "Kunde darf nicht leer sein." in [entry.message for entry in preview.log_entries]
-
-
-def test_runtime_local_conversion_preview_uses_settings_defaults_without_qt():
-    from dronautix_uploader.qt_app.main_window import build_runtime_local_conversion_preview
-    from dronautix_uploader.qt_app.settings_controller import SettingsFormState
-
-    preview = build_runtime_local_conversion_preview(
-        SettingsFormState(
-            converter_path="C:/Tools/PotreeConverter.exe",
-            output_base_dir="C:/Output",
-        )
-    )
-
-    assert preview.source_file == "Keine Quelle ausgewählt"
-    assert preview.output_dir == "C:/Output"
-    assert preview.converter_path == "C:/Tools/PotreeConverter.exe"
 
 
 def test_runtime_project_rows_accept_callable_or_service_provider_without_qt():
@@ -338,14 +283,10 @@ def test_main_window_records_detail_progress_events_but_not_high_frequency_progr
 
 
 def test_runtime_dialogs_accept_settings_defaults_without_qt():
-    from dronautix_uploader.qt_app.local_conversion_dialogs import prompt_local_conversion
     from dronautix_uploader.qt_app.project_management_dialogs import (
         prompt_replace_all_pointclouds,
         prompt_replace_single_pointcloud,
     )
-    from dronautix_uploader.qt_app.upload_dialogs import prompt_new_upload
 
-    assert "defaults" in inspect.signature(prompt_new_upload).parameters
-    assert "defaults" in inspect.signature(prompt_local_conversion).parameters
     assert "defaults" in inspect.signature(prompt_replace_all_pointclouds).parameters
     assert "defaults" in inspect.signature(prompt_replace_single_pointcloud).parameters

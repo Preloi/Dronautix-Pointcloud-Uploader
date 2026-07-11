@@ -210,11 +210,17 @@ def progress_event_to_activity_entry(
     )
 
 
-def _format_progress_percent(percent: float) -> str:
+def normalize_progress_value(percent: float) -> int:
+    """Map core progress (Bruch 0..1 oder Prozent >1) auf 0..100 fuer Balken."""
+
     value = float(percent)
     if 0 <= value <= 1:
         value *= 100
-    return f"{value:.0f}%"
+    return max(0, min(100, int(round(value))))
+
+
+def _format_progress_percent(percent: float) -> str:
+    return f"{normalize_progress_value(percent)}%"
 
 
 def operation_summary_to_activity_entry(
@@ -482,6 +488,7 @@ __all__ = [
     "filter_activity_entries",
     "format_activity_detail",
     "format_activity_search_text",
+    "normalize_progress_value",
     "operation_summary_to_activity_entry",
     "progress_event_to_activity_entry",
     "severity_filter_accepts",

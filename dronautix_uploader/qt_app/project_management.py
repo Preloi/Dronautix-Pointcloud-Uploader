@@ -114,19 +114,26 @@ def status_filter_accepts(disabled: bool, selected_status: str) -> bool:
     return True
 
 
+def project_scope_label(pointcloud_count: int) -> str:
+    """Return "Einzel" or "Multi" depending on the number of pointclouds."""
+
+    return "Multi" if pointcloud_count > 1 else "Einzel"
+
+
 def make_project_preview(project: dict[str, Any], disabled: bool) -> ProjectPreview:
     """Create a preview row from project-index-like data."""
 
+    pointclouds = tuple(_make_pointcloud_previews(project))
     return ProjectPreview(
         project_id=str(project.get("id", "")).strip(),
         project=str(project.get("projekt", "")).strip() or "Unbenanntes Projekt",
         customer=str(project.get("kunde", "")).strip() or "Ohne Kunde",
-        format=str(project.get("format", "")).strip() or str(project.get("pointcloud_format", "")).strip() or "Multi",
+        format=project_scope_label(len(pointclouds)),
         updated=format_project_datum(project.get("datum", "")),
         updated_sort=project_datum_sort_key(project.get("datum", "")),
         link=str(project.get("link", "")).strip(),
         disabled=bool(disabled),
-        pointclouds=tuple(_make_pointcloud_previews(project)),
+        pointclouds=pointclouds,
         s3_path=str(project.get("s3_path", "")).strip(),
         viewer_path=str(project.get("viewer_path", "")).strip(),
     )

@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from app_version import APP_VERSION
+
 
 APP_MODE_PREVIEW = "preview"
 APP_MODE_FINAL = "final"
@@ -43,9 +45,9 @@ FINAL_IDENTITY = QtAppIdentity(
     mode=APP_MODE_FINAL,
     application_name="Dronautix Pointcloud Uploader",
     window_title="Dronautix Pointcloud Uploader",
-    sidebar_badge="V2",
+    sidebar_badge=f"Version {APP_VERSION}",
     uses_preview_config=False,
-    default_runtime_status="Projektverwaltung nicht verbunden; Konfiguration prüfen",
+    default_runtime_status="Nicht verbunden - AWS-Zugangsdaten in den Einstellungen hinterlegen",
 )
 
 

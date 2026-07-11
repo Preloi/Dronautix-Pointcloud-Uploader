@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-from .dashboard_settings_model import (
-    UPDATE_CHANNEL_MANUAL,
-    UPDATE_CHANNEL_PREVIEW,
-    UPDATE_CHANNEL_STABLE,
-)
+from .dashboard_settings_model import UPDATE_CHANNELS
 from .settings_controller import SettingsFormState
 
 
@@ -31,7 +27,7 @@ def prompt_settings(QtWidgets, parent, state: SettingsFormState):
     converter_input = QtWidgets.QLineEdit(state.converter_path)
     output_input = QtWidgets.QLineEdit(state.output_base_dir)
     update_channel_input = QtWidgets.QComboBox()
-    update_channel_input.addItems([UPDATE_CHANNEL_STABLE, UPDATE_CHANNEL_PREVIEW, UPDATE_CHANNEL_MANUAL])
+    update_channel_input.addItems(list(UPDATE_CHANNELS))
     update_channel_index = update_channel_input.findText(state.update_channel)
     if update_channel_index >= 0:
         update_channel_input.setCurrentIndex(update_channel_index)
@@ -41,7 +37,7 @@ def prompt_settings(QtWidgets, parent, state: SettingsFormState):
     form.addRow("S3 Bucket", bucket_input)
     form.addRow("Potree Converter", converter_input)
     form.addRow("Output-Ordner", output_input)
-    form.addRow("Update-Kanal", update_channel_input)
+    form.addRow("Updates", update_channel_input)
     layout.addLayout(form)
 
     browse_row = QtWidgets.QHBoxLayout()

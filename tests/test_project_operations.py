@@ -395,6 +395,53 @@ def test_duplicate_project_copies_s3_objects_and_inserts_active_multi_clone():
     assert deleted == []
 
 
+def test_duplicate_project_emits_step_and_copy_progress_events():
+    source_project = {
+        "id": "oldid",
+        "kunde": "Alt",
+        "projekt": "Altprojekt",
+        "link": "https://viewer/?id=oldid",
+        "viewer_path": "alt/oldid/altprojekt",
+        "s3_path": "pointclouds/alt/oldid/altprojekt",
+    }
+    s3_client = FakeProjectS3Client(
+        pages=[
+            {
+                "Contents": [
+                    {"Key": "pointclouds/alt/oldid/altprojekt/cloud.js", "Size": 10},
+                    {"Key": "pointclouds/alt/oldid/altprojekt/metadata.json", "Size": 10},
+                ]
+            }
+        ]
+    )
+    events = []
+
+    result = duplicate_project(
+        s3_client=s3_client,
+        index_data={"projects": []},
+        source_project=source_project,
+        timestamp="2026-06-21T13:00:00",
+        new_kunde="Neu",
+        new_projekt="Neuprojekt",
+        new_project_id="newid",
+        new_project_url="https://viewer/?id=newid",
+        new_viewer_root="neu/newid/neuprojekt",
+        new_s3_prefix="pointclouds/neu/newid/neuprojekt",
+        save_index=lambda data: True,
+        delete_keys=lambda keys: None,
+        on_progress=events.append,
+    )
+
+    assert result.status == "success"
+    steps = [(event.step, event.total_steps) for event in events if event.kind == "step"]
+    copy_events = [event for event in events if event.kind == "progress"]
+    assert steps == [(1, 3), (2, 3), (3, 3)]
+    # Byte-gewichteter Fortschritt (Bruch 0..1) ueber beide 10-Byte-Dateien.
+    assert [event.percent for event in copy_events] == [0.5, 1.0]
+    assert "2/2" in copy_events[-1].message
+    assert "20" in copy_events[-1].detail.replace(",", ".") or "Bytes" in copy_events[-1].detail
+
+
 def test_duplicate_project_rolls_back_copied_keys_when_index_save_fails():
     source_project = {"id": "oldid", "s3_path": "pointclouds/old"}
     s3_client = FakeProjectS3Client(pages=[{"Contents": [{"Key": "pointclouds/old/cloud.js", "Size": 10}]}])

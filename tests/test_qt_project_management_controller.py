@@ -45,7 +45,7 @@ class FakeService:
         self.calls.append(("rename_project", project_id, new_kunde, new_projekt, tuple(pointcloud_names)))
         return self.result
 
-    def duplicate_project(self, project_id, new_kunde, new_projekt):
+    def duplicate_project(self, project_id, new_kunde, new_projekt, on_progress=None):
         self.calls.append(("duplicate_project", project_id, new_kunde, new_projekt))
         return self.result
 

@@ -25,7 +25,7 @@ class RuntimeControllerBundle:
     project_controller: Any | None = None
     upload_controller: Any | None = None
     core_api: CoreServiceApi | None = None
-    status: str = "Qt Preview - Projektverwaltung nutzt Beispieldaten"
+    status: str = "Nicht verbunden - AWS-Zugangsdaten in den Einstellungen hinterlegen"
 
     @property
     def ready(self) -> bool:
@@ -47,7 +47,7 @@ def create_runtime_controller_bundle(
 
     if not config.ready and s3_client is None:
         missing = ", ".join(config.missing_fields)
-        return RuntimeControllerBundle(status=f"Projektverwaltung nicht verbunden; fehlende Credentials: {missing}")
+        return RuntimeControllerBundle(status=f"Nicht verbunden - fehlende Angaben in den Einstellungen: {missing}")
 
     try:
         project_service = create_project_management_service(
@@ -59,7 +59,7 @@ def create_runtime_controller_bundle(
         upload_service = create_upload_workflow_service(config, s3_client=client)
         core_api = CoreServiceApi(project_service=project_service, upload_service=upload_service)
     except RuntimeError as exc:
-        return RuntimeControllerBundle(status=f"Projektverwaltung nicht verbunden: {exc}")
+        return RuntimeControllerBundle(status=f"Nicht verbunden: {exc}")
 
     from .project_management_controller import ProjectManagementController
     from .upload_workflow_controller import UploadWorkflowController

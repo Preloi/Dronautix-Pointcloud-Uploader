@@ -11,6 +11,7 @@ from .contracts import (
     CancelCallback,
     PointcloudSource,
     ProgressCallback,
+    ProgressEvent,
     ProjectOperationResult,
     UploadedKeyLedger,
     UploadResult,
@@ -30,6 +31,11 @@ from .s3_service import (
     download_project_objects,
     upload_files_to_s3,
 )
+
+
+def _emit(callback: ProgressCallback | None, event: ProgressEvent) -> None:
+    if callback:
+        callback(event)
 
 
 @dataclass(frozen=True)
@@ -692,6 +698,7 @@ def duplicate_project(
     save_index: Callable[[dict[str, Any]], bool],
     delete_keys: Callable[[tuple[str, ...]], None],
     bucket_name: str = BUCKET_NAME,
+    on_progress: ProgressCallback | None = None,
 ) -> ProjectOperationResult:
     source_s3_path = str(source_project.get("s3_path", "")).strip()
     if not source_s3_path:
@@ -700,16 +707,25 @@ def duplicate_project(
     snapshot = copy.deepcopy(index_data)
     copied_keys: tuple[str, ...] = ()
     try:
-        source_keys = collect_project_objects(s3_client, source_s3_path, bucket_name=bucket_name)
+        _emit(on_progress, ProgressEvent(kind="step", step=1, total_steps=3, message="Ermittle Projektdateien..."))
+        source_entries = collect_project_object_entries(s3_client, source_s3_path, bucket_name=bucket_name)
+        source_keys = [str(entry["Key"]) for entry in source_entries]
         if not source_keys:
             raise ValueError("Keine Dateien im Quellprojekt gefunden.")
+        _emit(
+            on_progress,
+            ProgressEvent(kind="step", step=2, total_steps=3, message=f"Kopiere {len(source_keys)} Dateien..."),
+        )
         copied_keys = copy_project_objects(
             s3_client,
             source_keys,
             source_s3_path,
             new_s3_prefix,
             bucket_name=bucket_name,
+            on_progress=on_progress,
+            source_sizes={str(entry["Key"]): int(entry.get("Size", 0) or 0) for entry in source_entries},
         )
+        _emit(on_progress, ProgressEvent(kind="step", step=3, total_steps=3, message="Speichere Projekt-Index..."))
         new_project = build_duplicate_project_metadata(
             source_project=source_project,
             timestamp=timestamp,

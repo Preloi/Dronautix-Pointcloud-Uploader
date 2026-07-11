@@ -25,7 +25,6 @@ from .dashboard_settings_model import (
     SettingsPreview,
     converter_status,
     credential_status,
-    make_preview_hints,
     output_folder_status,
     update_channel_status,
 )
@@ -160,7 +159,6 @@ class SettingsController:
             converter_bundle=bundled_converter_path,
             converter_override=configured_converter or "Kein Override",
             aws_profile="Direkte Keys" if state.aws_access_key_id else "Nicht gesetzt",
-            preview_hints=make_preview_hints(False),
         )
 
 

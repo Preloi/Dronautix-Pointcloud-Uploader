@@ -1,4 +1,4 @@
-"""Page factories for the Qt preview UI."""
+"""Page factories for the QtWidgets app."""
 
 from __future__ import annotations
 
@@ -15,25 +15,16 @@ from .activity_model import (
     SEVERITY_FILTERS,
     STATUS_ALL as ACTIVITY_STATUS_ALL,
     STATUS_FILTERS as ACTIVITY_STATUS_FILTERS,
-    example_activity_preview,
     format_activity_detail,
     format_activity_search_text,
+    normalize_progress_value,
 )
 from .dashboard_settings_model import (
-    DashboardPreview,
     SettingsPreview,
-    UPDATE_CHANNEL_MANUAL,
-    UPDATE_CHANNEL_PREVIEW,
-    UPDATE_CHANNEL_STABLE,
-    example_dashboard_preview,
+    UPDATE_CHANNELS,
     example_settings_preview,
     settings_status_action_id,
     status_level_label,
-)
-from .local_conversion_model import (
-    LocalConversionPreview,
-    example_local_conversion_preview,
-    format_supported_formats,
 )
 from dronautix_uploader.core.crs_detection import detect_pointcloud_crs, normalize_crs_value
 from dronautix_uploader.core.crs_service import get_crs_display_value, get_vertical_crs_display_value
@@ -43,7 +34,6 @@ from .project_management import (
     ProjectPreview,
     STATUS_ALL,
     STATUS_FILTERS,
-    example_project_previews,
     load_project_previews,
     status_filter_accepts,
 )
@@ -63,9 +53,6 @@ from .project_management_actions import (
 )
 from .settings_controller import SettingsFormState
 from .upload_wizard_model import (
-    UploadWizardPreview,
-    example_upload_wizard_preview,
-    format_source_summary,
     source_format_label,
     source_handling_label,
 )
@@ -86,108 +73,6 @@ class UploadFormInputs:
     horizontal_crs: str
     vertical_crs: str
     overwrite: bool
-
-
-def create_placeholder_page(QtWidgets, title: str):
-    page = QtWidgets.QWidget()
-    page.setObjectName("Page")
-    layout = QtWidgets.QVBoxLayout(page)
-    layout.setContentsMargins(32, 28, 32, 28)
-    layout.setSpacing(16)
-
-    heading = QtWidgets.QLabel(title)
-    heading.setObjectName("PageTitle")
-    body = QtWidgets.QLabel("Preview-Seite ohne Service-Integration.")
-    body.setObjectName("MutedText")
-    body.setWordWrap(True)
-
-    layout.addWidget(heading)
-    layout.addWidget(body)
-    layout.addStretch(1)
-    return page
-
-
-def create_dashboard_page(
-    QtCore,
-    QtWidgets,
-    *,
-    dashboard_preview: DashboardPreview | None = None,
-    dashboard_provider: Callable[[], DashboardPreview] | None = None,
-    on_dashboard_action: Callable[[str], None] | None = None,
-):
-    preview = _resolve_dashboard_preview(dashboard_preview, dashboard_provider)
-
-    page = QtWidgets.QWidget()
-    page.setObjectName("Page")
-    root = QtWidgets.QVBoxLayout(page)
-    root.setContentsMargins(32, 28, 32, 28)
-    root.setSpacing(18)
-
-    header = QtWidgets.QHBoxLayout()
-    title_box = QtWidgets.QVBoxLayout()
-    title = QtWidgets.QLabel("Dashboard")
-    title.setObjectName("PageTitle")
-    subtitle = QtWidgets.QLabel("Statusübersicht für Upload-Bereitschaft, Settings und Cutover.")
-    subtitle.setObjectName("MutedText")
-    title_box.addWidget(title)
-    title_box.addWidget(subtitle)
-    header.addLayout(title_box, 1)
-
-    badge = QtWidgets.QLabel("V2 Preview")
-    badge.setObjectName("PreviewBadgeLight")
-    badge.setAlignment(QtCore.Qt.AlignCenter)
-    header.addWidget(badge)
-    root.addLayout(header)
-
-    status_row = QtWidgets.QHBoxLayout()
-    status_row.setSpacing(12)
-    root.addLayout(status_row)
-
-    quick_actions = QtWidgets.QHBoxLayout()
-    quick_actions.setSpacing(10)
-    for label, action_id in (
-        ("Upload starten", "start_upload"),
-        ("Projektverwaltung", "open_project_management"),
-        ("Einstellungen", "open_settings"),
-        ("Aktivitäten", "open_activity"),
-    ):
-        button = QtWidgets.QPushButton(label)
-        button.setObjectName("ActionButton")
-        button.setCursor(QtCore.Qt.PointingHandCursor)
-        button.setEnabled(on_dashboard_action is not None)
-        if on_dashboard_action is not None:
-            button.clicked.connect(
-                lambda checked=False, selected_action=action_id: on_dashboard_action(selected_action)
-            )
-        quick_actions.addWidget(button)
-    quick_actions.addStretch(1)
-    root.addLayout(quick_actions)
-
-    content = QtWidgets.QHBoxLayout()
-    content.setSpacing(18)
-    root.addLayout(content, 1)
-
-    def render_dashboard():
-        nonlocal preview
-        preview = _resolve_dashboard_preview(dashboard_preview, dashboard_provider)
-        _clear_layout_widgets(status_row)
-        for card in preview.status_cards:
-            status_row.addWidget(_create_status_card(QtCore, QtWidgets, card, on_card_action=on_dashboard_action))
-        _clear_layout_widgets(content)
-        content.addWidget(
-            _create_settings_status_panel(
-                QtWidgets,
-                "Settings-Status",
-                preview.settings_status,
-                on_item_action=on_dashboard_action,
-            ),
-            2,
-        )
-        content.addWidget(_create_hint_panel(QtWidgets, "Preview / Cutover", preview.cutover_hints), 1)
-
-    render_dashboard()
-    page.reload_dashboard = render_dashboard
-    return page
 
 
 def create_settings_page(
@@ -213,7 +98,7 @@ def create_settings_page(
     title_box = QtWidgets.QVBoxLayout()
     title = QtWidgets.QLabel("Einstellungen")
     title.setObjectName("PageTitle")
-    subtitle = QtWidgets.QLabel("AWS, S3, Converter, Ausgabeordner und Update-Kanal konfigurieren.")
+    subtitle = QtWidgets.QLabel("AWS-Zugang, Converter, Ausgabeordner und Updates.")
     subtitle.setObjectName("MutedText")
     title_box.addWidget(title)
     title_box.addWidget(subtitle)
@@ -253,7 +138,7 @@ def create_settings_page(
     converter_input.setObjectName("ConverterPathInput")
     output_input.setObjectName("OutputDirInput")
     update_channel_input.setObjectName("UpdateChannelInput")
-    update_channel_input.addItems([UPDATE_CHANNEL_STABLE, UPDATE_CHANNEL_PREVIEW, UPDATE_CHANNEL_MANUAL])
+    update_channel_input.addItems(list(UPDATE_CHANNELS))
 
     form.addRow("AWS Access Key", access_input)
     form.addRow("AWS Secret Key", secret_input)
@@ -261,7 +146,7 @@ def create_settings_page(
     form.addRow("S3 Bucket", bucket_input)
     form.addRow("Potree Converter", converter_input)
     form.addRow("Output-Ordner", output_input)
-    form.addRow("Update-Kanal", update_channel_input)
+    form.addRow("Updates", update_channel_input)
     form_root.addLayout(form)
 
     browse_row = QtWidgets.QHBoxLayout()
@@ -356,8 +241,7 @@ def create_settings_page(
         apply_state_to_inputs(state)
         _clear_layout_widgets(status_container)
         status_container.addWidget(_create_settings_status_panel(QtWidgets, "Status", preview.settings_status))
-        status_container.addWidget(_create_settings_detail_panel(QtWidgets, preview))
-        status_container.addWidget(_create_hint_panel(QtWidgets, "Hinweise", preview.preview_hints))
+        status_container.addStretch(1)
 
     converter_button.clicked.connect(browse_converter)
     output_button.clicked.connect(browse_output)
@@ -395,7 +279,7 @@ def create_upload_page(
     title_box = QtWidgets.QVBoxLayout()
     title = QtWidgets.QLabel("Upload")
     title.setObjectName("PageTitle")
-    subtitle = QtWidgets.QLabel("Punktwolken hochladen oder lokal konvertieren - alles auf einem Screen.")
+    subtitle = QtWidgets.QLabel("Punktwolken konvertieren und zu S3 hochladen.")
     subtitle.setObjectName("MutedText")
     title_box.addWidget(title)
     title_box.addWidget(subtitle)
@@ -507,7 +391,7 @@ def create_upload_page(
     # --- Advanced (collapsible) --------------------------------------------
     advanced_toggle = QtWidgets.QToolButton()
     advanced_toggle.setObjectName("AdvancedToggle")
-    advanced_toggle.setText("Erweitert (CRS, Converter, Ausgabeordner)")
+    advanced_toggle.setText("Erweitert (CRS, Ausgabeordner)")
     advanced_toggle.setCheckable(True)
     advanced_toggle.setCursor(QtCore.Qt.PointingHandCursor)
     advanced_toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
@@ -714,9 +598,9 @@ def create_upload_page(
         set_output_row_visible(is_convert)
         start_button.setText("Konvertieren" if is_convert else "Hochladen")
         subtitle.setText(
-            "LAS/LAZ lokal in ein Potree-Projekt konvertieren - ohne Upload."
+            "LAS/LAZ lokal in ein Potree-Projekt konvertieren, ohne Upload."
             if is_convert
-            else "Punktwolken hochladen - Konvertierung erfolgt automatisch in einem temporären Ordner."
+            else "Punktwolken konvertieren und zu S3 hochladen."
         )
         if is_convert and len(state["sources"]) > 1:
             state["sources"] = state["sources"][-1:]
@@ -807,7 +691,7 @@ def create_upload_page(
         total = getattr(event, "total_steps", None)
         if percent is not None:
             progress_bar.setRange(0, 100)
-            progress_bar.setValue(max(0, min(100, int(percent))))
+            progress_bar.setValue(normalize_progress_value(percent))
             progress_bar.setFormat("%p%")
         elif step is not None and total:
             progress_bar.setRange(0, int(total))
@@ -885,71 +769,6 @@ def _create_source_drop_list(
     return SourceDropList()
 
 
-def create_local_conversion_page(
-    QtCore,
-    QtWidgets,
-    on_local_conversion_action: Callable[[], None] | None = None,
-    *,
-    local_conversion_preview: LocalConversionPreview | None = None,
-    local_conversion_preview_provider: Callable[[], LocalConversionPreview] | None = None,
-):
-    preview = _resolve_local_conversion_preview(local_conversion_preview, local_conversion_preview_provider)
-
-    page = QtWidgets.QWidget()
-    page.setObjectName("Page")
-    root = QtWidgets.QVBoxLayout(page)
-    root.setContentsMargins(32, 28, 32, 28)
-    root.setSpacing(18)
-
-    header = QtWidgets.QHBoxLayout()
-    title_box = QtWidgets.QVBoxLayout()
-    title = QtWidgets.QLabel("Lokale Konvertierung")
-    title.setObjectName("PageTitle")
-    subtitle = QtWidgets.QLabel("LAS/LAZ lokal in ein Potree-Projekt konvertieren, ohne Upload.")
-    subtitle.setObjectName("MutedText")
-    title_box.addWidget(title)
-    title_box.addWidget(subtitle)
-    header.addLayout(title_box, 1)
-
-    formats = QtWidgets.QLabel(f"Unterstützt: {format_supported_formats(preview.supported_formats)}")
-    formats.setObjectName("PreviewBadgeLight")
-    formats.setAlignment(QtCore.Qt.AlignCenter)
-    header.addWidget(formats)
-    convert_button = QtWidgets.QPushButton("Konvertierung starten")
-    convert_button.setObjectName("ActionButton")
-    convert_button.clicked.connect(
-        lambda checked=False: on_local_conversion_action() if on_local_conversion_action else None
-    )
-    header.addWidget(convert_button)
-    root.addLayout(header)
-
-    content = QtWidgets.QHBoxLayout()
-    content.setSpacing(18)
-
-    step_panel = QtWidgets.QFrame()
-    step_panel.setObjectName("WizardStepPanel")
-    step_layout = QtWidgets.QVBoxLayout(step_panel)
-    step_layout.setContentsMargins(18, 18, 18, 18)
-    step_layout.setSpacing(12)
-    step_heading = QtWidgets.QLabel("Konvertierungsablauf")
-    step_heading.setObjectName("PanelTitle")
-    step_layout.addWidget(step_heading)
-    for step in preview.steps:
-        step_layout.addWidget(_create_step_item(QtCore, QtWidgets, step))
-    step_layout.addStretch(1)
-    content.addWidget(step_panel, 0)
-
-    main_panel = QtWidgets.QVBoxLayout()
-    main_panel.setSpacing(16)
-    main_panel.addWidget(_create_local_conversion_source_panel(QtWidgets, preview))
-    main_panel.addWidget(_create_local_conversion_target_panel(QtWidgets, preview))
-    main_panel.addWidget(_create_local_conversion_log_panel(QtWidgets, preview), 1)
-    content.addLayout(main_panel, 1)
-
-    root.addLayout(content, 1)
-    return page
-
-
 ProjectProvider = Callable[[], Iterable[ProjectPreview]]
 ProjectActionCallback = Callable[..., None]
 ActivityProvider = Callable[[], ActivityPreview | Iterable[ActivityLogEntry]]
@@ -1013,7 +832,7 @@ def create_projects_page(
     title_box = QtWidgets.QVBoxLayout()
     title = QtWidgets.QLabel("Projektverwaltung")
     title.setObjectName("PageTitle")
-    subtitle = QtWidgets.QLabel("Projekte suchen, filtern und vorbereitete Aktionen prüfen.")
+    subtitle = QtWidgets.QLabel("Projekte suchen, prüfen und verwalten.")
     subtitle.setObjectName("MutedText")
     title_box.addWidget(title)
     title_box.addWidget(subtitle)
@@ -1484,9 +1303,9 @@ def create_activity_page(
 
     header = QtWidgets.QHBoxLayout()
     title_box = QtWidgets.QVBoxLayout()
-    title = QtWidgets.QLabel("Aktivitäten / Logs")
+    title = QtWidgets.QLabel("Aktivitäten")
     title.setObjectName("PageTitle")
-    subtitle = QtWidgets.QLabel("Uploads, Austausch, Löschungen und Metadatenupdates prüfen.")
+    subtitle = QtWidgets.QLabel("Protokoll aller Uploads, Änderungen und Fehler dieser Sitzung.")
     subtitle.setObjectName("MutedText")
     title_box.addWidget(title)
     title_box.addWidget(subtitle)
@@ -1643,140 +1462,6 @@ def create_activity_page(
     return page
 
 
-def _create_step_item(QtCore, QtWidgets, step):
-    item = QtWidgets.QFrame()
-    item.setObjectName(f"WizardStep_{step.state}")
-    layout = QtWidgets.QHBoxLayout(item)
-    layout.setContentsMargins(10, 10, 10, 10)
-    layout.setSpacing(10)
-
-    marker = QtWidgets.QLabel(str(step.number))
-    marker.setObjectName("WizardStepMarker")
-    marker.setFixedSize(28, 28)
-    marker.setAlignment(QtCore.Qt.AlignCenter)
-
-    text_box = QtWidgets.QVBoxLayout()
-    title = QtWidgets.QLabel(step.title)
-    title.setObjectName("SectionTitle")
-    description_text = getattr(step, "description", getattr(step, "detail", ""))
-    description = QtWidgets.QLabel(description_text)
-    description.setObjectName("MutedText")
-    description.setWordWrap(True)
-    text_box.addWidget(title)
-    text_box.addWidget(description)
-
-    layout.addWidget(marker)
-    layout.addLayout(text_box, 1)
-    return item
-
-
-def _create_local_conversion_source_panel(QtWidgets, preview):
-    panel = QtWidgets.QFrame()
-    panel.setObjectName("DetailPanel")
-    layout = QtWidgets.QVBoxLayout(panel)
-    layout.setContentsMargins(18, 18, 18, 18)
-    layout.setSpacing(10)
-
-    title = QtWidgets.QLabel("Quelldatei")
-    title.setObjectName("PanelTitle")
-    path = QtWidgets.QLabel(preview.source_file)
-    path.setObjectName("MutedText")
-    path.setWordWrap(True)
-    hint = QtWidgets.QLabel("Preview: Im echten Workflow wird nur .las/.laz akzeptiert; .copc.laz bleibt Upload-Direktformat.")
-    hint.setObjectName("MutedText")
-    hint.setWordWrap(True)
-    layout.addWidget(title)
-    layout.addWidget(path)
-    layout.addWidget(hint)
-    return panel
-
-
-def _create_local_conversion_target_panel(QtWidgets, preview):
-    panel = QtWidgets.QFrame()
-    panel.setObjectName("DetailPanel")
-    layout = QtWidgets.QGridLayout(panel)
-    layout.setContentsMargins(18, 18, 18, 18)
-    layout.setHorizontalSpacing(14)
-    layout.setVerticalSpacing(10)
-
-    rows = (
-        ("Ausgabeordner", preview.output_dir),
-        ("Converter", preview.converter_path),
-        ("Overwrite-Regel", "Bestehender Ausgabeordner wird nur nach Freigabe ersetzt."),
-    )
-    for row, (label_text, value_text) in enumerate(rows):
-        label = QtWidgets.QLabel(label_text)
-        label.setObjectName("SectionTitle")
-        value = QtWidgets.QLabel(value_text)
-        value.setObjectName("MutedText")
-        value.setWordWrap(True)
-        layout.addWidget(label, row, 0)
-        layout.addWidget(value, row, 1)
-    layout.setColumnStretch(1, 1)
-    return panel
-
-
-def _create_local_conversion_log_panel(QtWidgets, preview):
-    panel = QtWidgets.QFrame()
-    panel.setObjectName("LogPanel")
-    layout = QtWidgets.QVBoxLayout(panel)
-    layout.setContentsMargins(18, 16, 18, 16)
-    layout.setSpacing(10)
-
-    title = QtWidgets.QLabel("Protokoll")
-    title.setObjectName("PanelTitle")
-    layout.addWidget(title)
-    for entry in preview.log_entries:
-        line = QtWidgets.QLabel(entry)
-        line.setObjectName("LogLine")
-        line.setWordWrap(True)
-        layout.addWidget(line)
-    layout.addStretch(1)
-    return panel
-
-
-def _create_status_card(QtCore, QtWidgets, card, on_card_action: Callable[[str], None] | None = None):
-    action_id = _dashboard_card_action_id(card.title)
-    frame = QtWidgets.QPushButton() if on_card_action is not None and action_id else QtWidgets.QFrame()
-    frame.setObjectName("DashboardCardButton" if isinstance(frame, QtWidgets.QPushButton) else "ActivityStatCard")
-    if isinstance(frame, QtWidgets.QPushButton):
-        frame.setCursor(QtCore.Qt.PointingHandCursor)
-        frame.setText("")
-        frame.setToolTip(f"{card.title} öffnen")
-        frame.clicked.connect(lambda checked=False, selected_action=action_id: on_card_action(selected_action))
-    layout = QtWidgets.QVBoxLayout(frame)
-    layout.setContentsMargins(14, 12, 14, 12)
-    layout.setSpacing(6)
-
-    top = QtWidgets.QHBoxLayout()
-    label = QtWidgets.QLabel(card.title)
-    label.setObjectName("MutedText")
-    level = QtWidgets.QLabel(status_level_label(card.level))
-    level.setObjectName("PreviewBadgeLight")
-    top.addWidget(label, 1)
-    top.addWidget(level)
-    layout.addLayout(top)
-
-    value = QtWidgets.QLabel(card.value)
-    value.setObjectName("ActivityStatValue")
-    detail = QtWidgets.QLabel(card.detail)
-    detail.setObjectName("MutedText")
-    detail.setWordWrap(True)
-    layout.addWidget(value)
-    layout.addWidget(detail)
-    return frame
-
-
-def _dashboard_card_action_id(title: str) -> str:
-    return {
-        "Aktive Projekte": "open_project_management",
-        "Upload-Queue": "open_activity",
-        "Operationen": "open_activity",
-        "Converter": "open_settings",
-        "Update": "open_settings",
-    }.get(title, "")
-
-
 def _create_settings_status_panel(QtWidgets, title_text: str, items, on_item_action: Callable[[str], None] | None = None):
     panel = QtWidgets.QFrame()
     panel.setObjectName("DetailPanel")
@@ -1791,40 +1476,6 @@ def _create_settings_status_panel(QtWidgets, title_text: str, items, on_item_act
         layout.addWidget(_create_settings_status_item(QtWidgets, item, on_item_action=on_item_action))
     layout.addStretch(1)
     return panel
-
-
-def _create_settings_detail_panel(QtWidgets, preview: SettingsPreview):
-    detail_panel = QtWidgets.QFrame()
-    detail_panel.setObjectName("DetailPanel")
-    detail_layout = QtWidgets.QVBoxLayout(detail_panel)
-    detail_layout.setContentsMargins(20, 20, 20, 20)
-    detail_layout.setSpacing(14)
-
-    detail_title = QtWidgets.QLabel("Konfiguration")
-    detail_title.setObjectName("PanelTitle")
-    detail_layout.addWidget(detail_title)
-    rows = (
-        ("AWS Profil", preview.aws_profile),
-        ("Converter Bundle", preview.converter_bundle),
-        ("Converter Override", preview.converter_override),
-        ("Output-Ordner", preview.output_folder),
-        ("Update-Kanal", preview.update_channel),
-    )
-    grid = QtWidgets.QGridLayout()
-    grid.setHorizontalSpacing(14)
-    grid.setVerticalSpacing(10)
-    for row, (label_text, value_text) in enumerate(rows):
-        label = QtWidgets.QLabel(label_text)
-        label.setObjectName("SectionTitle")
-        value = QtWidgets.QLabel(value_text)
-        value.setObjectName("MutedText")
-        value.setWordWrap(True)
-        grid.addWidget(label, row, 0)
-        grid.addWidget(value, row, 1)
-    grid.setColumnStretch(1, 1)
-    detail_layout.addLayout(grid)
-    detail_layout.addStretch(1)
-    return detail_panel
 
 
 def _create_settings_status_item(QtWidgets, item, on_item_action: Callable[[str], None] | None = None):
@@ -1857,28 +1508,6 @@ def _create_settings_status_item(QtWidgets, item, on_item_action: Callable[[str]
     return row
 
 
-def _create_hint_panel(QtWidgets, title_text: str, hints):
-    panel = QtWidgets.QFrame()
-    panel.setObjectName("DetailPanel")
-    layout = QtWidgets.QVBoxLayout(panel)
-    layout.setContentsMargins(20, 20, 20, 20)
-    layout.setSpacing(12)
-
-    title = QtWidgets.QLabel(title_text)
-    title.setObjectName("PanelTitle")
-    layout.addWidget(title)
-    for hint in hints:
-        hint_title = QtWidgets.QLabel(f"{hint.title} - {status_level_label(hint.level)}")
-        hint_title.setObjectName("SectionTitle")
-        hint_detail = QtWidgets.QLabel(hint.detail)
-        hint_detail.setObjectName("MutedText")
-        hint_detail.setWordWrap(True)
-        layout.addWidget(hint_title)
-        layout.addWidget(hint_detail)
-    layout.addStretch(1)
-    return panel
-
-
 def _clear_layout_widgets(layout):
     while layout.count():
         item = layout.takeAt(0)
@@ -1899,40 +1528,7 @@ def _resolve_project_previews(
             return load_project_previews(project_provider)
         except Exception:
             return ()
-    return tuple(example_project_previews())
-
-
-def _resolve_upload_preview(
-    upload_preview: UploadWizardPreview | None = None,
-    upload_preview_provider: Callable[[], UploadWizardPreview] | None = None,
-) -> UploadWizardPreview:
-    if upload_preview is not None:
-        return upload_preview
-    if upload_preview_provider is not None:
-        return upload_preview_provider()
-    return example_upload_wizard_preview()
-
-
-def _resolve_local_conversion_preview(
-    local_conversion_preview: LocalConversionPreview | None = None,
-    local_conversion_preview_provider: Callable[[], LocalConversionPreview] | None = None,
-) -> LocalConversionPreview:
-    if local_conversion_preview is not None:
-        return local_conversion_preview
-    if local_conversion_preview_provider is not None:
-        return local_conversion_preview_provider()
-    return example_local_conversion_preview()
-
-
-def _resolve_dashboard_preview(
-    dashboard_preview: DashboardPreview | None = None,
-    dashboard_provider: Callable[[], DashboardPreview] | None = None,
-) -> DashboardPreview:
-    if dashboard_preview is not None:
-        return dashboard_preview
-    if dashboard_provider is not None:
-        return dashboard_provider()
-    return example_dashboard_preview()
+    return ()
 
 
 def _resolve_settings_preview(
@@ -1964,7 +1560,7 @@ def _resolve_activity_preview(
     if activity_preview is not None:
         return activity_preview
     if activity_provider is None:
-        return example_activity_preview()
+        return ActivityPreview(entries=())
     provided = activity_provider()
     if isinstance(provided, ActivityPreview):
         return provided

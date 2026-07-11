@@ -42,6 +42,26 @@ def test_make_project_preview_normalizes_missing_values_without_qt():
     assert preview.pointclouds[0].crs == "Unbekannt"
 
 
+def test_project_format_column_shows_einzel_or_multi_instead_of_stored_format():
+    single = make_project_preview(
+        {"projekt": "P", "format": "Potree", "pointclouds": [{"name": "A"}]},
+        disabled=False,
+    )
+    multi = make_project_preview(
+        {"projekt": "P", "format": "Potree", "pointclouds": [{"name": "A"}, {"name": "B"}]},
+        disabled=False,
+    )
+    legacy_without_pointcloud_list = make_project_preview(
+        {"projekt": "P", "format": "COPC"},
+        disabled=False,
+    )
+
+    assert single.format == "Einzel"
+    assert multi.format == "Multi"
+    # Legacy-Projekte ohne pointclouds[]-Liste sind Einzel-Cloud-Projekte.
+    assert legacy_without_pointcloud_list.format == "Einzel"
+
+
 def test_make_project_previews_converts_service_rows_with_paths_and_crs_info():
     previews = make_project_previews(
         [

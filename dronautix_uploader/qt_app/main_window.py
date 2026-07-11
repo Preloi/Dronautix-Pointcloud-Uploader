@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 import dataclasses
+import glob
+import os
 import shutil
 import tempfile
 import threading
+import time
 from typing import Any
 
 from .activity_model import (
@@ -17,9 +20,9 @@ from .activity_model import (
     ACTION_UPDATE as ACTIVITY_ACTION_UPDATE,
     ACTION_UPLOAD as ACTIVITY_ACTION_UPLOAD,
     ActivityLogStore,
-    example_activity_preview,
+    normalize_progress_value,
 )
-from .project_management import ProjectPreview, example_project_previews
+from .project_management import ProjectPreview
 from .project_management_actions import (
     ACTION_DELETE,
     ACTION_DISABLE_LINK,
@@ -34,12 +37,36 @@ from .project_management_actions import (
     ProjectOperationSummary,
     action_by_id,
 )
+from dronautix_uploader.core.crs_detection import detect_pointcloud_crs
+
 from .service_bridge import QtServiceBridge
 from .task_worker import create_task_worker
 
 
 ProjectProvider = Callable[[], Iterable[ProjectPreview]]
 ProjectActionCallback = Callable[..., None]
+
+UPLOAD_TEMP_PREFIX = "dronautix_potree_"
+
+
+def cleanup_stale_upload_temp_dirs(max_age_seconds: int = 1800) -> None:
+    """Remove abandoned conversion temp folders left by interrupted uploads.
+
+    Only folders older than ``max_age_seconds`` are removed so a concurrently
+    running upload in another instance is never touched.
+    """
+
+    now = time.time()
+    pattern = os.path.join(tempfile.gettempdir(), f"{UPLOAD_TEMP_PREFIX}*")
+    for path in glob.glob(pattern):
+        try:
+            if not os.path.isdir(path):
+                continue
+            if now - os.path.getmtime(path) < max_age_seconds:
+                continue
+            shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            continue
 
 
 def create_main_window(
@@ -55,13 +82,12 @@ def create_main_window(
     local_conversion_controller=None,
     settings_controller=None,
     update_controller=None,
-    cutover_readiness_controller=None,
     runtime_reloader=None,
-    project_runtime_status: str = "Qt Preview - keine Service-Integration aktiv",
+    project_runtime_status: str = "Nicht verbunden - AWS-Zugangsdaten in den Einstellungen hinterlegen",
     window_title: str = "Dronautix Pointcloud Uploader",
-    sidebar_badge: str = "QtWidgets Preview",
+    sidebar_badge: str = "",
 ):
-    """Create the preview main window after PySide6 has been imported."""
+    """Create the main window after PySide6 has been imported."""
 
     from .pages import (
         create_activity_page,
@@ -123,23 +149,14 @@ def create_main_window(
                 "project_controller": project_controller,
                 "upload_controller": upload_controller,
                 "status": project_runtime_status,
-                "disconnected_project_previews": tuple(project_previews or example_project_previews()),
+                "disconnected_project_previews": tuple(project_previews or ()),
             }
-            initial_activity = (
-                ()
-                if (
-                    self._runtime["project_controller"] is not None
-                    or self._runtime["upload_controller"] is not None
-                    or local_conversion_controller is not None
-                    or settings_controller is not None
-                    or update_controller is not None
-                )
-                else example_activity_preview().entries
-            )
-            self._activity_store = ActivityLogStore(initial_activity)
+            self._activity_store = ActivityLogStore(())
             self._active_tasks = []
             self._task_records = {}
             self._progress_bridges = {}
+            self._closing_for_update = False
+            cleanup_stale_upload_temp_dirs()
             root = QtWidgets.QWidget()
             root.setObjectName("AppRoot")
             layout = QtWidgets.QHBoxLayout(root)
@@ -175,6 +192,15 @@ def create_main_window(
                     on_project_action=on_project_action or self._handle_project_action,
                 ),
             )
+            self._activity_page = self._add_page(
+                "Aktivitäten",
+                lambda: create_activity_page(
+                    QtCore,
+                    QtGui,
+                    QtWidgets,
+                    activity_provider=self._activity_store.preview,
+                ),
+            )
             self._settings_page = self._add_page(
                 "Einstellungen",
                 lambda: create_settings_page(
@@ -185,18 +211,15 @@ def create_main_window(
                     on_settings_action=self._handle_settings_action,
                 ),
             )
-            self._activity_page = self._add_page(
-                "Aktivitäten",
-                lambda: create_activity_page(
-                    QtCore,
-                    QtGui,
-                    QtWidgets,
-                    activity_provider=self._activity_store.preview,
-                ),
-            )
 
-            self._select_page("Upload")
+            # Ohne S3-Verbindung direkt in die Einstellungen leiten statt auf
+            # einer leeren Upload-Seite zu starten.
+            if settings_controller is not None and project_controller is None:
+                self._select_page("Einstellungen")
+            else:
+                self._select_page("Upload")
             self._install_shortcuts()
+            self._schedule_startup_update_check()
 
         def _install_shortcuts(self):
             page_order = list(self._buttons)
@@ -243,6 +266,28 @@ def create_main_window(
                 self._handle_upload_action()
 
         def closeEvent(self, event):
+            if self._has_active_background_tasks() and not getattr(self, "_closing_for_update", False):
+                answer = QtWidgets.QMessageBox.warning(
+                    self,
+                    "Vorgang läuft noch",
+                    "Ein Vorgang (z. B. Upload) läuft noch.\n\n"
+                    "Wenn du jetzt schließt, wird er abgebrochen - unvollständige Daten "
+                    "können im Bucket verbleiben und temporäre Dateien zurückbleiben.\n\n"
+                    "Trotzdem schließen?",
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                    QtWidgets.QMessageBox.No,
+                )
+                if answer != QtWidgets.QMessageBox.Yes:
+                    event.ignore()
+                    return
+                # Let running worker threads settle so the process does not abort
+                # with "QThread destroyed while running".
+                for thread in list(self._task_records):
+                    try:
+                        thread.quit()
+                        thread.wait(3000)
+                    except Exception:
+                        pass
             try:
                 self._settings_store.setValue("window_geometry", self.saveGeometry())
             except Exception:
@@ -268,8 +313,8 @@ def create_main_window(
             for name in (
                 "Upload",
                 "Projektverwaltung",
-                "Einstellungen",
                 "Aktivitäten",
+                "Einstellungen",
             ):
                 button = QtWidgets.QPushButton(name)
                 button.setObjectName("SidebarButton")
@@ -281,9 +326,10 @@ def create_main_window(
 
             layout.addStretch(1)
 
-            preview_label = QtWidgets.QLabel(sidebar_badge)
-            preview_label.setObjectName("PreviewBadge")
-            layout.addWidget(preview_label)
+            if sidebar_badge:
+                version_label = QtWidgets.QLabel(sidebar_badge)
+                version_label.setObjectName("PreviewBadge")
+                layout.addWidget(version_label)
             return sidebar
 
         def _add_page(self, name: str, factory: Callable):
@@ -299,7 +345,6 @@ def create_main_window(
             for button_name, button in self._buttons.items():
                 button.setChecked(button_name == name)
             self._current_page_name = name
-            self.statusBar().showMessage(f"{name} geöffnet")
             focus_default = getattr(self._pages.get(name), "focus_default", None)
             if callable(focus_default):
                 QtCore.QTimer.singleShot(0, focus_default)
@@ -309,15 +354,9 @@ def create_main_window(
                 action_label = action_by_id(action_id).label
             except KeyError:
                 action_label = action_id
-            if project is None:
-                self.statusBar().showMessage(f"{action_label}: UI-Platzhalter ohne Service-Integration")
-                return
-            if pointcloud is not None:
-                self.statusBar().showMessage(
-                    f"{action_label}: {project.project} / {pointcloud.name} - UI-Platzhalter ohne Service-Integration"
-                )
-                return
-            self.statusBar().showMessage(f"{action_label}: {project.project} - UI-Platzhalter ohne Service-Integration")
+            self.statusBar().showMessage(
+                f"{action_label}: keine S3-Verbindung - AWS-Zugangsdaten in den Einstellungen prüfen."
+            )
 
         def _handle_upload_action(self):
             if self._has_active_background_tasks():
@@ -332,14 +371,14 @@ def create_main_window(
         def _run_new_upload(self, form):
             upload_controller = self._runtime.get("upload_controller")
             if upload_controller is None:
-                self._upload_page.show_error("Upload: keine Service-Integration aktiv (AWS-Zugangsdaten pruefen).")
-                self.statusBar().showMessage("Upload: UI-Platzhalter ohne Service-Integration")
+                self._upload_page.show_error("Keine S3-Verbindung. AWS-Zugangsdaten in den Einstellungen hinterlegen.")
+                self.statusBar().showMessage("Upload nicht möglich: keine S3-Verbindung.")
                 return
             from .upload_dialog_models import UploadDialogState, validate_upload_dialog_state
 
             # Convert into a temporary, app-writable folder instead of the user's
             # output directory. It is removed once the upload finishes.
-            temp_output_dir = tempfile.mkdtemp(prefix="dronautix_potree_")
+            temp_output_dir = tempfile.mkdtemp(prefix=UPLOAD_TEMP_PREFIX)
 
             try:
                 request = validate_upload_dialog_state(
@@ -413,8 +452,8 @@ def create_main_window(
 
         def _run_local_conversion(self, form):
             if local_conversion_controller is None:
-                self._upload_page.show_error("Lokale Konvertierung: keine Service-Integration aktiv.")
-                self.statusBar().showMessage("Lokale Konvertierung: UI-Platzhalter ohne Service-Integration")
+                self._upload_page.show_error("Konvertierung ist in dieser Umgebung nicht verfügbar.")
+                self.statusBar().showMessage("Konvertierung nicht verfügbar.")
                 return
             from .local_conversion_dialog_models import (
                 LocalConversionDialogState,
@@ -501,20 +540,45 @@ def create_main_window(
 
             progress_callback = None
             progress_dialog = None
+            replace_temp_dir = None
             try:
                 if action_id == ACTION_RENAME:
                     payload = prompt_rename_project(QtWidgets, self, project)
                     if payload is None:
                         return
+                    progress_dialog = self._create_action_progress_dialog(
+                        "Projekt umbenennen",
+                        f"„{project.project}“ wird umbenannt...",
+                    )
                     operation = lambda: project_controller.rename_project(project, payload)
                 elif action_id == ACTION_DUPLICATE:
                     payload = prompt_duplicate_project(QtWidgets, self, project)
                     if payload is None:
                         return
-                    operation = lambda: project_controller.duplicate_project(project, payload)
+                    progress_dialog = self._create_action_progress_dialog(
+                        "Projekt duplizieren",
+                        f"„{project.project}“ wird dupliziert...",
+                    )
+                    progress_callback = self._make_progress_callback(
+                        ACTIVITY_ACTION_UPDATE,
+                        project=project.project,
+                        customer=project.customer,
+                        actor="Projektverwaltung",
+                        source_path=project.s3_path or project.viewer_path,
+                        extra_sink=self._progress_dialog_sink(progress_dialog),
+                    )
+                    operation = lambda: project_controller.duplicate_project(
+                        project,
+                        payload,
+                        on_progress=progress_callback,
+                    )
                 elif action_id == ACTION_DELETE:
                     if project is None or not confirm_delete_project(QtWidgets, self, project):
                         return
+                    progress_dialog = self._create_action_progress_dialog(
+                        "Projekt löschen",
+                        f"„{project.project}“ wird gelöscht...",
+                    )
                     operation = lambda: project_controller.delete_project(project)
                 elif action_id == ACTION_DOWNLOAD:
                     if project is None:
@@ -546,6 +610,7 @@ def create_main_window(
                         actor="Projektverwaltung",
                         source_path=project.s3_path or project.viewer_path,
                         target_path=payload.target_dir,
+                        extra_sink=self._progress_dialog_sink(progress_dialog),
                     )
                     operation = lambda: project_controller.download_project(
                         project,
@@ -565,20 +630,29 @@ def create_main_window(
                     if project is None:
                         self._placeholder_action(action_id, project, pointcloud)
                         return
+                    replace_temp_dir = tempfile.mkdtemp(prefix=UPLOAD_TEMP_PREFIX)
                     payload = prompt_replace_all_pointclouds(
                         QtWidgets,
                         self,
                         project,
                         self._settings_dialog_defaults(),
+                        replace_temp_dir,
                     )
                     if payload is None:
+                        shutil.rmtree(replace_temp_dir, ignore_errors=True)
                         return
+                    payload = self._with_detected_crs_all(payload)
+                    progress_dialog = self._create_action_progress_dialog(
+                        "Punktwolken austauschen",
+                        f"Punktwolken in „{project.project}“ werden ausgetauscht...",
+                    )
                     progress_callback = self._make_progress_callback(
                         ACTIVITY_ACTION_REPLACE,
                         project=project.project,
                         customer=project.customer,
                         actor="Projektverwaltung",
                         target_path=project.s3_path or project.viewer_path,
+                        extra_sink=self._progress_dialog_sink(progress_dialog),
                     )
                     operation = lambda: project_controller.replace_all_pointclouds(
                         project,
@@ -589,15 +663,23 @@ def create_main_window(
                     if project is None or pointcloud is None:
                         self._placeholder_action(action_id, project, pointcloud)
                         return
+                    replace_temp_dir = tempfile.mkdtemp(prefix=UPLOAD_TEMP_PREFIX)
                     payload = prompt_replace_single_pointcloud(
                         QtWidgets,
                         self,
                         project,
                         pointcloud,
                         self._settings_dialog_defaults(),
+                        replace_temp_dir,
                     )
                     if payload is None:
+                        shutil.rmtree(replace_temp_dir, ignore_errors=True)
                         return
+                    payload = self._with_detected_crs_single(payload)
+                    progress_dialog = self._create_action_progress_dialog(
+                        "Punktwolke austauschen",
+                        f"„{pointcloud.name}“ wird ausgetauscht...",
+                    )
                     progress_callback = self._make_progress_callback(
                         ACTIVITY_ACTION_REPLACE,
                         project=project.project,
@@ -605,6 +687,7 @@ def create_main_window(
                         actor="Projektverwaltung",
                         source_path=getattr(payload, "source_path", ""),
                         target_path=pointcloud.s3_path or pointcloud.viewer_path,
+                        extra_sink=self._progress_dialog_sink(progress_dialog),
                     )
                     operation = lambda: project_controller.replace_single_pointcloud(
                         project,
@@ -616,6 +699,10 @@ def create_main_window(
                     self._placeholder_action(action_id, project, pointcloud)
                     return
             except Exception as error:
+                if progress_dialog is not None:
+                    progress_dialog.close()
+                if replace_temp_dir is not None:
+                    shutil.rmtree(replace_temp_dir, ignore_errors=True)
                 self.statusBar().showMessage(str(error))
                 return
 
@@ -637,9 +724,17 @@ def create_main_window(
 
             def finish_project_action():
                 if progress_dialog is not None:
+                    # close() loest sonst das canceled-Signal aus und meldet
+                    # nach erfolgreichem Abschluss faelschlich einen Abbruch.
+                    try:
+                        progress_dialog.canceled.disconnect()
+                    except (RuntimeError, TypeError):
+                        pass
                     progress_dialog.close()
                 if progress_callback:
                     self._release_progress_callback(progress_callback)
+                if replace_temp_dir is not None:
+                    shutil.rmtree(replace_temp_dir, ignore_errors=True)
 
             self._start_background_task(
                 operation,
@@ -655,6 +750,66 @@ def create_main_window(
                 ),
                 on_finished=finish_project_action,
             )
+
+        def _create_action_progress_dialog(self, title: str, label: str):
+            """Nicht abbrechbarer Beschaeftigt-Dialog fuer laufende Projektaktionen."""
+
+            dialog = QtWidgets.QProgressDialog(label, "", 0, 0, self)
+            dialog.setWindowTitle(title)
+            dialog.setCancelButton(None)
+            dialog.setWindowModality(QtCore.Qt.WindowModal)
+            dialog.setMinimumDuration(0)
+            dialog.setMinimumWidth(420)
+            dialog.setAutoClose(False)
+            dialog.setAutoReset(False)
+            dialog.show()
+            return dialog
+
+        def _progress_dialog_sink(self, dialog):
+            state = {"headline": ""}
+
+            def apply_event(event):
+                message = str(getattr(event, "message", "") or "")
+                detail = str(getattr(event, "detail", "") or "")
+                kind = str(getattr(event, "kind", "") or "")
+                if message and not message.startswith("["):
+                    state["headline"] = message
+                    dialog.setLabelText(f"{message}\n{detail}" if detail else message)
+                elif detail:
+                    if kind == "detail":
+                        # z. B. Download: "Lade Datei 3/12: octree.bin"
+                        state["headline"] = detail
+                        dialog.setLabelText(detail)
+                    else:
+                        # Byte-Zwischenstand als zweite Zeile unter der
+                        # zuletzt gemeldeten Phase anzeigen.
+                        headline = state["headline"]
+                        dialog.setLabelText(f"{headline}\n{detail}" if headline else detail)
+                # Ohne Prozentwerte bleibt der Balken als Marquee animiert,
+                # damit die Aktion nie eingefroren wirkt; Schritt-Events
+                # aktualisieren nur den Text.
+                percent = getattr(event, "percent", None)
+                if percent is not None:
+                    dialog.setRange(0, 100)
+                    dialog.setValue(normalize_progress_value(percent))
+            return apply_event
+
+        def _with_detected_crs_all(self, payload):
+            if getattr(payload, "crs_info_by_source_path", None):
+                return payload
+            detected = {}
+            for source_path in getattr(payload, "source_paths", ()) or ():
+                info = _detect_crs_or_none(source_path)
+                if info:
+                    detected[source_path] = info
+            return dataclasses.replace(payload, crs_info_by_source_path=detected) if detected else payload
+
+        def _with_detected_crs_single(self, payload):
+            if getattr(payload, "crs_info", None):
+                return payload
+            source_path = getattr(payload, "source_path", "")
+            info = _detect_crs_or_none(source_path) if source_path else None
+            return dataclasses.replace(payload, crs_info=info) if info else payload
 
         def _has_active_background_tasks(self) -> bool:
             return bool(self._active_tasks)
@@ -697,7 +852,7 @@ def create_main_window(
 
         def _handle_settings_action(self, action_id: str, state=None):
             if settings_controller is None:
-                self.statusBar().showMessage("Einstellungen: UI-Platzhalter ohne Service-Integration")
+                self.statusBar().showMessage("Einstellungen sind in dieser Umgebung nicht verfügbar.")
                 return
 
             if action_id == "save":
@@ -754,30 +909,84 @@ def create_main_window(
                 return
 
             if action_id == "check_update":
-                if update_controller is None:
-                    self.statusBar().showMessage("Update-Prüfung: Preview ohne Update-Controller")
-                    return
-                self.statusBar().showMessage("Update-Prüfung gestartet...")
-
-                def show_update_result(summary):
-                    self._show_project_operation_summary(
-                        summary, action=ACTIVITY_ACTION_UPDATE, actor="Updater"
-                    )
-                    self._notify_operation_summary(summary, "Update-Prüfung")
-
-                self._start_background_task(
-                    update_controller.check_for_updates,
-                    on_result=show_update_result,
-                    on_error=lambda error: self._notify_task_error(
-                        error,
-                        "Update-Prüfung",
-                        action=ACTIVITY_ACTION_UPDATE,
-                        actor="Updater",
-                    ),
-                )
+                self._run_update_check(silent=False)
                 return
 
             self.statusBar().showMessage(f"Unbekannte Einstellungsaktion: {action_id}")
+
+        def _schedule_startup_update_check(self):
+            if update_controller is None:
+                return
+            try:
+                if not update_controller.checks_on_startup:
+                    return
+            except Exception:
+                return
+            QtCore.QTimer.singleShot(1500, lambda: self._run_update_check(silent=True))
+
+        def _run_update_check(self, *, silent: bool):
+            if update_controller is None:
+                self.statusBar().showMessage("Update-Prüfung nicht verfügbar.")
+                return
+            if not silent:
+                self.statusBar().showMessage("Update-Prüfung läuft...")
+
+            def handle_check_result(result):
+                self._show_project_operation_summary(result, action=ACTIVITY_ACTION_UPDATE, actor="Updater")
+                if getattr(result, "update_available", False):
+                    self._offer_update_install(result)
+                    return
+                if silent:
+                    return
+                if result.status == "failed":
+                    QtWidgets.QMessageBox.warning(self, "Update-Prüfung", result.message)
+                else:
+                    QtWidgets.QMessageBox.information(self, "Update-Prüfung", result.message)
+
+            def handle_check_error(error):
+                self._show_task_error(error, action=ACTIVITY_ACTION_UPDATE, actor="Updater")
+                if not silent:
+                    QtWidgets.QMessageBox.warning(self, "Update-Prüfung", str(error))
+
+            self._start_background_task(
+                update_controller.check_for_updates,
+                on_result=handle_check_result,
+                on_error=handle_check_error,
+            )
+
+        def _offer_update_install(self, result):
+            answer = QtWidgets.QMessageBox.question(
+                self,
+                "Update verfügbar",
+                f"Version {result.remote_version} ist verfügbar.\n\n"
+                "Jetzt herunterladen und installieren? Die Anwendung wird dazu beendet.",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.Yes,
+            )
+            if answer != QtWidgets.QMessageBox.Yes:
+                self.statusBar().showMessage("Update verschoben.")
+                return
+            self.statusBar().showMessage(f"Update {result.remote_version} wird heruntergeladen...")
+
+            def handle_install_result(summary):
+                self._show_project_operation_summary(summary, action=ACTIVITY_ACTION_UPDATE, actor="Updater")
+                if summary.status == "success":
+                    self._closing_for_update = True
+                    QtCore.QTimer.singleShot(200, self.close)
+                else:
+                    QtWidgets.QMessageBox.critical(self, "Update", summary.message)
+
+            manifest = dict(result.manifest)
+            self._start_background_task(
+                lambda: update_controller.download_and_install(manifest),
+                on_result=handle_install_result,
+                on_error=lambda error: self._notify_task_error(
+                    error,
+                    "Update",
+                    action=ACTIVITY_ACTION_UPDATE,
+                    actor="Updater",
+                ),
+            )
 
         def _show_project_operation_summary(
             self,
@@ -906,17 +1115,15 @@ def create_main_window(
             bundle.worker.result.connect(dispatcher.dispatch_result)
             bundle.worker.error.connect(dispatcher.dispatch_error)
             bundle.worker.finished.connect(dispatcher.dispatch_finished)
-            bundle.thread.finished.connect(self._cleanup_task_thread)
+            # Das Bundle wird per Closure uebergeben: sender() ist bei queued
+            # Cross-Thread-Signalen in PySide6 None, damit wuerde der Task nie
+            # abgeraeumt und alle Folgeaktionen blieben blockiert.
+            bundle.thread.finished.connect(lambda b=bundle: self._cleanup_task_bundle(b))
             bundle.thread.start()
             return bundle
 
-        @QtCore.Slot()
-        def _cleanup_task_thread(self):
-            thread = self.sender()
-            record = self._task_records.pop(thread, None)
-            if record is None:
-                return
-            bundle, _dispatcher = record
+        def _cleanup_task_bundle(self, bundle):
+            self._task_records.pop(bundle.thread, None)
             if bundle in self._active_tasks:
                 self._active_tasks.remove(bundle)
 
@@ -958,6 +1165,15 @@ def create_main_window(
     return MainWindow()
 
 
+def _detect_crs_or_none(source_path: str):
+    """CRS-Erkennung darf eine Projektaktion nie abbrechen."""
+
+    try:
+        return detect_pointcloud_crs(source_path)
+    except Exception:
+        return None
+
+
 def _activity_action_for_project_action(action_id: str) -> str:
     if action_id in {ACTION_REPLACE_ALL_POINTCLOUDS, ACTION_REPLACE_SINGLE_POINTCLOUD}:
         return ACTIVITY_ACTION_REPLACE
@@ -966,30 +1182,6 @@ def _activity_action_for_project_action(action_id: str) -> str:
     if action_id == ACTION_DOWNLOAD:
         return ACTIVITY_ACTION_DOWNLOAD
     return ACTIVITY_ACTION_UPDATE
-
-
-def build_runtime_upload_preview(settings_state=None):
-    """Build the Upload page preview from runtime settings instead of example projects."""
-
-    from .upload_wizard_model import UploadWizardState, build_upload_wizard_preview
-
-    return build_upload_wizard_preview(
-        UploadWizardState(
-            converter_path=str(getattr(settings_state, "converter_path", "") or ""),
-            output_base_dir=str(getattr(settings_state, "output_base_dir", "") or ""),
-        )
-    )
-
-
-def build_runtime_local_conversion_preview(settings_state=None):
-    """Build the local conversion page preview from runtime settings."""
-
-    from .local_conversion_model import build_local_conversion_preview
-
-    return build_local_conversion_preview(
-        converter_path=str(getattr(settings_state, "converter_path", "") or ""),
-        output_dir=str(getattr(settings_state, "output_base_dir", "") or ""),
-    )
 
 
 def resolve_runtime_project_rows(provider, *, fallback_rows=()):

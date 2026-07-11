@@ -250,7 +250,7 @@ def test_create_runtime_controller_bundle_reports_missing_credentials(monkeypatc
     assert bundle.ready is False
     assert bundle.project_provider is None
     assert bundle.core_api is None
-    assert "fehlende Credentials" in bundle.status
+    assert "fehlende Angaben" in bundle.status
 
 
 class FakeS3Client:

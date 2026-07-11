@@ -103,7 +103,6 @@ def run(
         ) from exc
 
     from .main_window import create_main_window
-    from .cutover_readiness_controller import CutoverReadinessController
     from .local_conversion_controller import LocalConversionController
     from .settings_controller import SettingsController
     from .update_controller import UpdateController
@@ -128,7 +127,6 @@ def run(
     local_conversion_controller = LocalConversionController()
     settings_controller = SettingsController(preview=identity.uses_preview_config)
     update_controller = UpdateController(settings_controller=settings_controller)
-    cutover_readiness_controller = CutoverReadinessController()
 
     def load_runtime_bundle():
         runtime_config = load_project_management_runtime_config(preview=identity.uses_preview_config)
@@ -146,7 +144,6 @@ def run(
         local_conversion_controller=local_conversion_controller,
         settings_controller=settings_controller,
         update_controller=update_controller,
-        cutover_readiness_controller=cutover_readiness_controller,
         runtime_reloader=load_runtime_bundle,
         project_runtime_status=runtime_bundle.status or identity.default_runtime_status,
         window_title=identity.window_title,

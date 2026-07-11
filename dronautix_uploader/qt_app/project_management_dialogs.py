@@ -91,6 +91,7 @@ def prompt_download_project(QtWidgets, parent, project: ProjectPreview):
     state = build_download_dialog_state(project)
     dialog = QtWidgets.QDialog(parent)
     dialog.setWindowTitle("Projekt herunterladen")
+    dialog.setMinimumWidth(560)
     layout = QtWidgets.QVBoxLayout(dialog)
     layout.setContentsMargins(20, 20, 20, 20)
     layout.setSpacing(12)
@@ -168,65 +169,43 @@ def confirm_set_project_link_state(QtWidgets, parent, project: ProjectPreview, d
     return dialog.exec() == QtWidgets.QDialog.Accepted
 
 
-def prompt_replace_all_pointclouds(QtWidgets, parent, project: ProjectPreview, defaults=None):
-    (
-        dialog,
-        source_paths,
-        converter_input,
-        output_input,
-        horizontal_crs_input,
-        vertical_crs_input,
-        overwrite_input,
-    ) = _build_replace_dialog(
+def prompt_replace_all_pointclouds(QtWidgets, parent, project: ProjectPreview, defaults=None, output_base_dir=""):
+    converter_path = _default_text(defaults, "converter_path")
+    dialog, source_paths = _build_replace_dialog(
         QtWidgets,
         parent,
-        "Punktwolkendaten austauschen",
-        f"Ersetzt alle Punktwolken in {project.project}.",
+        "Punktwolken austauschen",
+        f"Neue Punktwolke(n) fuer „{project.project}“ auswaehlen - "
+        "LAS/LAZ, COPC oder bereits konvertierte Potree-Ordner. "
+        "Konvertierung und CRS-Erkennung laufen automatisch.",
         allow_multiple=True,
-        defaults=defaults,
+        converter_path=converter_path,
+        output_base_dir=output_base_dir,
     )
     if dialog.exec() != QtWidgets.QDialog.Accepted:
         return None
     return validate_replace_all_dialog_state(
-        _replace_dialog_state_from_inputs(
-            source_paths,
-            converter_input,
-            output_input,
-            horizontal_crs_input,
-            vertical_crs_input,
-            overwrite_input,
-        )
+        _replace_dialog_state_from_inputs(source_paths, converter_path, output_base_dir)
     )
 
 
-def prompt_replace_single_pointcloud(QtWidgets, parent, project: ProjectPreview, pointcloud, defaults=None):
-    (
-        dialog,
-        source_paths,
-        converter_input,
-        output_input,
-        horizontal_crs_input,
-        vertical_crs_input,
-        overwrite_input,
-    ) = _build_replace_dialog(
+def prompt_replace_single_pointcloud(QtWidgets, parent, project: ProjectPreview, pointcloud, defaults=None, output_base_dir=""):
+    converter_path = _default_text(defaults, "converter_path")
+    dialog, source_paths = _build_replace_dialog(
         QtWidgets,
         parent,
         "Punktwolke austauschen",
-        f"Ersetzt {pointcloud.name} in {project.project}.",
+        f"Neue Punktwolke fuer „{pointcloud.name}“ auswaehlen - "
+        "LAS/LAZ, COPC oder ein bereits konvertierter Potree-Ordner. "
+        "Konvertierung und CRS-Erkennung laufen automatisch.",
         allow_multiple=False,
-        defaults=defaults,
+        converter_path=converter_path,
+        output_base_dir=output_base_dir,
     )
     if dialog.exec() != QtWidgets.QDialog.Accepted:
         return None
     return validate_replace_single_dialog_state(
-        _replace_dialog_state_from_inputs(
-            source_paths,
-            converter_input,
-            output_input,
-            horizontal_crs_input,
-            vertical_crs_input,
-            overwrite_input,
-        )
+        _replace_dialog_state_from_inputs(source_paths, converter_path, output_base_dir)
     )
 
 
@@ -241,6 +220,7 @@ def _build_project_metadata_dialog(
 ):
     dialog = QtWidgets.QDialog(parent)
     dialog.setWindowTitle(title)
+    dialog.setMinimumWidth(560)
     layout = QtWidgets.QVBoxLayout(dialog)
     layout.setContentsMargins(20, 20, 20, 20)
     layout.setSpacing(12)
@@ -287,9 +267,18 @@ def _build_project_metadata_dialog(
     return dialog, customer_input, project_input, tuple(pointcloud_inputs)
 
 
-def _build_replace_dialog(QtWidgets, parent, title: str, description: str, allow_multiple: bool, defaults=None):
+def _build_replace_dialog(
+    QtWidgets,
+    parent,
+    title: str,
+    description: str,
+    allow_multiple: bool,
+    converter_path: str = "",
+    output_base_dir: str = "",
+):
     dialog = QtWidgets.QDialog(parent)
     dialog.setWindowTitle(title)
+    dialog.setMinimumSize(720, 480)
     layout = QtWidgets.QVBoxLayout(dialog)
     layout.setContentsMargins(20, 20, 20, 20)
     layout.setSpacing(12)
@@ -308,30 +297,25 @@ def _build_replace_dialog(QtWidgets, parent, title: str, description: str, allow
         source_paths.setPlainText("\n".join(merged))
 
     source_paths = create_path_drop_plain_text_edit(QtWidgets, append_paths)
-    source_paths.setPlaceholderText("Dateien oder Potree-Ordner hierher ziehen, eine Quelle pro Zeile")
-    source_paths.setMinimumHeight(92)
-    layout.addWidget(source_paths)
+    source_paths.setPlaceholderText(
+        "Datei oder Potree-Ordner hierher ziehen oder waehlen"
+        if not allow_multiple
+        else "Dateien/Potree-Ordner hierher ziehen, eine Quelle pro Zeile"
+    )
+    source_paths.setMinimumHeight(220)
+    layout.addWidget(source_paths, 1)
 
     browse_row = QtWidgets.QHBoxLayout()
     files_button = QtWidgets.QPushButton("Dateien")
-    folder_button = QtWidgets.QPushButton("Ordner")
+    files_button.setObjectName("ActionButton")
+    files_button.setToolTip("LAS/LAZ- oder COPC-Dateien auswählen")
+    folder_button = QtWidgets.QPushButton("Potree-Ordner")
+    folder_button.setObjectName("ActionButton")
+    folder_button.setToolTip("Bereits in das Potree-Format konvertierten Ordner auswählen")
     browse_row.addWidget(files_button)
     browse_row.addWidget(folder_button)
     browse_row.addStretch(1)
     layout.addLayout(browse_row)
-
-    form = QtWidgets.QFormLayout()
-    converter_input = QtWidgets.QLineEdit(_default_text(defaults, "converter_path"))
-    output_input = QtWidgets.QLineEdit(_default_text(defaults, "output_base_dir"))
-    horizontal_crs_input = QtWidgets.QLineEdit()
-    vertical_crs_input = QtWidgets.QLineEdit()
-    overwrite_input = QtWidgets.QCheckBox("Bestehende Potree-Ausgabe überschreiben")
-    form.addRow("Potree Converter", converter_input)
-    form.addRow("Ausgabeordner", output_input)
-    form.addRow("Horizontales CRS", horizontal_crs_input)
-    form.addRow("Vertikales CRS", vertical_crs_input)
-    form.addRow("", overwrite_input)
-    layout.addLayout(form)
 
     error_label = QtWidgets.QLabel("")
     error_label.setObjectName("ErrorText")
@@ -365,16 +349,11 @@ def _build_replace_dialog(QtWidgets, parent, title: str, description: str, allow
     folder_button.clicked.connect(browse_folder)
 
     buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+    buttons.button(QtWidgets.QDialogButtonBox.Ok).setText("Austauschen")
+    buttons.button(QtWidgets.QDialogButtonBox.Cancel).setText("Abbrechen")
 
     def accept_if_valid():
-        state = _replace_dialog_state_from_inputs(
-            source_paths,
-            converter_input,
-            output_input,
-            horizontal_crs_input,
-            vertical_crs_input,
-            overwrite_input,
-        )
+        state = _replace_dialog_state_from_inputs(source_paths, converter_path, output_base_dir)
         try:
             if allow_multiple:
                 validate_replace_all_dialog_state(state)
@@ -389,24 +368,17 @@ def _build_replace_dialog(QtWidgets, parent, title: str, description: str, allow
     buttons.accepted.connect(accept_if_valid)
     buttons.rejected.connect(dialog.reject)
     layout.addWidget(buttons)
-    return dialog, source_paths, converter_input, output_input, horizontal_crs_input, vertical_crs_input, overwrite_input
+    return dialog, source_paths
 
 
-def _replace_dialog_state_from_inputs(
-    source_paths,
-    converter_input,
-    output_input,
-    horizontal_crs_input,
-    vertical_crs_input,
-    overwrite_input,
-) -> ProjectReplaceDialogState:
+def _replace_dialog_state_from_inputs(source_paths, converter_path: str, output_base_dir: str) -> ProjectReplaceDialogState:
     return ProjectReplaceDialogState(
         source_paths=_split_source_paths(source_paths.toPlainText()),
-        converter_path=converter_input.text(),
-        output_base_dir=output_input.text(),
-        overwrite=overwrite_input.isChecked(),
-        horizontal_crs=horizontal_crs_input.text(),
-        vertical_crs=vertical_crs_input.text(),
+        converter_path=converter_path,
+        output_base_dir=output_base_dir,
+        overwrite=True,
+        horizontal_crs="",
+        vertical_crs="",
     )
 
 

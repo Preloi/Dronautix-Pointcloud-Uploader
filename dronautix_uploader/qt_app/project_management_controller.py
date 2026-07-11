@@ -86,11 +86,17 @@ class ProjectManagementController:
         self,
         project_preview: ProjectPreview | None,
         request: DuplicateProjectInput,
+        on_progress: ProgressCallback | None = None,
     ) -> ProjectOperationSummary:
         project = _require_project(project_preview)
         if not request.customer.strip() or not request.project.strip():
             raise ValueError("Kunde und Projektname sind für Duplizieren erforderlich.")
-        result = self.service.duplicate_project(project.project_id, request.customer, request.project)
+        result = self.service.duplicate_project(
+            project.project_id,
+            request.customer,
+            request.project,
+            on_progress=on_progress,
+        )
         return summarize_project_operation_result(result)
 
     def delete_project(self, project_preview: ProjectPreview | None) -> ProjectOperationSummary:
@@ -202,7 +208,7 @@ class ProjectManagementController:
         if action_id == ACTION_DUPLICATE:
             if not isinstance(payload, DuplicateProjectInput):
                 raise ValueError("DuplicateProjectInput ist für Duplizieren erforderlich.")
-            return self.duplicate_project(project_preview, payload)
+            return self.duplicate_project(project_preview, payload, on_progress=on_progress)
         if action_id == ACTION_DELETE:
             return self.delete_project(project_preview)
         if action_id == ACTION_DOWNLOAD:

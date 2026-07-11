@@ -121,15 +121,26 @@ def upload_files_to_s3(
         if not content_type:
             content_type = "application/octet-stream"
 
-        def update_upload_progress(bytes_uploaded, _file_total=file_size):
+        # boto3 liefert pro Callback-Aufruf das Chunk-Inkrement, nicht die
+        # Gesamtsumme; ohne Akkumulation bleibt der Balken bei grossen Dateien
+        # scheinbar stehen.
+        file_progress = {"bytes": 0, "last_fraction": -1.0}
+
+        def update_upload_progress(bytes_chunk, _state=file_progress, _base=uploaded_total):
             if total_size <= 0:
                 return
+            _state["bytes"] += int(bytes_chunk or 0)
+            current = _base + _state["bytes"]
+            fraction = min(current / total_size, 1.0)
+            if fraction < 1.0 and fraction - _state["last_fraction"] < 0.002:
+                return
+            _state["last_fraction"] = fraction
             _emit(
                 on_progress,
                 ProgressEvent(
                     kind="progress",
-                    percent=(uploaded_total + bytes_uploaded) / total_size,
-                    detail=f"{format_bytes(uploaded_total + bytes_uploaded)} / {format_bytes(total_size)}",
+                    percent=fraction,
+                    detail=f"{format_bytes(current)} / {format_bytes(total_size)}",
                 ),
             )
 
@@ -223,11 +234,43 @@ def copy_project_objects(
     source_prefix: str,
     destination_prefix: str,
     bucket_name: str = BUCKET_NAME,
+    on_progress: ProgressCallback | None = None,
+    source_sizes: dict[str, int] | None = None,
 ) -> tuple[str, ...]:
     copied_keys: list[str] = []
     source_prefix = source_prefix.rstrip("/")
     destination_prefix = destination_prefix.rstrip("/")
-    for source_key in source_keys:
+    total = len(source_keys)
+    sizes = dict(source_sizes or {})
+    total_bytes = sum(int(sizes.get(key, 0) or 0) for key in source_keys)
+    copied_bytes = 0
+    throttle = {"last_fraction": -1.0}
+
+    def emit_copy_progress(current_bytes: int, index: int) -> None:
+        # Byte-gewichtet: ein Potree-Projekt besteht aus wenigen Dateien, von
+        # denen octree.bin fast die gesamte Groesse ausmacht; ein reiner
+        # Dateizaehler bliebe dort minutenlang stehen.
+        fraction = min(current_bytes / total_bytes, 1.0) if total_bytes > 0 else index / total
+        if fraction < 1.0 and fraction - throttle["last_fraction"] < 0.002:
+            return
+        throttle["last_fraction"] = fraction
+        detail = (
+            f"{format_bytes(min(current_bytes, total_bytes))} / {format_bytes(total_bytes)}"
+            if total_bytes > 0
+            else ""
+        )
+        _emit(
+            on_progress,
+            ProgressEvent(
+                kind="progress",
+                percent=fraction,
+                message=f"Kopiere Dateien... ({index}/{total})",
+                detail=detail,
+            ),
+        )
+
+    managed_copy = getattr(s3_client, "copy", None)
+    for index, source_key in enumerate(source_keys, start=1):
         rel_path = source_key[len(source_prefix) :] if source_key.startswith(source_prefix) else ""
         rel_path = rel_path.lstrip("/")
         destination_key = (
@@ -235,14 +278,34 @@ def copy_project_objects(
             if rel_path
             else f"{destination_prefix}/{os.path.basename(source_key)}"
         )
-        s3_client.copy_object(
-            Bucket=bucket_name,
-            CopySource={"Bucket": bucket_name, "Key": source_key},
-            Key=destination_key,
-            CacheControl=S3_CACHE_CONTROL,
-            MetadataDirective="REPLACE",
-        )
+        file_size = int(sizes.get(source_key, 0) or 0)
+        if on_progress is not None and callable(managed_copy) and total_bytes > 0 and file_size > 0:
+            # Managed Copy meldet Byte-Chunks auch waehrend einer einzelnen
+            # grossen Datei, statt erst nach deren Abschluss.
+            file_progress = {"bytes": 0}
+
+            def report_copy_chunk(bytes_chunk, _state=file_progress, _base=copied_bytes, _index=index):
+                _state["bytes"] += int(bytes_chunk or 0)
+                emit_copy_progress(_base + _state["bytes"], _index)
+
+            managed_copy(
+                {"Bucket": bucket_name, "Key": source_key},
+                bucket_name,
+                destination_key,
+                ExtraArgs={"CacheControl": S3_CACHE_CONTROL, "MetadataDirective": "REPLACE"},
+                Callback=report_copy_chunk,
+            )
+        else:
+            s3_client.copy_object(
+                Bucket=bucket_name,
+                CopySource={"Bucket": bucket_name, "Key": source_key},
+                Key=destination_key,
+                CacheControl=S3_CACHE_CONTROL,
+                MetadataDirective="REPLACE",
+            )
         copied_keys.append(destination_key)
+        copied_bytes += file_size
+        emit_copy_progress(copied_bytes, index)
     return tuple(copied_keys)
 
 
@@ -259,6 +322,7 @@ def download_project_objects(
     total_files = len(object_entries)
     total_bytes = sum(int(entry.get("Size", 0) or 0) for entry in object_entries)
     downloaded_bytes = 0
+    throttle = {"last_fraction": -1.0}
 
     for index, entry in enumerate(object_entries, start=1):
         if _cancel_requested(cancel_requested):
@@ -277,13 +341,20 @@ def download_project_objects(
             nonlocal downloaded_bytes
             downloaded_bytes += bytes_amount
             if total_bytes > 0:
-                _emit(
-                    on_progress,
-                    ProgressEvent(
-                        kind="progress",
-                        percent=0.1 + 0.85 * min(downloaded_bytes / total_bytes, 1.0),
-                    ),
-                )
+                fraction = 0.1 + 0.85 * min(downloaded_bytes / total_bytes, 1.0)
+                # Gedrosselt emittieren, damit grosse Downloads die GUI nicht
+                # mit Tausenden Chunk-Events fluten; Abbruch wird trotzdem
+                # bei jedem Chunk geprueft.
+                if fraction - throttle["last_fraction"] >= 0.002:
+                    throttle["last_fraction"] = fraction
+                    _emit(
+                        on_progress,
+                        ProgressEvent(
+                            kind="progress",
+                            percent=fraction,
+                            detail=f"{format_bytes(min(downloaded_bytes, total_bytes))} / {format_bytes(total_bytes)}",
+                        ),
+                    )
             if _cancel_requested(cancel_requested):
                 _emit(on_progress, ProgressEvent(kind="warning", message="Download wurde abgebrochen."))
                 raise DownloadCancelledError(tuple(downloaded_paths))

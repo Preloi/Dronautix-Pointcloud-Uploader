@@ -164,9 +164,68 @@ def test_main_window_has_no_dashboard_sidebar_entry_when_qt_available():
         assert list(window._buttons) == [
             "Upload",
             "Projektverwaltung",
-            "Einstellungen",
             "Aktivitäten",
+            "Einstellungen",
         ]
+    finally:
+        window.deleteLater()
+
+
+def test_main_window_releases_busy_state_after_background_task_completes_when_qt_available():
+    import time
+
+    QtCore, QtGui, QtWidgets = _import_qt()
+    app = _app(QtWidgets)
+
+    from dronautix_uploader.qt_app.main_window import create_main_window
+
+    window = create_main_window(QtCore, QtGui, QtWidgets)
+    results = []
+
+    try:
+        window._start_background_task(lambda: 42, on_result=results.append)
+
+        # Regression: sender() ist bei queued Cross-Thread-Signalen None; der
+        # Task muss trotzdem abgeraeumt werden, sonst blockiert jede weitere
+        # Aktion mit "Eine Aktion laeuft bereits".
+        deadline = time.time() + 5
+        while time.time() < deadline and window._has_active_background_tasks():
+            app.processEvents()
+            time.sleep(0.01)
+
+        assert results == [42]
+        assert not window._has_active_background_tasks()
+        assert not window._task_records
+    finally:
+        window.deleteLater()
+
+
+def test_main_window_opens_settings_page_when_runtime_is_not_connected_when_qt_available():
+    QtCore, QtGui, QtWidgets = _import_qt()
+    _app(QtWidgets)
+
+    from dronautix_uploader.qt_app.main_window import create_main_window
+    from dronautix_uploader.qt_app.settings_controller import SettingsFormState
+
+    class FakeSettingsController:
+        def load_state(self):
+            return SettingsFormState()
+
+        def preview(self):
+            from dronautix_uploader.qt_app.dashboard_settings_model import example_settings_preview
+
+            return example_settings_preview()
+
+    window = create_main_window(
+        QtCore,
+        QtGui,
+        QtWidgets,
+        settings_controller=FakeSettingsController(),
+        project_controller=None,
+    )
+
+    try:
+        assert window.stack.currentWidget() is window._pages["Einstellungen"]
     finally:
         window.deleteLater()
 

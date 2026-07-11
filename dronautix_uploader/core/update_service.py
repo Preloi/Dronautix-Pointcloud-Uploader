@@ -12,7 +12,11 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+from app_version import APP_VERSION
+
 from .constants import UPDATE_MANIFEST_URL, UPDATE_REPO_NAME, UPDATE_REPO_OWNER
+
+UPDATE_USER_AGENT = f"DronautixPointcloudUploader/{APP_VERSION}"
 
 
 @dataclass(frozen=True)
@@ -72,7 +76,7 @@ def load_update_manifest(
 ) -> dict[str, object]:
     request = urllib.request.Request(
         manifest_url,
-        headers={"User-Agent": "DronautixPointcloudUploaderV2/preview"},
+        headers={"User-Agent": UPDATE_USER_AGENT},
     )
     open_url = opener or urllib.request.urlopen
     with open_url(request, timeout=timeout_seconds) as response:
@@ -137,7 +141,7 @@ def download_update_installer(
 
     request = urllib.request.Request(
         installer_url,
-        headers={"User-Agent": "DronautixPointcloudUploaderV2/preview"},
+        headers={"User-Agent": UPDATE_USER_AGENT},
     )
     open_url = opener or urllib.request.urlopen
     try:
@@ -162,7 +166,7 @@ def calculate_url_sha256(
     byte_count = 0
     request = urllib.request.Request(
         url,
-        headers={"User-Agent": "DronautixPointcloudUploaderV2/preview"},
+        headers={"User-Agent": UPDATE_USER_AGENT},
     )
     open_url = opener or urllib.request.urlopen
     with open_url(request, timeout=timeout_seconds) as response:

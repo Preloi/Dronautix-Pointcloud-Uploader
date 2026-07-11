@@ -108,7 +108,7 @@ class ProjectManagementService:
             bucket_name=self._bucket_name,
         )
 
-    def duplicate_project(self, project_id: str, new_kunde: str, new_projekt: str):
+    def duplicate_project(self, project_id: str, new_kunde: str, new_projekt: str, on_progress=None):
         index_data = self.repository.load_projects_index()
         source_project, _is_disabled = self._find_project(index_data, project_id)
         new_project_id = self.id_factory()
@@ -128,6 +128,7 @@ class ProjectManagementService:
             save_index=self._save_projects_index,
             delete_keys=lambda keys: delete_s3_objects(self.s3_client, keys, bucket_name=self._bucket_name),
             bucket_name=self._bucket_name,
+            on_progress=on_progress,
         )
 
     def download_project(

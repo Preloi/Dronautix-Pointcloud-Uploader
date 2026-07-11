@@ -32,38 +32,25 @@ def test_project_management_dialogs_import_without_qt_or_tk_bindings():
     assert "customtkinter" not in sys.modules
 
 
-def test_replace_dialog_state_from_inputs_preserves_crs_fields_for_payload_validation():
+def test_replace_dialog_state_from_inputs_uses_injected_converter_and_temp_output():
     dialogs = importlib.import_module("dronautix_uploader.qt_app.project_management_dialogs")
     models = importlib.import_module("dronautix_uploader.qt_app.project_management_dialog_models")
 
+    # The simplified replace dialog only collects sources; the bundled converter
+    # and a temporary output folder are injected by the caller, and CRS is
+    # auto-detected later (no CRS/converter/output fields in the dialog).
     state = dialogs._replace_dialog_state_from_inputs(
         _PlainTextWidget(" a.copc.laz \n\n b.copc.laz "),
-        _TextWidget(" converter.exe "),
-        _TextWidget(" C:/out "),
-        _TextWidget(" EPSG:25832 "),
-        _TextWidget(" DHHN2016 "),
-        _CheckWidget(True),
+        "C:/bundled/PotreeConverter.exe",
+        "C:/temp/out",
     )
 
     payload = models.validate_replace_all_dialog_state(state)
 
     assert state.source_paths == ("a.copc.laz", "b.copc.laz")
-    assert state.horizontal_crs == " EPSG:25832 "
-    assert state.vertical_crs == " DHHN2016 "
+    assert state.converter_path == "C:/bundled/PotreeConverter.exe"
+    assert state.output_base_dir == "C:/temp/out"
     assert state.overwrite is True
-    assert payload.crs_info_by_source_path == {
-        "a.copc.laz": {
-            "value": "EPSG:25832",
-            "projection": "EPSG:25832",
-            "vertical_crs": "DHHN2016",
-            "vertical_epsg": "DHHN2016",
-            "vertical_projection": "DHHN2016",
-        },
-        "b.copc.laz": {
-            "value": "EPSG:25832",
-            "projection": "EPSG:25832",
-            "vertical_crs": "DHHN2016",
-            "vertical_epsg": "DHHN2016",
-            "vertical_projection": "DHHN2016",
-        },
-    }
+    assert state.horizontal_crs == ""
+    assert state.vertical_crs == ""
+    assert payload.crs_info_by_source_path is None

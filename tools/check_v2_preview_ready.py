@@ -36,7 +36,6 @@ PREVIEW_MODULES = (
     "dronautix_uploader.qt_app.runtime_services",
     "dronautix_uploader.qt_app.settings_controller",
     "dronautix_uploader.qt_app.upload_dialog_models",
-    "dronautix_uploader.qt_app.upload_dialogs",
     "dronautix_uploader.qt_app.upload_workflow_controller",
     "dronautix_uploader.qt_app.upload_wizard_model",
 )

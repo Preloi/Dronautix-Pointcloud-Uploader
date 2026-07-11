@@ -83,7 +83,7 @@ def test_settings_controller_uses_bundled_converter_when_no_override_is_configur
     assert state.converter_path == str(bundled_converter)
     assert preview.converter_bundle == str(bundled_converter)
     assert preview.converter_override == "Kein Override"
-    assert any(item.name == "Converter" and item.status == "Bundle bereit" for item in preview.settings_status)
+    assert any(item.name == "Converter" and item.status == "Bereit" for item in preview.settings_status)
 
 
 def test_settings_controller_prefers_complete_preview_keyring_pair(tmp_path):
