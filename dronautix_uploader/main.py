@@ -114,6 +114,10 @@ S3_INDEX_JSON = "projects_index.json"
 
 S3_DELETED_JSON = "deleted_projects.json"
 
+S3_DISABLED_PROJECTS_KEY = "disabled_projects"
+
+PROJECT_LINK_DISABLED_UI_KEY = "_link_disabled"
+
 S3_DELETE_BATCH_SIZE = 1000
 
 DELETED_PROJECT_RETENTION_DAYS = 30
@@ -2605,6 +2609,48 @@ def load_projects_index(s3_client):
 
 
 
+def get_persistable_projects_index(index_data):
+
+    """Entfernt reine UI-/Legacy-Statusfelder vor dem Speichern des Index."""
+
+    persisted_index = dict(index_data) if isinstance(index_data, dict) else {"projects": []}
+
+    for key in ("projects", S3_DISABLED_PROJECTS_KEY):
+
+        projects = persisted_index.get(key, [])
+
+        if not isinstance(projects, list):
+
+            if key == "projects":
+
+                persisted_index[key] = []
+
+            continue
+
+        cleaned_projects = []
+
+        for project in projects:
+
+            if isinstance(project, dict):
+
+                cleaned_project = dict(project)
+
+                cleaned_project.pop(PROJECT_LINK_DISABLED_UI_KEY, None)
+
+                cleaned_project.pop("link_disabled", None)
+
+                cleaned_projects.append(cleaned_project)
+
+            else:
+
+                cleaned_projects.append(project)
+
+        persisted_index[key] = cleaned_projects
+
+    return persisted_index
+
+
+
 def save_projects_index(s3_client, index_data):
 
     """Speichert den Projekt-Index auf S3"""
@@ -2613,13 +2659,15 @@ def save_projects_index(s3_client, index_data):
 
         index_data["last_updated"] = datetime.now().isoformat()
 
+        persisted_index = get_persistable_projects_index(index_data)
+
         s3_client.put_object(
 
             Bucket=BUCKET_NAME,
 
             Key=S3_INDEX_JSON,
 
-            Body=json.dumps(index_data, indent=2, ensure_ascii=False),
+            Body=json.dumps(persisted_index, indent=2, ensure_ascii=False),
 
             ContentType='application/json',
 
@@ -2627,7 +2675,7 @@ def save_projects_index(s3_client, index_data):
 
         )
 
-        log(f"[INDEX] JSON-Index gespeichert ({len(index_data['projects'])} Projekte)")
+        log(f"[INDEX] JSON-Index gespeichert ({len(persisted_index.get('projects', []))} Projekte)")
 
         return True
 
@@ -2638,6 +2686,176 @@ def save_projects_index(s3_client, index_data):
         return False
 
 
+
+
+
+def get_index_project_list(index_data, key="projects"):
+
+    """Gibt eine Projektliste aus dem Index zurück und initialisiert fehlende Listen."""
+
+    if not isinstance(index_data, dict):
+
+        return []
+
+    projects = index_data.get(key)
+
+    if not isinstance(projects, list):
+
+        projects = []
+
+        index_data[key] = projects
+
+    return projects
+
+
+
+def get_disabled_projects(index_data):
+
+    """Gibt die deaktivierten Projekte aus dem Index zurück."""
+
+    return get_index_project_list(index_data, S3_DISABLED_PROJECTS_KEY)
+
+
+
+def get_all_projects_for_management(index_data):
+
+    """Gibt aktive und deaktivierte Projekte für Verwaltungsansichten zurück."""
+
+    active_projects = [
+
+        (project, False)
+
+        for project in get_index_project_list(index_data, "projects")
+
+        if isinstance(project, dict)
+
+    ]
+
+    disabled_projects = [
+
+        (project, True)
+
+        for project in get_disabled_projects(index_data)
+
+        if isinstance(project, dict)
+
+    ]
+
+    return active_projects + disabled_projects
+
+
+
+def is_project_link_disabled(project_info):
+
+    """Prueft den UI-Status eines Projektlinks."""
+
+    return bool(project_info.get(PROJECT_LINK_DISABLED_UI_KEY))
+
+
+
+def update_project_link_disabled_state(index_data, project_ids, disabled):
+
+    """Verschiebt Projekte zwischen aktiver und deaktivierter Indexliste."""
+
+    project_id_set = {str(project_id).strip() for project_id in project_ids if str(project_id).strip()}
+
+    if not project_id_set:
+
+        return 0
+
+    active_projects = get_index_project_list(index_data, "projects")
+
+    disabled_projects = get_disabled_projects(index_data)
+
+    source_projects = active_projects if disabled else disabled_projects
+
+    target_projects = disabled_projects if disabled else active_projects
+
+    moved_projects = []
+
+    remaining_projects = []
+
+    timestamp = datetime.now().isoformat()
+
+    for project in source_projects:
+
+        project_id = str(project.get("id", "")).strip() if isinstance(project, dict) else ""
+
+        if project_id in project_id_set:
+
+            updated_project = dict(project)
+
+            updated_project.pop("link_disabled", None)
+
+            updated_project.pop(PROJECT_LINK_DISABLED_UI_KEY, None)
+
+            if disabled:
+
+                updated_project["disabled_at"] = timestamp
+
+            else:
+
+                updated_project.pop("disabled_at", None)
+
+            moved_projects.append(updated_project)
+
+        else:
+
+            remaining_projects.append(project)
+
+    if disabled:
+
+        index_data["projects"] = remaining_projects
+
+    else:
+
+        index_data[S3_DISABLED_PROJECTS_KEY] = remaining_projects
+
+    moved_ids = {str(project.get("id", "")).strip() for project in moved_projects}
+
+    target_projects[:] = [
+
+        project for project in target_projects
+
+        if str(project.get("id", "")).strip() not in moved_ids
+
+    ]
+
+    target_projects[0:0] = moved_projects
+
+    return len(moved_projects)
+
+
+
+def update_project_in_index(index_data, project_id, update_func):
+
+    """Aktualisiert ein Projekt in aktiven oder deaktivierten Indexlisten."""
+
+    normalized_project_id = str(project_id).strip()
+
+    if not normalized_project_id:
+
+        return False
+
+    for project_list_key in ("projects", S3_DISABLED_PROJECTS_KEY):
+
+        projects = get_index_project_list(index_data, project_list_key)
+
+        for idx, project in enumerate(projects):
+
+            if str(project.get("id", "")).strip() != normalized_project_id:
+
+                continue
+
+            updated_project = dict(project)
+
+            update_func(updated_project)
+
+            projects[idx] = updated_project
+
+            return True
+
+    return False
 
 
 
@@ -2763,19 +2981,29 @@ def upsert_deleted_project(deleted_data, deleted_entry):
 
 def remove_project_from_index(index_data, project_id):
 
-    """Entfernt ein Projekt aus dem Index und gibt True zurück, wenn sich der Index geaendert hat."""
+    """Entfernt ein Projekt aus aktiven und deaktivierten Indexlisten."""
 
-    original_count = len(index_data.get("projects", []))
+    normalized_project_id = str(project_id).strip()
 
-    index_data["projects"] = [
+    changed = False
 
-        project for project in index_data.get("projects", [])
+    for key in ("projects", S3_DISABLED_PROJECTS_KEY):
 
-        if project.get("id") != project_id
+        projects = get_index_project_list(index_data, key)
 
-    ]
+        original_count = len(projects)
 
-    return len(index_data["projects"]) != original_count
+        index_data[key] = [
+
+            project for project in projects
+
+            if str(project.get("id", "")).strip() != normalized_project_id
+
+        ]
+
+        changed = changed or len(index_data[key]) != original_count
+
+    return changed
 
 
 
@@ -3148,35 +3376,46 @@ def extract_project_identifiers_from_link(project_link):
         return "", ""
 
 
-def find_project_in_index(index_data, project_id="", project_link=""):
+def find_project_in_index(index_data, project_id="", project_link="", include_disabled=True):
 
     """Findet ein Projekt im Index ueber ID, Link oder Viewer-Pfad."""
 
-    projects = index_data.get("projects", []) if isinstance(index_data, dict) else []
+    if not isinstance(index_data, dict):
+
+        return None
+
+    project_lists = [get_index_project_list(index_data, "projects")]
+
+    if include_disabled:
+
+        project_lists.append(get_disabled_projects(index_data))
+
     normalized_project_id = str(project_id).strip()
     raw_link_identifier, short_link_identifier = extract_project_identifiers_from_link(project_link)
 
-    for project in projects:
+    for projects in project_lists:
 
-        indexed_project_id = str(project.get("id", "")).strip()
-        indexed_project_link = str(project.get("link", "")).strip()
-        indexed_viewer_path = str(project.get("viewer_path", "")).strip()
+        for project in projects:
 
-        if normalized_project_id and indexed_project_id == normalized_project_id:
+            indexed_project_id = str(project.get("id", "")).strip()
+            indexed_project_link = str(project.get("link", "")).strip()
+            indexed_viewer_path = str(project.get("viewer_path", "")).strip()
 
-            return project
+            if normalized_project_id and indexed_project_id == normalized_project_id:
 
-        if project_link and indexed_project_link == project_link:
+                return project
 
-            return project
+            if project_link and indexed_project_link == project_link:
 
-        if raw_link_identifier and indexed_viewer_path == raw_link_identifier:
+                return project
 
-            return project
+            if raw_link_identifier and indexed_viewer_path == raw_link_identifier:
 
-        if short_link_identifier and indexed_project_id == short_link_identifier:
+                return project
 
-            return project
+            if short_link_identifier and indexed_project_id == short_link_identifier:
+
+                return project
 
     return None
 
@@ -5139,62 +5378,54 @@ def replace_project_process(project_info, replacement_file, aws_access, aws_secr
 
             ui_set_step("Aktualisiere Projekt-Metadaten...", 5, ui)
 
-            for idx, project in enumerate(index_data.get("projects", [])):
+            def apply_replacement_metadata(updated_project):
 
-                if project.get("id") == project_id:
+                if replacing_single_pointcloud:
 
-                    updated_project = dict(project)
+                    pointclouds = updated_project.get("pointclouds", [])
 
-                    if replacing_single_pointcloud:
+                    if isinstance(pointclouds, list):
 
-                        pointclouds = updated_project.get("pointclouds", [])
+                        for cloud_idx, cloud in enumerate(pointclouds):
 
-                        if isinstance(pointclouds, list):
+                            if not isinstance(cloud, dict):
 
-                            for cloud_idx, cloud in enumerate(pointclouds):
+                                continue
 
-                                if not isinstance(cloud, dict):
-
-                                    continue
-
-                                same_cloud = (
-                                    cloud.get("s3_path") == target_pointcloud.get("s3_path")
-                                    or cloud.get("viewer_path") == target_pointcloud.get("viewer_path")
-                                    or (
-                                        cloud.get("name") == target_pointcloud.get("name")
-                                        and cloud_idx == target_pointcloud.get("_index")
-                                    )
+                            same_cloud = (
+                                cloud.get("s3_path") == target_pointcloud.get("s3_path")
+                                or cloud.get("viewer_path") == target_pointcloud.get("viewer_path")
+                                or (
+                                    cloud.get("name") == target_pointcloud.get("name")
+                                    and cloud_idx == target_pointcloud.get("_index")
                                 )
+                            )
 
-                                if same_cloud:
+                            if same_cloud:
 
-                                    updated_cloud = dict(cloud)
+                                updated_cloud = dict(cloud)
 
-                                    updated_cloud["format"] = "potree"
+                                updated_cloud["format"] = "potree"
 
-                                    updated_cloud["s3_path"] = s3_prefix
+                                updated_cloud["s3_path"] = s3_prefix
 
-                                    updated_cloud["viewer_path"] = viewer_path
+                                updated_cloud["viewer_path"] = viewer_path
 
-                                    if crs_info:
+                                if crs_info:
 
-                                        apply_crs_metadata(updated_cloud, crs_info)
+                                    apply_crs_metadata(updated_cloud, crs_info)
 
-                                    pointclouds[cloud_idx] = updated_cloud
+                                pointclouds[cloud_idx] = updated_cloud
 
-                                    break
+                                break
 
-                            updated_project["pointclouds"] = pointclouds
+                        updated_project["pointclouds"] = pointclouds
 
-                    elif crs_info:
+                elif crs_info:
 
-                        apply_crs_metadata(updated_project, crs_info)
+                    apply_crs_metadata(updated_project, crs_info)
 
-                    index_data["projects"][idx] = updated_project
-
-                    updated = True
-
-                    break
+            updated = update_project_in_index(index_data, project_id, apply_replacement_metadata)
 
             if updated:
 
@@ -5506,37 +5737,27 @@ def replace_project_with_multi_pointclouds(project_info, replacement_entries, aw
 
         index_data = load_projects_index(s3_client)
 
-        updated = False
+        def apply_multi_replacement_metadata(updated_project):
 
-        for idx, project in enumerate(index_data.get("projects", [])):
+            updated_project.update({
 
-            if project.get("id") == project_id:
+                "format": "multi",
 
-                updated_project = dict(project)
+                "viewer_path": base_viewer_path,
 
-                updated_project.update({
+                "s3_path": s3_prefix,
 
-                    "format": "multi",
+                "pointclouds": pointcloud_entries,
 
-                    "viewer_path": base_viewer_path,
+            })
 
-                    "s3_path": s3_prefix,
+            common_crs = get_common_crs_info(pointcloud_crs_infos)
 
-                    "pointclouds": pointcloud_entries,
+            if common_crs:
 
-                })
+                apply_crs_metadata(updated_project, common_crs)
 
-                common_crs = get_common_crs_info(pointcloud_crs_infos)
-
-                if common_crs:
-
-                    apply_crs_metadata(updated_project, common_crs)
-
-                index_data["projects"][idx] = updated_project
-
-                updated = True
-
-                break
+        updated = update_project_in_index(index_data, project_id, apply_multi_replacement_metadata)
 
         if not updated:
 
@@ -6010,15 +6231,7 @@ def rename_project_metadata_process(project_info, new_kunde, new_projekt, pointc
 
         index_data = load_projects_index(s3_client)
 
-        target_project = None
-
-        for project in index_data.get("projects", []):
-
-            if str(project.get("id", "")).strip() == project_id:
-
-                target_project = project
-
-                break
+        target_project = find_project_in_index(index_data, project_id=project_id)
 
         if not target_project:
 
@@ -6528,6 +6741,40 @@ def show_projects_view():
 
 
 
+    ctk.CTkLabel(
+
+        filter_inner,
+
+        text="Status:",
+
+        font=ctk.CTkFont(size=12)
+
+    ).pack(side="left", padx=(0, 4))
+
+
+
+    status_filter = ctk.CTkComboBox(
+
+        filter_inner,
+
+        values=["Alle Status", "Aktiv", "Deaktiviert"],
+
+        width=140,
+
+        font=ctk.CTkFont(size=12),
+
+        state="readonly",
+
+        command=lambda _value: apply_filter()
+
+    )
+
+    status_filter.set("Alle Status")
+
+    status_filter.pack(side="left", padx=(0, 12))
+
+
+
     search_entry = ctk.CTkEntry(
 
         filter_inner,
@@ -6546,7 +6793,7 @@ def show_projects_view():
 
     def apply_filter():
 
-        load_projects(customer_filter.get(), search_entry.get().strip())
+        load_projects(customer_filter.get(), search_entry.get().strip(), status_filter.get())
 
 
 
@@ -6570,7 +6817,12 @@ def show_projects_view():
 
         hover_color=COLOR_ACCENT_HOVER,
 
-        command=lambda: (customer_filter.set("Alle Kunden"), search_entry.delete(0, tk.END), load_projects())
+        command=lambda: (
+            customer_filter.set("Alle Kunden"),
+            status_filter.set("Alle Status"),
+            search_entry.delete(0, tk.END),
+            load_projects()
+        )
 
     ).pack(side="left", padx=(0, 8))
 
@@ -6592,7 +6844,7 @@ def show_projects_view():
 
         height=30,
 
-        command=lambda: load_projects()
+        command=lambda: reload_projects_with_current_filter()
 
     ).pack(side="right")
 
@@ -6620,13 +6872,15 @@ def show_projects_view():
 
         table_frame,
 
-        columns=("id", "kunde", "projekt", "datum", "url"),
+        columns=("id", "kunde", "projekt", "datum", "status", "url"),
 
         show="headings",
 
         yscrollcommand=scroll_y.set,
 
         xscrollcommand=scroll_x.set,
+
+        selectmode="extended",
 
         height=20
 
@@ -6639,6 +6893,7 @@ def show_projects_view():
         "kunde": "Kunde",
         "projekt": "Projekt",
         "datum": "Datum",
+        "status": "Status",
         "url": "Web-Link",
     }
 
@@ -6652,7 +6907,7 @@ def show_projects_view():
 
                 marker = " v" if sort_state["reverse"] else " ^"
 
-            if column in ("kunde", "projekt", "datum"):
+            if column in ("kunde", "projekt", "datum", "status"):
 
                 tree.heading(
 
@@ -6684,7 +6939,7 @@ def show_projects_view():
 
         update_project_headings()
 
-        load_projects(customer_filter.get(), search_entry.get().strip())
+        load_projects(customer_filter.get(), search_entry.get().strip(), status_filter.get())
 
 
 
@@ -6698,7 +6953,9 @@ def show_projects_view():
 
     tree.column("datum", width=150, anchor="center")
 
-    tree.column("url", width=560)
+    tree.column("status", width=120, anchor="center")
+
+    tree.column("url", width=500)
 
     tree.pack(fill="both", expand=True)
 
@@ -6744,6 +7001,8 @@ def show_projects_view():
 
     style.map("Treeview", background=[("selected", COLOR_ACCENT)])
 
+    tree.tag_configure("disabled_project", foreground="#94a3b8", background="#1f2937")
+
 
 
     btn_frame = ctk.CTkFrame(projects_page, fg_color="transparent")
@@ -6754,7 +7013,7 @@ def show_projects_view():
 
 
 
-    def get_selected_project():
+    def get_selected_projects():
 
         selected = tree.selection()
 
@@ -6762,54 +7021,211 @@ def show_projects_view():
 
             messagebox.showinfo("Info", "Bitte ein Projekt auswählen!")
 
-            return None
+            return []
 
 
 
-        item = tree.item(selected[0])
+        selected_projects = []
 
-        project_id = item["values"][0]
-        project_link = item["values"][4] if len(item.get("values", [])) > 4 else ""
+        index_data = None
 
-        if not project_id:
+        for selected_item in selected:
 
-            messagebox.showinfo("Info", "Bitte ein gültiges Projekt auswählen!")
+            item = tree.item(selected_item)
 
-            return None
+            values = item.get("values", [])
 
+            project_id = str(values[0]).strip() if values else ""
 
+            row_status = str(values[4]).strip() if len(values) > 4 else ""
 
-        project_info = projects_by_id.get(project_id)
+            project_link = values[5] if len(values) > 5 else ""
 
-        if not project_info:
+            if not project_id:
 
-            try:
+                continue
 
-                s3_client = create_s3_client(aws_access, aws_secret)
+            project_info = projects_by_id.get(project_id)
 
-                index_data = load_projects_index(s3_client)
+            if not project_info:
 
-                project_info = find_project_in_index(index_data, project_id=project_id, project_link=project_link)
+                try:
 
-                if project_info:
+                    if index_data is None:
 
-                    projects_by_id[str(project_info.get("id", "")).strip()] = project_info
+                        s3_client = create_s3_client(aws_access, aws_secret)
 
-            except Exception as e:
+                        index_data = load_projects_index(s3_client)
 
-                messagebox.showerror("Fehler", f"Projektdaten konnten nicht geladen werden:\n{e}")
+                    project_info = find_project_in_index(index_data, project_id=project_id, project_link=project_link)
 
-                return None
+                    if project_info:
 
-        if not project_info:
+                        project_info = dict(project_info)
+
+                        project_info[PROJECT_LINK_DISABLED_UI_KEY] = row_status == "Deaktiviert"
+
+                        projects_by_id[str(project_info.get("id", "")).strip()] = project_info
+
+                except Exception as e:
+
+                    messagebox.showerror("Fehler", f"Projektdaten konnten nicht geladen werden:\n{e}")
+
+                    return []
+
+            if project_info:
+
+                selected_projects.append(project_info)
+
+        if not selected_projects:
 
             messagebox.showerror("Fehler", "Projekt konnte im aktuellen Index nicht gefunden werden!")
 
+            return []
+
+        return selected_projects
+
+
+
+    def get_selected_project():
+
+        selected_projects = get_selected_projects()
+
+        if not selected_projects:
+
             return None
 
+        return selected_projects[0]
 
 
-        return project_info
+
+    def get_selected_project_rows():
+
+        selected_rows = []
+
+        for selected_item in tree.selection():
+
+            values = tree.item(selected_item).get("values", [])
+
+            project_id = str(values[0]).strip() if values else ""
+
+            if not project_id:
+
+                continue
+
+            project_name = str(values[2]).strip() if len(values) > 2 else project_id
+
+            row_status = str(values[4]).strip() if len(values) > 4 else ""
+
+            selected_rows.append({
+
+                "id": project_id,
+
+                "name": project_name or project_id,
+
+                "disabled": row_status == "Deaktiviert",
+
+            })
+
+        if not selected_rows:
+
+            messagebox.showinfo("Info", "Bitte ein Projekt auswählen!")
+
+        return selected_rows
+
+
+
+    def reload_projects_with_current_filter():
+
+        load_projects(customer_filter.get(), search_entry.get().strip(), status_filter.get())
+
+
+
+    def set_selected_link_state(disabled):
+
+        selected_rows = get_selected_project_rows()
+
+        target_is_disabled = not disabled
+
+        target_rows = [
+
+            row for row in selected_rows
+
+            if row["disabled"] == target_is_disabled
+
+        ]
+
+        project_ids = [row["id"] for row in target_rows]
+
+        if not project_ids:
+
+            action_text = "deaktivieren" if disabled else "aktivieren"
+
+            messagebox.showinfo("Info", f"Keine passenden Projekte zum {action_text} ausgewählt.")
+
+            return
+
+        project_names = [row["name"] for row in target_rows]
+
+        preview = "\n".join(project_names[:5])
+
+        if len(project_names) > 5:
+
+            preview += f"\n... und {len(project_names) - 5} weitere"
+
+        title = "Links deaktivieren" if disabled else "Links aktivieren"
+
+        action_text = "deaktiviert" if disabled else "aktiviert"
+
+        if not messagebox.askyesno(
+
+            title,
+
+            f"{len(project_ids)} Projekt-Link(s) werden {action_text}.\n\n{preview}\n\nFortfahren?"
+
+        ):
+
+            return
+
+        try:
+
+            s3_client = create_s3_client(aws_access, aws_secret)
+
+            index_data = load_projects_index(s3_client)
+
+            changed_count = update_project_link_disabled_state(index_data, project_ids, disabled)
+
+            if not changed_count:
+
+                messagebox.showinfo("Info", "Der Status war bereits aktuell.")
+
+                reload_projects_with_current_filter()
+
+                return
+
+            if not save_projects_index(s3_client, index_data):
+
+                raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
+
+            messagebox.showinfo("Gespeichert", f"{changed_count} Projekt-Link(s) wurden {action_text}.")
+
+            reload_projects_with_current_filter()
+
+        except Exception as e:
+
+            messagebox.showerror("Fehler", f"Link-Status konnte nicht geändert werden:\n{e}")
+
+
+
+    def disable_selected_links():
+
+        set_selected_link_state(True)
+
+
+
+    def enable_selected_links():
+
+        set_selected_link_state(False)
 
 
 
@@ -6817,9 +7233,23 @@ def show_projects_view():
 
         project_info = get_selected_project()
 
-        if project_info:
+        if not project_info:
 
-            webbrowser.open(project_info.get("link", ""))
+            return
+
+        if is_project_link_disabled(project_info):
+
+            messagebox.showinfo(
+
+                "Link deaktiviert",
+
+                "Dieser Projekt-Link ist deaktiviert und kann erst nach dem Aktivieren wieder geöffnet werden."
+
+            )
+
+            return
+
+        webbrowser.open(project_info.get("link", ""))
 
 
 
@@ -6835,7 +7265,13 @@ def show_projects_view():
 
         root.clipboard_append(project_info.get("link", ""))
 
-        messagebox.showinfo("Kopiert", "Link in die Zwischenablage kopiert!")
+        if is_project_link_disabled(project_info):
+
+            messagebox.showinfo("Kopiert", "Link in die Zwischenablage kopiert.\n\nHinweis: Dieser Link ist deaktiviert.")
+
+        else:
+
+            messagebox.showinfo("Kopiert", "Link in die Zwischenablage kopiert!")
 
 
 
@@ -6875,15 +7311,15 @@ def show_projects_view():
 
             if delete_result["success"]:
 
-                messagebox.showinfo("Erfolg", "Projekt wurde gelöscht und der Link deaktiviert!")
+                messagebox.showinfo("Erfolg", "Projekt wurde gelöscht!")
 
-                load_projects()
+                reload_projects_with_current_filter()
 
             elif delete_result.get("partial"):
 
                 messagebox.showwarning("Teilweise gelöscht", delete_result["message"])
 
-                load_projects()
+                reload_projects_with_current_filter()
 
             else:
 
@@ -6927,15 +7363,7 @@ def show_projects_view():
 
 
 
-        current_project = None
-
-        for proj in index_data.get("projects", []):
-
-            if proj.get("id") == project_info.get("id"):
-
-                current_project = proj
-
-                break
+        current_project = find_project_in_index(index_data, project_id=project_info.get("id"))
 
 
 
@@ -8235,7 +8663,7 @@ def show_projects_view():
 
                 btn_cancel.configure(state="normal", text="Schließen")
 
-                load_projects()
+                reload_projects_with_current_filter()
 
                 result = messagebox.askyesno(
 
@@ -8549,7 +8977,7 @@ def show_projects_view():
 
             def on_success():
 
-                load_projects(customer_filter.get(), search_entry.get().strip())
+                reload_projects_with_current_filter()
 
                 messagebox.showinfo("Gespeichert", "Projekt-Metadaten wurden aktualisiert.")
 
@@ -8679,6 +9107,16 @@ def show_projects_view():
 
     project_context_menu.add_separator()
 
+    project_context_menu.add_command(label="Link deaktivieren", command=disable_selected_links)
+
+    disable_link_menu_index = project_context_menu.index("end")
+
+    project_context_menu.add_command(label="Link aktivieren", command=enable_selected_links)
+
+    enable_link_menu_index = project_context_menu.index("end")
+
+    project_context_menu.add_separator()
+
     project_context_menu.add_command(label="Punktwolke austauschen", command=open_replace_dialog)
 
     project_context_menu.add_command(label="Umbenennen", command=open_rename_dialog_main)
@@ -8709,9 +9147,43 @@ def show_projects_view():
 
             return
 
-        tree.selection_set(row_id)
+        if row_id not in tree.selection():
+
+            tree.selection_set(row_id)
 
         tree.focus(row_id)
+
+        selected_projects = []
+
+        for selected_item in tree.selection():
+
+            selected_values = tree.item(selected_item).get("values", [])
+
+            selected_project_id = str(selected_values[0]).strip() if selected_values else ""
+
+            if selected_project_id and selected_project_id in projects_by_id:
+
+                selected_projects.append(projects_by_id[selected_project_id])
+
+        has_active_project = any(not is_project_link_disabled(project) for project in selected_projects)
+
+        has_disabled_project = any(is_project_link_disabled(project) for project in selected_projects)
+
+        project_context_menu.entryconfig(
+
+            disable_link_menu_index,
+
+            state="normal" if has_active_project else "disabled"
+
+        )
+
+        project_context_menu.entryconfig(
+
+            enable_link_menu_index,
+
+            state="normal" if has_disabled_project else "disabled"
+
+        )
 
         try:
 
@@ -8727,7 +9199,7 @@ def show_projects_view():
 
 
 
-    def load_projects(selected_customer="Alle Kunden", search_term=""):
+    def load_projects(selected_customer="Alle Kunden", search_term="", selected_status="Alle Status"):
 
         """Laedt Projekte von S3 und wendet Filter an."""
 
@@ -8745,19 +9217,27 @@ def show_projects_view():
 
             index_data = load_projects_index(s3_client)
 
-            projects = index_data.get("projects", [])
+            project_entries = get_all_projects_for_management(index_data)
 
 
 
-            if not projects:
+            if not project_entries:
 
-                tree.insert("", "end", values=("", "", "Keine Projekte gefunden", "", ""))
+                tree.insert("", "end", values=("", "", "Keine Projekte gefunden", "", "", ""))
 
                 return
 
 
 
-            unique_customers = sorted(set(p.get("kunde", "") for p in projects if p.get("kunde", "")))
+            unique_customers = sorted(set(
+
+                project.get("kunde", "")
+
+                for project, _disabled in project_entries
+
+                if project.get("kunde", "")
+
+            ))
 
             customer_filter.configure(values=["Alle Kunden"] + unique_customers)
 
@@ -8769,7 +9249,7 @@ def show_projects_view():
 
 
 
-            for proj in projects:
+            for proj, disabled in project_entries:
 
                 kunde = proj.get("kunde", "")
 
@@ -8781,19 +9261,29 @@ def show_projects_view():
 
                     continue
 
+                if selected_status == "Aktiv" and disabled:
+
+                    continue
+
+                if selected_status == "Deaktiviert" and not disabled:
+
+                    continue
+
                 if search_term and search_lower not in projekt.lower() and search_lower not in kunde.lower():
 
                     continue
 
+                project_for_ui = dict(proj)
 
+                project_for_ui[PROJECT_LINK_DISABLED_UI_KEY] = bool(disabled)
 
-                filtered_projects.append(proj)
+                filtered_projects.append(project_for_ui)
 
 
 
             if not filtered_projects:
 
-                tree.insert("", "end", values=("", "", "Keine passenden Projekte gefunden", "", ""))
+                tree.insert("", "end", values=("", "", "Keine passenden Projekte gefunden", "", "", ""))
 
                 return
 
@@ -8816,6 +9306,10 @@ def show_projects_view():
                 if column == "projekt":
 
                     return str(project.get("projekt", "")).casefold()
+
+                if column == "status":
+
+                    return "deaktiviert" if is_project_link_disabled(project) else "aktiv"
 
                 return str(project.get(column, "")).casefold()
 
@@ -8847,6 +9341,12 @@ def show_projects_view():
 
                 projects_by_id[project_id] = proj
 
+                disabled = is_project_link_disabled(proj)
+
+                status_text = "Deaktiviert" if disabled else "Aktiv"
+
+                row_tags = ("disabled_project",) if disabled else ()
+
                 tree.insert("", "end", values=(
 
                     project_id,
@@ -8857,9 +9357,11 @@ def show_projects_view():
 
                     datum_str,
 
+                    status_text,
+
                     proj.get("link", "")
 
-                ))
+                ), tags=row_tags)
 
         except Exception as e:
 
