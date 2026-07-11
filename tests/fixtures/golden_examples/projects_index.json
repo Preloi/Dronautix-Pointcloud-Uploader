@@ -1,0 +1,50 @@
+{
+  "last_updated": "2026-06-21T15:24:12.987654Z",
+  "projects": [
+    {
+      "id": "abcdef12",
+      "project_id": "123e4567-e89b-12d3-a456-426614174000",
+      "name": "München Testfläche Süd",
+      "kunde": "Dronautix ÄÖÜ",
+      "datum": "2026-06-21",
+      "viewer_path": "kunden/münchen/testfläche-süd",
+      "s3_path": "projects/muenchen/testflaeche-sued",
+      "format": "potree",
+      "crs": "EPSG:25832",
+      "projection": "ETRS89 / UTM zone 32N",
+      "epsg": 25832,
+      "vertical_crs": "EPSG:7837",
+      "vertical_datum": "DHHN2016",
+      "pointclouds": [
+        {
+          "id": "deadbeef",
+          "name": "Wolke Café",
+          "format": "potree",
+          "metadata_path": "kunden/münchen/testfläche-süd/metadata.json",
+          "last_updated": "2026-06-21T15:25:00Z",
+          "crs_info": {
+            "auth": "EPSG",
+            "code": 25832,
+            "name": "ETRS89 / UTM zone 32N",
+            "vertical": {
+              "auth": "EPSG",
+              "code": 7837,
+              "name": "DHHN2016 height"
+            }
+          },
+          "bounds": {
+            "min": [690123.123456789, 5330123.987654321, 411.123456789],
+            "max": [690223.123456784, 5330223.987654326, 455.987654321]
+          }
+        }
+      ]
+    }
+  ],
+  "disabled_projects": [
+    {
+      "id": "fedcba98",
+      "name": "Gelöschtes Beispiel",
+      "disabled_at": "2026-06-21T15:30:00Z"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "boundingBox": {
+    "lx": 690123.12345679,
+    "ly": 5330123.98765432,
+    "lz": 411.12345679,
+    "ux": 690223.12345678,
+    "uy": 5330223.98765433,
+    "uz": 455.98765432
+  },
+  "crs": "EPSG:25832",
+  "name": "Wolke Café",
+  "octreeDir": "data",
+  "points": 123456,
+  "projection": "EPSG:25832",
+  "published_at": "<volatile>",
+  "spacing": 0.01234568,
+  "version": "1.7",
+  "vertical_crs": "EPSG:7837",
+  "vertical_datum": "DHHN2016"
+}

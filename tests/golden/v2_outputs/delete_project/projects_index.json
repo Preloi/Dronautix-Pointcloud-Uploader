@@ -1,0 +1,12 @@
+{
+  "projects": [
+    {
+      "id": "active-stays",
+      "kunde": "Aktiv",
+      "projekt": "Bleibt",
+      "s3_path": "pointclouds/golden/active_stays"
+    }
+  ],
+  "disabled_projects": [],
+  "last_updated": "2026-06-21T12:30:00"
+}

@@ -1,0 +1,39 @@
+{
+  "projects": [
+    {
+      "id": "active-stays",
+      "kunde": "Aktiv",
+      "projekt": "Bleibt"
+    }
+  ],
+  "disabled_projects": [
+    {
+      "id": "rename-target",
+      "kunde": "Neue Kunde",
+      "projekt": "Neues Projekt",
+      "format": "multi",
+      "link": "https://pointcloud.dronautix.at/index.html?id=rename-target",
+      "viewer_path": "golden/rename_target",
+      "s3_path": "pointclouds/golden/rename_target",
+      "disabled_at": "2026-06-20T12:00:00",
+      "pointcloud_count": 2,
+      "pointclouds": [
+        {
+          "name": "Cloud Neu A",
+          "format": "potree",
+          "viewer_path": "golden/rename_target/cloud_a",
+          "s3_path": "pointclouds/golden/rename_target/cloud_a",
+          "visible": true
+        },
+        {
+          "name": "Cloud Neu B",
+          "format": "copc",
+          "viewer_path": "golden/rename_target/cloud_b/source.copc.laz",
+          "s3_path": "pointclouds/golden/rename_target/cloud_b/source.copc.laz",
+          "visible": false
+        }
+      ]
+    }
+  ],
+  "last_updated": "2026-06-21T12:30:00"
+}

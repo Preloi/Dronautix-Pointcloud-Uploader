@@ -1,0 +1,21 @@
+{
+  "deleted_projects": [
+    {
+      "id": "delete-target",
+      "kunde": "Delete Kunde",
+      "projekt": "Delete Projekt",
+      "s3_path": "pointclouds/golden/delete_target",
+      "deleted_at": "2026-06-21T12:00:00",
+      "original_link": "https://pointcloud.dronautix.at/index.html?id=delete-target"
+    },
+    {
+      "id": "old-delete",
+      "kunde": "Alt",
+      "projekt": "Archiviert",
+      "s3_path": "pointclouds/golden/old_delete",
+      "deleted_at": "2026-06-19T12:00:00",
+      "original_link": "https://pointcloud.dronautix.at/index.html?id=old-delete"
+    }
+  ],
+  "last_updated": "2026-06-21T12:30:00"
+}

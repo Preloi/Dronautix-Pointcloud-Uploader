@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "scenario_id": "vertical_crs_upload",
+  "description": "Horizontal CRS plus vertical CRS/datum metadata.",
+  "legacy_app_version": "1.7.12",
+  "legacy_git_ref": "dronautix/develop@2ee765e99d157dc37da869767bcfda4afc792225+dirty",
+  "captured_at_utc": "2026-06-21T20:52:54Z",
+  "captured_files": [
+    "projects_index.json",
+    "metadata.json",
+    "cloud.js"
+  ],
+  "inputs": {
+    "sources": [],
+    "s3_prefix": "",
+    "crs_cases": [],
+    "disabled_state": "",
+    "notes": ""
+  },
+  "observed_contracts": {
+    "converter_command": "",
+    "converter_working_directory": "",
+    "s3_extra_args": "",
+    "operation_order": [],
+    "index_update_order": "",
+    "crs_behavior": "",
+    "disabled_link_behavior": "",
+    "cleanup_behavior": "",
+    "rollback_behavior": ""
+  }
+}

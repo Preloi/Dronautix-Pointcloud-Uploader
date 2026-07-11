@@ -1,0 +1,22 @@
+{
+  "version": "2.0",
+  "name": "Wolke Café",
+  "description": "Beispiel mit Umlauten und CRS",
+  "last_updated": "2026-06-21T15:25:00Z",
+  "projection": "EPSG:25832",
+  "crs": "EPSG:25832",
+  "vertical_crs": "EPSG:7837",
+  "vertical_datum": "DHHN2016",
+  "points": 123456,
+  "spacing": 0.01234567891,
+  "scale": [0.00100000004, 0.00100000005, 0.00100000006],
+  "offset": [690123.123456789, 5330123.987654321, 411.123456789],
+  "boundingBox": {
+    "lx": 690123.123456789,
+    "ly": 5330123.987654321,
+    "lz": 411.123456789,
+    "ux": 690223.123456784,
+    "uy": 5330223.987654326,
+    "uz": 455.987654321
+  }
+}

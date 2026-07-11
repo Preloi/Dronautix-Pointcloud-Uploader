@@ -1,0 +1,72 @@
+{
+  "projects": [
+    {
+      "datum": "2026-06-21T12:00:00",
+      "kunde": "Golden Kunde",
+      "id": "abc12d01",
+      "projekt": "Duplicate Clone",
+      "format": "multi",
+      "link": "https://pointcloud.dronautix.at/index.html?id=abc12d01",
+      "viewer_path": "golden_kunde/abc12d01/duplicate_clone",
+      "s3_path": "pointclouds/golden_kunde/abc12d01/duplicate_clone",
+      "pointcloud_count": 2,
+      "pointclouds": [
+        {
+          "name": "Cloud A",
+          "format": "potree",
+          "viewer_path": "golden_kunde/abc12d01/duplicate_clone/cloud_a",
+          "s3_path": "pointclouds/golden_kunde/abc12d01/duplicate_clone/cloud_a",
+          "visible": true
+        },
+        {
+          "name": "Cloud B",
+          "format": "copc",
+          "viewer_path": "golden_kunde/abc12d01/duplicate_clone/cloud_b/source.copc.laz",
+          "s3_path": "pointclouds/golden_kunde/abc12d01/duplicate_clone/cloud_b/source.copc.laz",
+          "visible": false
+        }
+      ]
+    },
+    {
+      "datum": "2026-06-20T09:00:00",
+      "kunde": "Bestehend",
+      "id": "existing-active",
+      "projekt": "Aktiv",
+      "format": "potree",
+      "link": "https://pointcloud.dronautix.at/index.html?id=existing-active",
+      "viewer_path": "bestehend/existing-active/aktiv",
+      "s3_path": "pointclouds/bestehend/existing-active/aktiv"
+    }
+  ],
+  "disabled_projects": [
+    {
+      "datum": "2026-06-20T10:00:00",
+      "kunde": "Alt Kunde",
+      "id": "dup-source",
+      "projekt": "Original",
+      "format": "multi",
+      "link": "https://pointcloud.dronautix.at/index.html?id=dup-source",
+      "viewer_path": "golden/dup_source/original",
+      "s3_path": "pointclouds/golden/dup_source/original",
+      "disabled_at": "2026-06-20T12:00:00",
+      "pointcloud_count": 2,
+      "pointclouds": [
+        {
+          "name": "Cloud A",
+          "format": "potree",
+          "viewer_path": "golden/dup_source/original/cloud_a",
+          "s3_path": "pointclouds/golden/dup_source/original/cloud_a",
+          "visible": true
+        },
+        {
+          "name": "Cloud B",
+          "format": "copc",
+          "viewer_path": "golden/dup_source/original/cloud_b/source.copc.laz",
+          "s3_path": "pointclouds/golden/dup_source/original/cloud_b/source.copc.laz",
+          "visible": false
+        }
+      ]
+    }
+  ],
+  "last_updated": "2026-06-21T12:30:00"
+}

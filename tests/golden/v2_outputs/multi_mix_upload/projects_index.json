@@ -1,0 +1,51 @@
+{
+  "projects": [
+    {
+      "datum": "2026-06-21T12:00:00",
+      "kunde": "Golden Kunde",
+      "id": "abc123e2",
+      "projekt": "Multi Mix",
+      "link": "https://pointcloud.dronautix.at/index.html?id=abc123e2",
+      "format": "multi",
+      "viewer_path": "golden_kunde/abc123e2/multi_mix",
+      "s3_path": "pointclouds/golden_kunde/abc123e2/multi_mix",
+      "pointcloud_count": 2,
+      "pointclouds": [
+        {
+          "name": "Fassade",
+          "format": "copc",
+          "viewer_path": "golden_kunde/abc123e2/multi_mix/fassade/source.copc.laz",
+          "s3_path": "pointclouds/golden_kunde/abc123e2/multi_mix/fassade/source.copc.laz",
+          "visible": true,
+          "crs": "EPSG:25832",
+          "projection": "EPSG:25832",
+          "crs_info": {
+            "value": "EPSG:25832",
+            "projection": "EPSG:25832"
+          }
+        },
+        {
+          "name": "Bestand Potree",
+          "format": "potree",
+          "viewer_path": "golden_kunde/abc123e2/multi_mix/bestand_potree",
+          "s3_path": "pointclouds/golden_kunde/abc123e2/multi_mix/bestand_potree",
+          "visible": true,
+          "crs": "EPSG:25832",
+          "projection": "EPSG:25832",
+          "crs_info": {
+            "value": "EPSG:25832",
+            "projection": "EPSG:25832"
+          }
+        }
+      ],
+      "crs": "EPSG:25832",
+      "projection": "EPSG:25832",
+      "crs_info": {
+        "value": "EPSG:25832",
+        "projection": "EPSG:25832"
+      }
+    }
+  ],
+  "last_updated": "2026-06-21T12:30:00",
+  "disabled_projects": []
+}

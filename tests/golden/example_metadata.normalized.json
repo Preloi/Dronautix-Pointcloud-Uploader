@@ -1,0 +1,30 @@
+{
+  "boundingBox": {
+    "lx": 690123.12345679,
+    "ly": 5330123.98765432,
+    "lz": 411.12345679,
+    "ux": 690223.12345678,
+    "uy": 5330223.98765433,
+    "uz": 455.98765432
+  },
+  "crs": "EPSG:25832",
+  "description": "Beispiel mit Umlauten und CRS",
+  "last_updated": "<volatile>",
+  "name": "Wolke Café",
+  "offset": [
+    690123.12345679,
+    5330123.98765432,
+    411.12345679
+  ],
+  "points": 123456,
+  "projection": "EPSG:25832",
+  "scale": [
+    0.001,
+    0.001,
+    0.001
+  ],
+  "spacing": 0.01234568,
+  "version": "2.0",
+  "vertical_crs": "EPSG:7837",
+  "vertical_datum": "DHHN2016"
+}

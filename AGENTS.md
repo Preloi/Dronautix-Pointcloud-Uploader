@@ -32,6 +32,8 @@ Seit Version 1.7.10 prueft der Updater keine Authenticode-Signatur mehr, sondern
 
 ## Git-Hinweise
 
+Committen, Pushen und Deployen nur nach ausdruecklicher Aufforderung oder Freigabe durch den User. Prozessbeschreibungen in diesem Dokument sind keine pauschale Erlaubnis fuer eigenstaendige Veroeffentlichungen.
+
 Vor dem Commit immer `git status --short --branch` pruefen. Nicht verwandte lokale Aenderungen nicht versehentlich mitcommiten.
 
 Nach erfolgreichem Commit/Push den Remote-Stand mit `git ls-remote --heads dronautix master` pruefen. Fuer Releases zusaetzlich `git ls-remote --tags dronautix v<version>` und `gh release view v<version> --repo Preloi/Dronautix-Pointcloud-Uploader` verwenden.

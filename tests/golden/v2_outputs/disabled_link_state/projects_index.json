@@ -1,0 +1,35 @@
+{
+  "projects": [],
+  "disabled_projects": [
+    {
+      "id": "disable-target",
+      "kunde": "Disable Kunde",
+      "projekt": "Disable Projekt",
+      "format": "copc",
+      "link": "https://pointcloud.dronautix.at/index.html?id=disable-target",
+      "viewer_path": "golden/disable_target/source.copc.laz",
+      "s3_path": "pointclouds/golden/disable_target/source.copc.laz",
+      "disabled_at": "2026-06-21T12:00:00"
+    },
+    {
+      "datum": "",
+      "kunde": "Disabled Kunde Neu",
+      "id": "disabled-target",
+      "projekt": "Disabled Projekt Neu",
+      "format": "copc",
+      "link": "https://pointcloud.dronautix.at/index.html?id=disabled-target",
+      "viewer_path": "golden/disabled_target/source.copc.laz",
+      "s3_path": "pointclouds/golden/disabled_target",
+      "crs": "EPSG:4326",
+      "projection": "EPSG:4326",
+      "epsg": "EPSG:4326",
+      "crs_info": {
+        "value": "EPSG:4326",
+        "projection": "EPSG:4326",
+        "epsg": "EPSG:4326"
+      },
+      "disabled_at": "2026-06-20T12:00:00"
+    }
+  ],
+  "last_updated": "2026-06-21T12:30:00"
+}
