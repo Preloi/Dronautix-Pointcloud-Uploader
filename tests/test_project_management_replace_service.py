@@ -306,6 +306,29 @@ def test_versioned_project_root_is_not_nested_again():
     )
 
 
+def test_stable_project_root_preserves_regular_versions_path_segments():
+    service = make_service(FakeRepository({"projects": []}))
+
+    assert service._stable_project_roots(
+        {
+            "viewer_path": "versions/project/projekt",
+            "s3_path": "pointclouds/versions/project/projekt",
+        }
+    ) == (
+        "versions/project/projekt",
+        "pointclouds/versions/project/projekt",
+    )
+    assert service._stable_project_roots(
+        {
+            "viewer_path": "kunde/project/versions/versions/old/source.copc.laz",
+            "s3_path": "pointclouds/kunde/project/versions/versions/old",
+        }
+    ) == (
+        "kunde/project/versions",
+        "pointclouds/kunde/project/versions",
+    )
+
+
 def test_replace_unknown_target_pointcloud_path_raises_value_error(tmp_path):
     project_root = "pointclouds/kunde/project/projekt"
     repository = FakeRepository(

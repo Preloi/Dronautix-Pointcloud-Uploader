@@ -1,9 +1,4 @@
-"""UI-free PotreeConverter boundary.
-
-The command shape is intentionally frozen from the current CustomTkinter app:
-``[converter_path, source_file, "-o", output_dir, "--overwrite"]`` with the
-process working directory set to the converter executable's directory.
-"""
+"""UI-free PotreeConverter boundary using Brotli output encoding."""
 
 from __future__ import annotations
 
@@ -26,7 +21,7 @@ class PotreeCommand:
 
 
 def build_potree_command(source_file: str, converter_path: str, output_dir: str) -> PotreeCommand:
-    """Build the exact PotreeConverter command used by the legacy app."""
+    """Build the PotreeConverter command used by the V2 app."""
 
     return PotreeCommand(
         args=(converter_path, source_file, "-o", output_dir, "--overwrite", "--encoding", "BROTLI"),

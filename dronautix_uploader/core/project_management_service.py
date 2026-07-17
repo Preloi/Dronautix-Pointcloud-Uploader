@@ -512,7 +512,8 @@ def _attach_source_overrides(prepared_sources, source_overrides):
 def _strip_data_version(path: str) -> str:
     marker = "/versions/"
     normalized = str(path or "").strip().rstrip("/")
-    return normalized.split(marker, 1)[0]
+    stable_root, separator, version = normalized.rpartition(marker)
+    return stable_root if separator and version and "/" not in version else normalized
 
 
 __all__ = ["ProjectManagementService"]
