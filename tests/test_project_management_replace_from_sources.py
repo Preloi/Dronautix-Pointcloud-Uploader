@@ -63,6 +63,7 @@ def make_service(repository, s3_client=None):
         s3_client=s3_client or FakeS3Client(),
         id_factory=lambda: "newid",
         timestamp_factory=lambda: "2026-06-21T13:00:00",
+        data_version_factory=lambda: "versionid",
     )
 
 
@@ -167,8 +168,8 @@ def test_full_replace_from_sources_disabled_multi_copc_and_raw_keeps_disabled_an
     assert [cloud["name"] for cloud in disabled_project["pointclouds"]] == ["Scan", "Raw"]
     assert [cloud["format"] for cloud in disabled_project["pointclouds"]] == ["copc", "potree"]
     assert [cloud["s3_path"] for cloud in disabled_project["pointclouds"]] == [
-        f"{project_root}/scan/{COPC_OBJECT_NAME}",
-        f"{project_root}/raw",
+        f"{project_root}/versions/versionid/scan/{COPC_OBJECT_NAME}",
+        f"{project_root}/versions/versionid/raw",
     ]
     assert [cloud["crs_info"] for cloud in disabled_project["pointclouds"]] == [
         {"value": "EPSG:25832", "epsg": 25832},
@@ -182,9 +183,9 @@ def test_full_replace_from_sources_disabled_multi_copc_and_raw_keeps_disabled_an
     assert raw_metadata["srs"]["horizontal"] == "4326"
     assert raw_cloudjs["projection"] == "EPSG:4326"
     assert sorted(key for _bucket, key, _extra in s3_client.uploads) == [
-        f"{project_root}/raw/cloud.js",
-        f"{project_root}/raw/metadata.json",
-        f"{project_root}/scan/{COPC_OBJECT_NAME}",
+        f"{project_root}/versions/versionid/raw/cloud.js",
+        f"{project_root}/versions/versionid/raw/metadata.json",
+        f"{project_root}/versions/versionid/scan/{COPC_OBJECT_NAME}",
     ]
     assert s3_client.deleted == [
         f"{project_root}/old_a/cloud.js",
@@ -258,8 +259,8 @@ def test_single_replace_from_source_active_multi_copc_replaces_only_target_and_d
     }
     assert pointclouds[1]["name"] == "Cloud B Replacement"
     assert pointclouds[1]["format"] == "copc"
-    assert pointclouds[1]["viewer_path"] == f"{viewer_root}/cloud_b_replacement/{COPC_OBJECT_NAME}"
-    assert pointclouds[1]["s3_path"] == f"{project_root}/cloud_b_replacement/{COPC_OBJECT_NAME}"
+    assert pointclouds[1]["viewer_path"] == f"{viewer_root}/versions/versionid/cloud_b_replacement/{COPC_OBJECT_NAME}"
+    assert pointclouds[1]["s3_path"] == f"{project_root}/versions/versionid/cloud_b_replacement/{COPC_OBJECT_NAME}"
     assert pointclouds[1]["visible"] is False
     assert s3_client.deleted == [
         f"{target_path}/cloud.js",
@@ -314,12 +315,17 @@ def test_single_replace_from_source_legacy_single_copc_keeps_root_paths(tmp_path
     assert result.status == "success"
     assert "pointclouds" not in project
     assert project["format"] == "copc"
-    assert project["viewer_path"] == f"{viewer_root}/{COPC_OBJECT_NAME}"
-    assert project["s3_path"] == project_root
+    assert project["viewer_path"] == f"{viewer_root}/versions/versionid/{COPC_OBJECT_NAME}"
+    assert project["s3_path"] == f"{project_root}/versions/versionid"
     assert project["disabled_at"] == "2026-06-21T12:00:00"
     assert project["crs"] == "EPSG:4326"
-    assert sorted(key for _bucket, key, _extra in s3_client.uploads) == [f"{project_root}/{COPC_OBJECT_NAME}"]
-    assert s3_client.deleted == [f"{project_root}/old.bin"]
+    assert sorted(key for _bucket, key, _extra in s3_client.uploads) == [
+        f"{project_root}/versions/versionid/{COPC_OBJECT_NAME}"
+    ]
+    assert s3_client.deleted == [
+        f"{project_root}/old.bin",
+        f"{project_root}/{COPC_OBJECT_NAME}",
+    ]
 
 
 def test_full_replace_from_sources_uses_common_crs_as_top_level_project_crs(tmp_path):

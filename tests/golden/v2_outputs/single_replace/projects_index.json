@@ -20,8 +20,8 @@
         {
           "name": "Cloud B Replacement",
           "format": "potree",
-          "viewer_path": "golden/replace_single/cloud_b_replacement",
-          "s3_path": "pointclouds/golden/replace_single/cloud_b_replacement",
+          "viewer_path": "golden/replace_single/versions/golden-data/cloud_b_replacement",
+          "s3_path": "pointclouds/golden/replace_single/versions/golden-data/cloud_b_replacement",
           "visible": false,
           "crs": "EPSG:25832",
           "projection": "EPSG:25832",

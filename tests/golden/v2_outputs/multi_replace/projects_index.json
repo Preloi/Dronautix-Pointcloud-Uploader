@@ -21,8 +21,8 @@
         {
           "name": "Scan",
           "format": "copc",
-          "viewer_path": "golden/replace_multi/scan/source.copc.laz",
-          "s3_path": "pointclouds/golden/replace_multi/scan/source.copc.laz",
+          "viewer_path": "golden/replace_multi/versions/golden-data/scan/source.copc.laz",
+          "s3_path": "pointclouds/golden/replace_multi/versions/golden-data/scan/source.copc.laz",
           "visible": true,
           "crs": "EPSG:25832",
           "projection": "EPSG:25832",
@@ -36,8 +36,8 @@
         {
           "name": "Raw",
           "format": "potree",
-          "viewer_path": "golden/replace_multi/raw",
-          "s3_path": "pointclouds/golden/replace_multi/raw",
+          "viewer_path": "golden/replace_multi/versions/golden-data/raw",
+          "s3_path": "pointclouds/golden/replace_multi/versions/golden-data/raw",
           "visible": true,
           "crs": "EPSG:4326",
           "projection": "EPSG:4326",

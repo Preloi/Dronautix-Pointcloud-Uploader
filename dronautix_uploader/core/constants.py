@@ -27,7 +27,7 @@ UPDATE_MANIFEST_URL = (
     f"{UPDATE_MANIFEST_BRANCH}/latest-release.json"
 )
 
-S3_CACHE_CONTROL = "no-cache, no-store, must-revalidate, max-age=0"
+S3_CACHE_CONTROL = "public, max-age=31536000, immutable"
 S3_INDEX_CACHE_CONTROL = "no-cache"
 S3_DELETED_CACHE_CONTROL = "no-cache, no-store, must-revalidate"
 COPC_OBJECT_NAME = "source.copc.laz"

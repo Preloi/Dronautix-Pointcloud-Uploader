@@ -198,15 +198,16 @@ Golden comparisons must normalize JSON and `cloud.js` before comparing:
 
 ## Converter Contract
 
-The PotreeConverter command is frozen from the legacy app:
+The V2 app requests Brotli output explicitly:
 
 ```text
-[converter_path, source_file, "-o", output_dir, "--overwrite"]
+[converter_path, source_file, "-o", output_dir, "--overwrite", "--encoding", "BROTLI"]
 ```
 
 The process working directory is `os.path.dirname(converter_path)`. Standard
 error is merged into standard output, lines are logged with `[POTREE]`, percent
-matches drive progress, and non-zero exit codes raise an error.
+matches drive progress, and non-zero exit codes raise an error. A successful
+conversion must produce a valid `metadata.json` whose `encoding` is `BROTLI`.
 
 ## S3 Upload Contract
 
@@ -215,9 +216,12 @@ S3 uploads use `upload_file` with:
 ```python
 ExtraArgs={
     "ContentType": mimetypes.guess_type(local_path)[0] or "application/octet-stream",
-    "CacheControl": "no-cache, no-store, must-revalidate, max-age=0",
+    "CacheControl": "public, max-age=31536000, immutable",
 }
 ```
+
+Replacement uploads use a fresh `versions/<data_version>` prefix so immutable
+objects are never overwritten. `projects_index.json` remains uncached.
 
 COPC direct uploads always target:
 

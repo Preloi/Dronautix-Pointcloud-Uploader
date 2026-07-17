@@ -130,6 +130,8 @@ def test_upload_files_records_only_successfully_uploaded_keys(tmp_path):
         "ContentType": "application/octet-stream",
         "CacheControl": S3_CACHE_CONTROL,
     }
+    assert S3_CACHE_CONTROL == "public, max-age=31536000, immutable"
+    assert "ContentEncoding" not in fake_s3.uploads[0]["extra_args"]
 
 
 def test_collect_project_object_entries_reads_paginator_pages():

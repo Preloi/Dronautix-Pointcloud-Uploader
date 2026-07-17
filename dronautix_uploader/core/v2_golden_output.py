@@ -183,6 +183,7 @@ def _generate_project_management_scenario(
         s3_client=fake_s3,
         id_factory=lambda: "abc12d01",
         timestamp_factory=lambda: FIXED_PROJECT_TIMESTAMP,
+        data_version_factory=lambda: "golden-data",
         bucket_name=BUCKET_NAME,
     )
     _run_project_management_scenario(scenario_id, work_dir, fake_s3, service)

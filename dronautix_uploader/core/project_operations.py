@@ -76,6 +76,43 @@ class ProjectDownloadCancelledError(RuntimeError):
         self.downloaded_files = downloaded_files
 
 
+def rebase_prepared_cloud_upload(
+    cloud: PreparedCloudUpload,
+    viewer_root: str,
+    s3_root: str,
+    slug: str | None = None,
+) -> PreparedCloudUpload:
+    """Move an upload plan to a fresh immutable data prefix."""
+
+    target_slug = cloud.slug if slug is None else slug
+    viewer_prefix = f"{viewer_root}/{target_slug}" if target_slug else viewer_root
+    s3_prefix = f"{s3_root}/{target_slug}" if target_slug else s3_root
+    files_to_upload = tuple(
+        (
+            local_path,
+            f"{s3_prefix}/{s3_key[len(cloud.s3_prefix):].lstrip('/')}",
+        )
+        for local_path, s3_key in cloud.files_to_upload
+    )
+    if cloud.input_format == "copc":
+        viewer_path = f"{viewer_prefix}/{COPC_OBJECT_NAME}"
+        s3_path = f"{s3_prefix}/{COPC_OBJECT_NAME}"
+    else:
+        viewer_path = viewer_prefix
+        s3_path = s3_prefix
+
+    return PreparedCloudUpload(
+        name=cloud.name,
+        slug=target_slug,
+        input_format=cloud.input_format,
+        viewer_path=viewer_path,
+        s3_path=s3_path,
+        s3_prefix=s3_prefix,
+        files_to_upload=files_to_upload,
+        crs_info=cloud.crs_info,
+    )
+
+
 def prepare_cloud_uploads(
     sources: tuple[PointcloudSource, ...] | list[PointcloudSource],
     project_viewer_root: str,
@@ -892,6 +929,7 @@ __all__ = [
     "build_download_folder_name",
     "prepare_cloud_uploads",
     "prepare_single_project_upload",
+    "rebase_prepared_cloud_upload",
     "delete_project",
     "download_project",
     "duplicate_project",
