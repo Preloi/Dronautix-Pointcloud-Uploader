@@ -8,6 +8,7 @@ process working directory set to the converter executable's directory.
 from __future__ import annotations
 
 import os
+import json
 import re
 import subprocess
 from dataclasses import dataclass
@@ -15,7 +16,7 @@ from typing import Iterable
 
 from .contracts import ProgressCallback, ProgressEvent
 
-POTREE_CONVERTER_FLAGS = ("-o", "--overwrite")
+POTREE_CONVERTER_FLAGS = ("-o", "--overwrite", "--encoding", "BROTLI")
 
 
 @dataclass(frozen=True)
@@ -28,7 +29,7 @@ def build_potree_command(source_file: str, converter_path: str, output_dir: str)
     """Build the exact PotreeConverter command used by the legacy app."""
 
     return PotreeCommand(
-        args=(converter_path, source_file, "-o", output_dir, "--overwrite"),
+        args=(converter_path, source_file, "-o", output_dir, "--overwrite", "--encoding", "BROTLI"),
         cwd=os.path.dirname(converter_path),
     )
 
@@ -43,6 +44,18 @@ def parse_potree_percent(line: str) -> float | None:
     if not match:
         return None
     return min(max(int(match.group(1)) / 100.0, 0.0), 1.0)
+
+
+def validate_brotli_output(output_dir: str) -> None:
+    metadata_path = os.path.join(output_dir, "metadata.json")
+    try:
+        with open(metadata_path, encoding="utf-8") as metadata_file:
+            metadata = json.load(metadata_file)
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError("Potree-Konvertierung hat keine gueltige metadata.json erzeugt.") from error
+
+    if str(metadata.get("encoding", "")).upper() != "BROTLI":
+        raise RuntimeError("PotreeConverter hat das angeforderte BROTLI-Encoding nicht erzeugt.")
 
 
 def run_potree_conversion(
@@ -89,5 +102,7 @@ def run_potree_conversion(
     if process.returncode != 0:
         raise RuntimeError(f"Potree Konvertierung fehlgeschlagen (Exit Code: {process.returncode})")
 
-    _emit(on_progress, ProgressEvent(kind="log", message="[KONVERTIERUNG] Potree Konvertierung abgeschlossen"))
+    validate_brotli_output(output_dir)
+
+    _emit(on_progress, ProgressEvent(kind="log", message="[KONVERTIERUNG] Potree Konvertierung mit BROTLI abgeschlossen"))
     _emit(on_progress, ProgressEvent(kind="progress", percent=1.0))

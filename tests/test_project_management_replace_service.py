@@ -64,6 +64,7 @@ def make_service(repository, s3_client=None):
         s3_client=s3_client or FakeS3Client(),
         id_factory=lambda: "newid",
         timestamp_factory=lambda: "2026-06-21T13:00:00",
+        data_version_factory=lambda: "versionid",
     )
 
 
@@ -132,8 +133,8 @@ def test_full_replacement_disabled_multi_project_keeps_disabled_and_deletes_old_
     assert disabled_project["format"] == "multi"
     assert [cloud["name"] for cloud in disabled_project["pointclouds"]] == ["New A", "New B"]
     assert [cloud["s3_path"] for cloud in disabled_project["pointclouds"]] == [
-        f"{project_root}/new_a/source.copc.laz",
-        f"{project_root}/new_b/source.copc.laz",
+        f"{project_root}/versions/versionid/new_a/source.copc.laz",
+        f"{project_root}/versions/versionid/new_b/source.copc.laz",
     ]
     assert s3_client.deleted == [
         f"{project_root}/old_a/cloud.js",
@@ -209,7 +210,7 @@ def test_single_replacement_active_multi_project_replaces_only_target_and_delete
         "s3_path": f"{project_root}/cloud_a",
     }
     assert pointclouds[1]["name"] == "Cloud B Replacement"
-    assert pointclouds[1]["s3_path"] == f"{project_root}/cloud_b_new/source.copc.laz"
+    assert pointclouds[1]["s3_path"] == f"{project_root}/versions/versionid/cloud_b_new/source.copc.laz"
     assert s3_client.deleted == [
         f"{target_path}/cloud.js",
         f"{target_path}/metadata.json",
@@ -272,12 +273,15 @@ def test_single_replacement_active_legacy_single_project_keeps_top_level_shape_a
     assert result.status == "success"
     assert "pointclouds" not in project
     assert project["format"] == "copc"
-    assert project["viewer_path"] == f"{viewer_root}/source.copc.laz"
-    assert project["s3_path"] == project_root
+    assert project["viewer_path"] == f"{viewer_root}/versions/versionid/source.copc.laz"
+    assert project["s3_path"] == f"{project_root}/versions/versionid"
     assert project["crs"] == "EPSG:4326"
     assert project["crs_info"] == {"value": "EPSG:4326"}
     assert s3_client.prefixes == [f"{project_root}/source.copc.laz"]
-    assert s3_client.deleted == [f"{project_root}/old.bin"]
+    assert s3_client.deleted == [
+        f"{project_root}/old.bin",
+        f"{project_root}/source.copc.laz",
+    ]
 
 
 def test_replace_unknown_project_id_raises_value_error(tmp_path):
@@ -286,6 +290,20 @@ def test_replace_unknown_project_id_raises_value_error(tmp_path):
 
     with pytest.raises(ValueError, match="missing"):
         make_service(repository).replace_project_pointclouds("missing", prepared)
+
+
+def test_versioned_project_root_is_not_nested_again():
+    service = make_service(FakeRepository({"projects": []}))
+
+    assert service._stable_project_roots(
+        {
+            "viewer_path": "kunde/project/projekt/versions/old/source.copc.laz",
+            "s3_path": "pointclouds/kunde/project/projekt/versions/old",
+        }
+    ) == (
+        "kunde/project/projekt",
+        "pointclouds/kunde/project/projekt",
+    )
 
 
 def test_replace_unknown_target_pointcloud_path_raises_value_error(tmp_path):
@@ -340,4 +358,4 @@ def test_full_replacement_rolls_back_uploaded_keys_when_index_save_fails(tmp_pat
         make_service(repository, s3_client).replace_project_pointclouds("project", prepared)
 
     assert repository.index_data == original_index
-    assert s3_client.deleted == [f"{project_root}/new/source.copc.laz"]
+    assert s3_client.deleted == [f"{project_root}/versions/versionid/new/source.copc.laz"]

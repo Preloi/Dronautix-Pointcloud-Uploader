@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from dronautix_uploader.core.constants import S3_CACHE_CONTROL
 from dronautix_uploader.core.v2_golden_output import (
     SIDE_EFFECTS_JSON,
     SUPPORTED_V2_GOLDEN_SCENARIOS,
@@ -180,7 +181,7 @@ def test_generate_v2_upload_records_upload_extra_args_and_index_save(tmp_path):
 
     assert upload_events
     assert all(event["purpose"] == "new_project_upload" for event in upload_events)
-    assert all(event["extra_args"]["CacheControl"] == "no-cache, no-store, must-revalidate, max-age=0" for event in upload_events)
+    assert all(event["extra_args"]["CacheControl"] == S3_CACHE_CONTROL for event in upload_events)
     assert all(event["extra_args"]["ContentType"] for event in upload_events)
     assert index_put["purpose"] == "save_projects_index"
     assert index_put["cache_control"] == "no-cache"
@@ -200,7 +201,7 @@ def test_generate_v2_duplicate_project_records_copy_operations(tmp_path):
     assert not upload_events
     assert [event["key"] for event in copy_events] == list(result.uploaded_keys)
     assert all(event["purpose"] == "duplicate_copy" for event in copy_events)
-    assert all(event["cache_control"] == "no-cache, no-store, must-revalidate, max-age=0" for event in copy_events)
+    assert all(event["cache_control"] == S3_CACHE_CONTROL for event in copy_events)
 
 
 def test_generate_v2_disabled_link_state_output_keeps_disabled_projects_disabled(tmp_path):

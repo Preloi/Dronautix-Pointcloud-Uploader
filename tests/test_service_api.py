@@ -417,8 +417,8 @@ def test_core_service_api_routes_single_and_multi_replacement_contracts(tmp_path
     assert repository.index_data["projects"][0]["pointclouds"][0]["name"] == "Benannte Cloud"
     assert repository.index_data["projects"][0]["pointclouds"][0]["crs"] == "EPSG:4326"
     uploaded_keys = [upload[2] for upload in s3_client.uploads]
-    assert "pointclouds/kunde/project/projekt/single/source.copc.laz" in uploaded_keys
-    assert "pointclouds/kunde/project/projekt/custom_slug/source.copc.laz" in uploaded_keys
+    assert any(key.endswith("/single/source.copc.laz") and "/versions/" in key for key in uploaded_keys)
+    assert any(key.endswith("/custom_slug/source.copc.laz") and "/versions/" in key for key in uploaded_keys)
 
 
 def test_core_service_api_requires_explicit_target_for_multi_cloud_single_replacement(tmp_path):

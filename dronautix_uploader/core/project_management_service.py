@@ -26,6 +26,7 @@ from .project_operations import (
     download_project as download_project_operation,
     prepare_cloud_uploads,
     prepare_single_project_upload,
+    rebase_prepared_cloud_upload,
     ProjectDownloadCancelledError,
     replace_project_pointclouds as replace_project_pointclouds_operation,
     replace_single_project_pointcloud as replace_single_project_pointcloud_operation,
@@ -42,6 +43,10 @@ def _default_timestamp() -> str:
     return datetime.now().isoformat()
 
 
+def _default_data_version() -> str:
+    return uuid4().hex[:12]
+
+
 @dataclass(frozen=True)
 class ProjectManagementService:
     """Coordinate project metadata repository access and project operations."""
@@ -50,6 +55,7 @@ class ProjectManagementService:
     s3_client: Any
     id_factory: Callable[[], str] = _default_project_id
     timestamp_factory: Callable[[], str] = _default_timestamp
+    data_version_factory: Callable[[], str] = _default_data_version
     bucket_name: str | None = None
 
     @property
@@ -200,10 +206,15 @@ class ProjectManagementService:
     ):
         index_data = self.repository.load_projects_index()
         project_info, _is_disabled = self._find_project(index_data, project_id)
-        project_s3_prefix = self._project_s3_prefix(project_info)
+        project_viewer_root, project_s3_prefix = self._stable_project_roots(project_info)
         if not project_s3_prefix:
             raise ValueError(f"Projekt mit ID '{project_id}' hat keinen S3-Pfad.")
 
+        version_viewer_root, version_s3_prefix = self._versioned_roots(project_info)
+        versioned_clouds = tuple(
+            rebase_prepared_cloud_upload(cloud, version_viewer_root, version_s3_prefix)
+            for cloud in prepared_clouds
+        )
         existing_keys = collect_project_objects(
             self.s3_client,
             project_s3_prefix,
@@ -213,9 +224,9 @@ class ProjectManagementService:
             s3_client=self.s3_client,
             index_data=index_data,
             project_id=project_id,
-            base_viewer_path=self._project_viewer_root(project_info),
+            base_viewer_path=project_viewer_root,
             s3_prefix=project_s3_prefix,
-            prepared_clouds=tuple(prepared_clouds),
+            prepared_clouds=versioned_clouds,
             existing_keys=tuple(existing_keys),
             save_index=self._save_projects_index,
             delete_keys=lambda keys: delete_s3_objects(self.s3_client, keys, bucket_name=self._bucket_name),
@@ -237,8 +248,8 @@ class ProjectManagementService:
     ):
         index_data = self.repository.load_projects_index()
         project_info, _is_disabled = self._find_project(index_data, project_id)
-        project_viewer_root = self._project_viewer_root(project_info)
-        project_s3_prefix = self._project_s3_prefix(project_info)
+        project_viewer_root, project_s3_prefix = self._stable_project_roots(project_info)
+        version_viewer_root, version_s3_prefix = self._versioned_roots(project_info)
         prepared_sources = prepare_pointcloud_sources(
             PointcloudPreparationRequest(
                 sources=tuple(source_paths),
@@ -252,7 +263,7 @@ class ProjectManagementService:
         prepared_sources = _attach_source_overrides(prepared_sources, source_overrides)
         prepared_sources = _attach_crs_info(prepared_sources, tuple(source_paths), crs_info_by_source_path)
         write_potree_metadata_crs_for_sources(prepared_sources)
-        prepared_clouds = prepare_cloud_uploads(prepared_sources, project_viewer_root, project_s3_prefix)
+        prepared_clouds = prepare_cloud_uploads(prepared_sources, version_viewer_root, version_s3_prefix)
         existing_keys = collect_project_objects(
             self.s3_client,
             project_s3_prefix,
@@ -285,6 +296,14 @@ class ProjectManagementService:
         if not self._has_pointcloud_s3_path(project_info, target_path):
             raise ValueError(f"Punktwolke mit S3-Pfad '{target_pointcloud_s3_path}' wurde nicht gefunden.")
 
+        project_viewer_root, project_s3_prefix = self._stable_project_roots(project_info)
+        version_viewer_root, version_s3_prefix = self._versioned_roots(project_info)
+        versioned_cloud = rebase_prepared_cloud_upload(
+            prepared_cloud,
+            version_viewer_root,
+            version_s3_prefix,
+            slug=prepared_cloud.slug if isinstance(project_info.get("pointclouds"), list) else "",
+        )
         existing_target_keys = collect_project_objects(
             self.s3_client,
             target_path,
@@ -294,9 +313,9 @@ class ProjectManagementService:
             s3_client=self.s3_client,
             index_data=index_data,
             project_id=project_id,
-            base_viewer_path=self._project_viewer_root(project_info),
-            s3_prefix=self._project_s3_prefix(project_info),
-            prepared_cloud=prepared_cloud,
+            base_viewer_path=project_viewer_root,
+            s3_prefix=project_s3_prefix,
+            prepared_cloud=versioned_cloud,
             target_pointcloud_s3_path=target_path,
             existing_target_keys=tuple(existing_target_keys),
             save_index=self._save_projects_index,
@@ -339,16 +358,18 @@ class ProjectManagementService:
             {source_path: crs_info} if crs_info else None,
         )
         write_potree_metadata_crs_for_sources(prepared_sources)
+        project_viewer_root, project_s3_prefix = self._stable_project_roots(project_info)
+        version_viewer_root, version_s3_prefix = self._versioned_roots(project_info)
         prepared_cloud = prepare_cloud_uploads(
             prepared_sources,
-            self._project_viewer_root(project_info),
-            self._project_s3_prefix(project_info),
+            version_viewer_root,
+            version_s3_prefix,
         )[0]
         if not isinstance(project_info.get("pointclouds"), list) and self._has_pointcloud_s3_path(project_info, target_path):
             prepared_cloud = prepare_single_project_upload(
                 prepared_sources[0],
-                self._project_viewer_root(project_info),
-                self._project_s3_prefix(project_info),
+                version_viewer_root,
+                version_s3_prefix,
             )
         existing_target_keys = collect_project_objects(
             self.s3_client,
@@ -359,8 +380,8 @@ class ProjectManagementService:
             s3_client=self.s3_client,
             index_data=index_data,
             project_id=project_id,
-            base_viewer_path=self._project_viewer_root(project_info),
-            s3_prefix=self._project_s3_prefix(project_info),
+            base_viewer_path=project_viewer_root,
+            s3_prefix=project_s3_prefix,
             prepared_cloud=prepared_cloud,
             target_pointcloud_s3_path=target_path,
             existing_target_keys=tuple(existing_target_keys),
@@ -403,6 +424,19 @@ class ProjectManagementService:
             if str(pointcloud.get("s3_path", "")).strip().rstrip("/") == normalized_target:
                 return True
         return False
+
+    def _stable_project_roots(self, project: dict[str, Any]) -> tuple[str, str]:
+        return (
+            _strip_data_version(self._project_viewer_root(project)),
+            _strip_data_version(self._project_s3_prefix(project)),
+        )
+
+    def _versioned_roots(self, project: dict[str, Any]) -> tuple[str, str]:
+        viewer_root, s3_root = self._stable_project_roots(project)
+        version = str(self.data_version_factory()).strip()
+        if not version or "/" in version or "\\" in version:
+            raise ValueError("Ungueltige Datenversion fuer den Punktwolken-Upload.")
+        return f"{viewer_root}/versions/{version}", f"{s3_root}/versions/{version}"
 
     def _save_projects_index(self, index_data: dict[str, Any]) -> bool:
         result = self.repository.save_projects_index(index_data)
@@ -473,6 +507,12 @@ def _attach_source_overrides(prepared_sources, source_overrides):
     if len(updated_sources) < len(prepared_sources):
         updated_sources.extend(prepared_sources[len(updated_sources) :])
     return tuple(updated_sources)
+
+
+def _strip_data_version(path: str) -> str:
+    marker = "/versions/"
+    normalized = str(path or "").strip().rstrip("/")
+    return normalized.split(marker, 1)[0]
 
 
 __all__ = ["ProjectManagementService"]
