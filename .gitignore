@@ -6,6 +6,8 @@ build/
 dist/
 Output/
 bucket-cors.json
+AGENTS.md
+CLAUDE.md
 
 # Test / tooling caches
 .pytmp/
