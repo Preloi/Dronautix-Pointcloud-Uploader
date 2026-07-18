@@ -133,6 +133,7 @@ def test_projects_page_shows_persistent_history_only_when_present_when_qt_availa
             "id": "changed",
             "projekt": "Projekt",
             "kunde": "Kunde",
+            "datum": "2026-07-01T08:00:00",
             "pointclouds": [{"name": "Scan", "crs": "EPSG:25832"}],
             "history": [
                 {"timestamp": "2026-07-18T12:30:00", "message": "Punktwolke 'Scan' wurde ausgetauscht."}
@@ -143,7 +144,11 @@ def test_projects_page_shows_persistent_history_only_when_present_when_qt_availa
     page = create_projects_page(QtCore, QtGui, QtWidgets, project_previews=(preview,))
 
     try:
+        table = page.findChild(QtWidgets.QTableView, "ProjectsTable")
         history_log = page.findChild(QtWidgets.QPlainTextEdit, "ProjectHistoryLog")
+        assert table.model().index(0, 4).data() == "18.07.2026 12:30"
+        assert "Erstellt am" in {label.text() for label in page.findChildren(QtWidgets.QLabel)}
+        assert "01.07.2026 08:00" in {label.text() for label in page.findChildren(QtWidgets.QLabel)}
         assert not history_log.isHidden()
         assert history_log.toPlainText() == "18.07.2026 12:30 – Punktwolke 'Scan' wurde ausgetauscht."
     finally:

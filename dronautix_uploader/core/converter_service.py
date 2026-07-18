@@ -53,6 +53,18 @@ def validate_brotli_output(output_dir: str) -> None:
         raise RuntimeError("PotreeConverter hat das angeforderte BROTLI-Encoding nicht erzeugt.")
 
 
+def _hidden_window_options() -> dict[str, object]:
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        "startupinfo": startupinfo,
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    }
+
+
 def run_potree_conversion(
     source_file: str,
     converter_path: str,
@@ -74,6 +86,7 @@ def run_potree_conversion(
         stderr=subprocess.STDOUT,
         universal_newlines=True,
         bufsize=1,
+        **_hidden_window_options(),
     )
 
     try:

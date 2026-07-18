@@ -41,12 +41,15 @@ def test_make_project_preview_normalizes_missing_values_without_qt():
     assert preview.pointclouds[0].name == "Punktwolke 1"
     assert preview.pointclouds[0].crs == "Unbekannt"
     assert preview.history == ()
+    assert preview.created == "Noch nicht geladen"
+    assert preview.updated == "Noch nicht geladen"
 
 
 def test_make_project_preview_formats_change_history_newest_first():
     preview = make_project_preview(
         {
             "projekt": "Projekt",
+            "datum": "2026-07-01T08:00:00",
             "history": [
                 {"timestamp": "2026-07-17T10:15:00", "message": "Name geändert."},
                 {"timestamp": "2026-07-18T12:30:00", "message": "Punktwolke ausgetauscht."},
@@ -59,6 +62,20 @@ def test_make_project_preview_formats_change_history_newest_first():
         "18.07.2026 12:30 – Punktwolke ausgetauscht.",
         "17.07.2026 10:15 – Name geändert.",
     )
+    assert preview.created == "01.07.2026 08:00"
+    assert preview.updated == "18.07.2026 12:30"
+    assert preview.updated_sort == "2026-07-18 12:30"
+
+
+def test_make_project_preview_uses_creation_date_as_updated_fallback_without_history():
+    preview = make_project_preview(
+        {"projekt": "Projekt", "datum": "2026-07-01T08:00:00"},
+        disabled=False,
+    )
+
+    assert preview.created == "01.07.2026 08:00"
+    assert preview.updated == "01.07.2026 08:00"
+    assert preview.updated_sort == "2026-07-01 08:00"
 
 
 def test_project_format_column_shows_einzel_or_multi_instead_of_stored_format():

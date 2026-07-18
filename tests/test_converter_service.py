@@ -3,11 +3,30 @@ import os
 
 import pytest
 
+from dronautix_uploader.core import converter_service
 from dronautix_uploader.core.converter_service import (
     build_potree_command,
     parse_potree_percent,
     validate_brotli_output,
 )
+
+
+def test_converter_process_is_started_without_a_window_on_windows(monkeypatch):
+    class StartupInfo:
+        dwFlags = 0
+        wShowWindow = None
+
+    monkeypatch.setattr(converter_service.os, "name", "nt")
+    monkeypatch.setattr(converter_service.subprocess, "STARTUPINFO", StartupInfo, raising=False)
+    monkeypatch.setattr(converter_service.subprocess, "STARTF_USESHOWWINDOW", 1, raising=False)
+    monkeypatch.setattr(converter_service.subprocess, "SW_HIDE", 0, raising=False)
+    monkeypatch.setattr(converter_service.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+
+    options = converter_service._hidden_window_options()
+
+    assert options["startupinfo"].dwFlags == 1
+    assert options["startupinfo"].wShowWindow == 0
+    assert options["creationflags"] == 0x08000000
 
 
 def test_build_potree_command_matches_legacy_flags():

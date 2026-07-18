@@ -1034,7 +1034,7 @@ def create_projects_page(
     info_grid.setContentsMargins(0, 0, 0, 0)
     info_grid.setHorizontalSpacing(14)
     info_grid.setVerticalSpacing(8)
-    info_field_keys = ("Kunde", "Format", "Punktwolken", "Aktualisiert", "Viewer-Link", "S3-Pfad")
+    info_field_keys = ("Kunde", "Format", "Punktwolken", "Erstellt am", "Viewer-Link", "S3-Pfad")
     info_values = {}
     for row, key in enumerate(info_field_keys):
         key_label = QtWidgets.QLabel(key)
@@ -1355,7 +1355,7 @@ def create_projects_page(
         info_values["Kunde"].setText(project.customer or "-")
         info_values["Format"].setText(project.format or "-")
         info_values["Punktwolken"].setText(str(len(project.pointclouds)))
-        info_values["Aktualisiert"].setText(project.updated or "-")
+        info_values["Erstellt am"].setText(project.created or "-")
         _set_viewer_link(info_values["Viewer-Link"], project)
         info_values["S3-Pfad"].setText(project.s3_path or "-")
 

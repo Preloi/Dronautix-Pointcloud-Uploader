@@ -89,6 +89,7 @@ class ProjectPreview:
     link: str
     disabled: bool
     pointclouds: tuple[PointcloudPreview, ...]
+    created: str = DATUM_PLACEHOLDER
     s3_path: str = ""
     viewer_path: str = ""
     updated_sort: str = ""
@@ -125,16 +126,19 @@ def make_project_preview(project: dict[str, Any], disabled: bool) -> ProjectPrev
     """Create a preview row from project-index-like data."""
 
     pointclouds = tuple(_make_pointcloud_previews(project))
+    created_at = project.get("datum", "")
+    updated_at = _latest_project_history_timestamp(project.get("history")) or created_at
     return ProjectPreview(
         project_id=str(project.get("id", "")).strip(),
         project=str(project.get("projekt", "")).strip() or "Unbenanntes Projekt",
         customer=str(project.get("kunde", "")).strip() or "Ohne Kunde",
         format=project_scope_label(len(pointclouds)),
-        updated=format_project_datum(project.get("datum", "")),
-        updated_sort=project_datum_sort_key(project.get("datum", "")),
+        updated=format_project_datum(updated_at),
+        updated_sort=project_datum_sort_key(updated_at),
         link=str(project.get("link", "")).strip(),
         disabled=bool(disabled),
         pointclouds=pointclouds,
+        created=format_project_datum(created_at),
         s3_path=str(project.get("s3_path", "")).strip(),
         viewer_path=str(project.get("viewer_path", "")).strip(),
         history=_format_project_history(project.get("history")),
@@ -316,6 +320,17 @@ def _format_project_history(raw_history: Any) -> tuple[str, ...]:
         if timestamp and message:
             lines.append(f"{format_project_datum(timestamp)} – {message}")
     return tuple(lines)
+
+
+def _latest_project_history_timestamp(raw_history: Any) -> str:
+    if not isinstance(raw_history, list):
+        return ""
+    for entry in reversed(raw_history):
+        if isinstance(entry, dict):
+            timestamp = str(entry.get("timestamp", "")).strip()
+            if timestamp:
+                return timestamp
+    return ""
 
 
 __all__ = [
