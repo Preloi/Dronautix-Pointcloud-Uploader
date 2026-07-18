@@ -13,7 +13,7 @@ def prompt_settings(QtWidgets, parent, state: SettingsFormState):
     layout.setContentsMargins(20, 20, 20, 20)
     layout.setSpacing(12)
 
-    body = QtWidgets.QLabel("AWS-Zugang, S3-Bucket, Converter und lokale Ausgabeordner konfigurieren.")
+    body = QtWidgets.QLabel("AWS-Zugang, S3-Bucket und lokale Ausgabeordner konfigurieren.")
     body.setObjectName("MutedText")
     body.setWordWrap(True)
     layout.addWidget(body)
@@ -24,7 +24,6 @@ def prompt_settings(QtWidgets, parent, state: SettingsFormState):
     secret_input.setEchoMode(QtWidgets.QLineEdit.Password)
     region_input = QtWidgets.QLineEdit(state.region_name)
     bucket_input = QtWidgets.QLineEdit(state.bucket_name)
-    converter_input = QtWidgets.QLineEdit(state.converter_path)
     output_input = QtWidgets.QLineEdit(state.output_base_dir)
     update_channel_input = QtWidgets.QComboBox()
     update_channel_input.addItems(list(UPDATE_CHANNELS))
@@ -35,15 +34,12 @@ def prompt_settings(QtWidgets, parent, state: SettingsFormState):
     form.addRow("AWS Secret Key", secret_input)
     form.addRow("Region", region_input)
     form.addRow("S3 Bucket", bucket_input)
-    form.addRow("Potree Converter", converter_input)
     form.addRow("Output-Ordner", output_input)
     form.addRow("Updates", update_channel_input)
     layout.addLayout(form)
 
     browse_row = QtWidgets.QHBoxLayout()
-    converter_button = QtWidgets.QPushButton("Converter")
     output_button = QtWidgets.QPushButton("Output")
-    browse_row.addWidget(converter_button)
     browse_row.addWidget(output_button)
     browse_row.addStretch(1)
     layout.addLayout(browse_row)
@@ -54,22 +50,11 @@ def prompt_settings(QtWidgets, parent, state: SettingsFormState):
     error_label.hide()
     layout.addWidget(error_label)
 
-    def browse_converter():
-        path, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
-            dialog,
-            "PotreeConverter auswählen",
-            "",
-            "PotreeConverter (*.exe);;Alle Dateien (*)",
-        )
-        if path:
-            converter_input.setText(path)
-
     def browse_output():
         path = QtWidgets.QFileDialog.getExistingDirectory(dialog, "Output-Ordner auswählen")
         if path:
             output_input.setText(path)
 
-    converter_button.clicked.connect(browse_converter)
     output_button.clicked.connect(browse_output)
 
     buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
@@ -80,7 +65,7 @@ def prompt_settings(QtWidgets, parent, state: SettingsFormState):
             aws_secret_access_key=secret_input.text(),
             region_name=region_input.text(),
             bucket_name=bucket_input.text(),
-            converter_path=converter_input.text(),
+            converter_path=state.converter_path,
             output_base_dir=output_input.text(),
             update_channel=update_channel_input.currentText(),
         )

@@ -211,7 +211,6 @@ QTableView#ActivityTable {
 
 QTableView#ProjectsTable::item,
 QTableView#ActivityTable::item {
-    color: #e2e8f0;
     min-height: 32px;
     padding: 6px 8px;
 }
@@ -440,6 +439,26 @@ QProgressBar#UploadProgress {
 QProgressBar#UploadProgress::chunk {
     background: #3b82f6;
     border-radius: 5px;
+}
+
+QFrame#UploadPhasePanel {
+    background: #172844;
+    border: 1px solid #2f4b73;
+    border-radius: 8px;
+}
+
+QProgressBar[role="UploadPhaseProgress"] {
+    background: #1f3150;
+    border: 1px solid #35527d;
+    border-radius: 5px;
+    color: #e2e8f0;
+    min-height: 20px;
+    text-align: center;
+}
+
+QProgressBar[role="UploadPhaseProgress"]::chunk {
+    background: #3b82f6;
+    border-radius: 4px;
 }
 
 QLabel#UploadStatusLine {

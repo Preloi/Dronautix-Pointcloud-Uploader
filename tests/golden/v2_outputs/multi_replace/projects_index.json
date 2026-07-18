@@ -48,6 +48,12 @@
             "epsg": "EPSG:4326"
           }
         }
+      ],
+      "history": [
+        {
+          "timestamp": "2026-06-21T12:00:00",
+          "message": "Alle Punktwolken wurden ausgetauscht."
+        }
       ]
     }
   ],

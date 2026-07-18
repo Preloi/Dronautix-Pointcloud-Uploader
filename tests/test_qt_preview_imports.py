@@ -1,6 +1,7 @@
 import ast
 import importlib
 import inspect
+from pathlib import Path
 
 from dronautix_uploader.core.config_service import get_config_locations, load_config_file, save_config_file
 from dronautix_uploader.qt_app.activity_model import ActivityLogEntry, ActivityPreview
@@ -20,6 +21,19 @@ from dronautix_uploader.qt_app.pages import (
     _resolve_settings_preview,
 )
 from dronautix_uploader.qt_app.project_management import example_project_previews
+
+
+def test_app_python_sources_are_utf8_without_mojibake():
+    source_root = Path(__file__).resolve().parents[1] / "dronautix_uploader"
+    mojibake_markers = ("\u00c3", "\u00c2", "\u00e2\u20ac", "\ufffd")
+
+    offenders = []
+    for source_path in source_root.rglob("*.py"):
+        text = source_path.read_text(encoding="utf-8")
+        if any(marker in text for marker in mojibake_markers):
+            offenders.append(str(source_path.relative_to(source_root.parent)))
+
+    assert offenders == []
 
 
 def test_qt_preview_modules_import_without_pyside6():
@@ -222,6 +236,8 @@ def test_qss_defines_click_feedback_and_project_table_item_colors_without_qt():
     assert "QPushButton:pressed" in APP_STYLE
     assert "QTableView#ProjectsTable::item" in APP_STYLE
     assert "QTableView#ProjectsTable::item:selected" in APP_STYLE
+    table_item_style = APP_STYLE.split("QTableView#ProjectsTable::item,")[1].split("}", 1)[0]
+    assert "color:" not in table_item_style
 
 
 def test_projects_page_defers_reload_until_project_action_result_without_qt():
@@ -261,6 +277,15 @@ def test_main_window_project_actions_check_busy_state_before_starting_worker_wit
     assert "_handle_project_link_action" in called_attrs
     assert "_has_active_background_tasks" in called_attrs
     assert "_start_background_task" in called_attrs
+
+
+def test_project_link_toggle_has_no_confirmation_or_success_popup():
+    from dronautix_uploader.qt_app.main_window import create_main_window
+
+    source = inspect.getsource(create_main_window)
+
+    assert "confirm_set_project_link_state" not in source
+    assert 'action_id not in {ACTION_DISABLE_LINK, ACTION_ENABLE_LINK} or summary.status != "success"' in source
 
 
 def test_main_window_records_detail_progress_events_but_not_high_frequency_progress_without_qt():

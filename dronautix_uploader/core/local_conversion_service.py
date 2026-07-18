@@ -75,30 +75,30 @@ def run_local_conversion(
     output_dir = os.path.abspath(request.output_dir)
     output_parent_dir = os.path.dirname(output_dir)
 
-    _emit(on_progress, ProgressEvent(kind="log", message="[KONVERTIERUNG] Starte lokale Potree-Konvertierung"))
-    _emit(on_progress, ProgressEvent(kind="step", step=1, total_steps=5, message="Bereite Zielordner vor..."))
-    _emit(on_progress, ProgressEvent(kind="detail", detail="Der lokale Potree-Projektordner wird vorbereitet"))
-    _emit(on_progress, ProgressEvent(kind="progress", percent=0.05))
+    _emit(on_progress, ProgressEvent(kind="log", message="[KONVERTIERUNG] Starte lokale Potree-Konvertierung", phase="conversion"))
+    _emit(on_progress, ProgressEvent(kind="step", step=1, total_steps=5, message="Bereite Zielordner vor...", phase="conversion"))
+    _emit(on_progress, ProgressEvent(kind="detail", detail="Der lokale Potree-Projektordner wird vorbereitet", phase="conversion"))
+    _emit(on_progress, ProgressEvent(kind="progress", percent=0.05, phase="conversion"))
 
     if output_parent_dir:
         os.makedirs(output_parent_dir, exist_ok=True)
     if os.path.isdir(output_dir):
-        _emit(on_progress, ProgressEvent(kind="log", message="[CLEANUP] Vorhandenen Ausgabeordner entfernen"))
+        _emit(on_progress, ProgressEvent(kind="log", message="[CLEANUP] Vorhandenen Ausgabeordner entfernen", phase="conversion"))
         shutil.rmtree(output_dir)
 
-    _emit(on_progress, ProgressEvent(kind="step", step=2, total_steps=5, message="Konvertiere mit Potree..."))
-    _emit(on_progress, ProgressEvent(kind="detail", detail="Die Punktwolke wird lokal in das Potree-Format umgewandelt"))
+    _emit(on_progress, ProgressEvent(kind="step", step=2, total_steps=5, message="Konvertiere mit Potree...", phase="conversion"))
+    _emit(on_progress, ProgressEvent(kind="detail", detail="Die Punktwolke wird lokal in das Potree-Format umgewandelt", phase="conversion"))
     converter_runner(request.source_file, request.converter_path, output_dir, on_progress)
 
-    _emit(on_progress, ProgressEvent(kind="step", step=3, total_steps=5, message="Pruefe Ergebnis..."))
-    _emit(on_progress, ProgressEvent(kind="detail", detail="Die konvertierten Daten werden lokal bereitgestellt"))
+    _emit(on_progress, ProgressEvent(kind="step", step=3, total_steps=5, message="Pruefe Ergebnis...", phase="conversion"))
+    _emit(on_progress, ProgressEvent(kind="detail", detail="Die konvertierten Daten werden lokal bereitgestellt", phase="conversion"))
     if not os.path.isdir(output_dir):
         raise RuntimeError("Der Ausgabeordner wurde nicht erzeugt.")
 
-    _emit(on_progress, ProgressEvent(kind="log", message="[ERFOLG] Potree-Projekt lokal gespeichert"))
-    _emit(on_progress, ProgressEvent(kind="step", step=5, total_steps=5, message="Fertig"))
-    _emit(on_progress, ProgressEvent(kind="detail", detail=output_dir))
-    _emit(on_progress, ProgressEvent(kind="progress", percent=1.0))
+    _emit(on_progress, ProgressEvent(kind="log", message="[ERFOLG] Potree-Projekt lokal gespeichert", phase="conversion"))
+    _emit(on_progress, ProgressEvent(kind="step", step=5, total_steps=5, message="Fertig", phase="conversion"))
+    _emit(on_progress, ProgressEvent(kind="detail", detail=output_dir, phase="conversion"))
+    _emit(on_progress, ProgressEvent(kind="progress", percent=1.0, phase="conversion"))
     return LocalConversionResult(output_dir=output_dir, message="Lokale Konvertierung abgeschlossen.")
 
 

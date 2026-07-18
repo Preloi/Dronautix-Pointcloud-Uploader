@@ -90,31 +90,23 @@ def credential_status(has_access_key: bool, has_secret_key: bool, profile: str =
     return SettingsStatusItem("AWS Credentials", status, detail, level, action)
 
 
-def converter_status(bundle_available: bool, override_path: str = "") -> SettingsStatusItem:
-    """Status der PotreeConverter-Quelle."""
+def converter_status(bundle_available: bool) -> SettingsStatusItem:
+    """Status des integrierten PotreeConverters."""
 
-    if override_path:
-        return SettingsStatusItem(
-            "Converter",
-            "Override aktiv",
-            f"PotreeConverter wird aus {override_path} verwendet.",
-            STATUS_WARNING,
-            "Pfad ändern",
-        )
     if bundle_available:
         return SettingsStatusItem(
             "Converter",
             "Bereit",
             "Integrierter PotreeConverter wird verwendet.",
             STATUS_OK,
-            "Pfad ändern",
+            "",
         )
     return SettingsStatusItem(
         "Converter",
         "Fehlt",
-        "Kein integrierter Converter gefunden und kein Pfad hinterlegt.",
+        "Der integrierte PotreeConverter wurde nicht gefunden.",
         STATUS_ERROR,
-        "Pfad auswählen",
+        "",
     )
 
 
@@ -224,6 +216,8 @@ def build_cutover_readiness(
 def settings_status_action_id(item: SettingsStatusItem) -> str:
     """Settings-Aktions-ID für den Button einer Statuszeile."""
 
+    if not item.action:
+        return ""
     if item.name == "AWS Credentials" and item.action == "Verbindung testen":
         return SETTINGS_ACTION_TEST_CONNECTION
     if item.name == "Updates" and item.action == "Update prüfen":
@@ -239,7 +233,7 @@ def example_settings_preview() -> SettingsPreview:
     converter_override = ""
     settings = (
         credential_status(True, True, "dronautix-uploader"),
-        converter_status(True, converter_override),
+        converter_status(True),
         output_folder_status(output_folder, True),
         update_channel_status(UPDATE_CHANNEL_STABLE, "1.7.10"),
     )

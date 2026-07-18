@@ -1,9 +1,10 @@
+import copy
 import os
 
 import pytest
 
 from dronautix_uploader.core.constants import S3_DISABLED_PROJECTS_KEY
-from dronautix_uploader.core.contracts import PointcloudSource
+from dronautix_uploader.core.contracts import PointcloudSource, ProgressEvent
 from dronautix_uploader.core.project_operations import (
     apply_project_rename_metadata,
     build_duplicate_project_metadata,
@@ -224,8 +225,13 @@ def test_upload_new_project_forwards_progress_events(tmp_path):
     )
 
     assert result.status == "success"
-    assert [event.kind for event in events] == ["log", "log", "progress", "progress", "log"]
-    assert events[-2].percent == 1.0
+    assert {event.phase for event in events} == {"upload", "index"}
+    assert events[-1] == ProgressEvent(
+        kind="progress",
+        message="Projekt wurde gespeichert.",
+        percent=1.0,
+        phase="index",
+    )
 
 
 def test_upload_new_project_cancel_rolls_back_uploaded_keys_and_returns_cancelled(tmp_path):
@@ -770,6 +776,42 @@ def test_replace_project_pointclouds_rolls_back_uploaded_keys_before_index_save(
 
     assert deleted_keys == [prepared[0].files_to_upload[0][1]]
     assert index_data == {"projects": [{"id": "project", "projekt": "Old"}]}
+
+
+def test_replace_project_pointclouds_restores_history_when_index_save_fails(tmp_path):
+    source = tmp_path / "first.copc.laz"
+    source.write_bytes(b"first")
+    prepared = prepare_cloud_uploads(
+        (PointcloudSource(str(source), name="First", input_format="copc"),),
+        "kunde/project/projekt",
+        "pointclouds/kunde/project/projekt",
+    )
+    original = {
+        "projects": [
+            {
+                "id": "project",
+                "projekt": "Old",
+                "history": [{"timestamp": "old", "message": "Vorhanden"}],
+            }
+        ]
+    }
+    index_data = copy.deepcopy(original)
+
+    with pytest.raises(RuntimeError):
+        replace_project_pointclouds(
+            s3_client=FakeS3Client(),
+            index_data=index_data,
+            project_id="project",
+            base_viewer_path="kunde/project/projekt",
+            s3_prefix="pointclouds/kunde/project/projekt",
+            prepared_clouds=prepared,
+            existing_keys=(),
+            save_index=lambda _data: False,
+            delete_keys=lambda _keys: None,
+            timestamp="new",
+        )
+
+    assert index_data == original
 
 
 def test_replace_project_pointclouds_reports_orphan_cleanup_failure_after_index_save(tmp_path):

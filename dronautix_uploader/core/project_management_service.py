@@ -14,6 +14,7 @@ from .naming_service import build_project_paths
 from .metadata_service import write_potree_metadata_crs_for_sources
 from .pointcloud_preparation_service import PointcloudPreparationRequest, prepare_pointcloud_sources
 from .project_index_service import (
+    append_project_history,
     get_all_projects_for_management,
     update_project_in_index,
     update_project_link_disabled_state,
@@ -75,15 +76,32 @@ class ProjectManagementService:
     ) -> ProjectOperationResult:
         index_data = self.repository.load_projects_index()
         renamed_project: dict[str, Any] | None = None
+        timestamp = self.timestamp_factory()
 
         def apply_rename(project: dict[str, Any]) -> None:
             nonlocal renamed_project
+            old_customer = str(project.get("kunde", ""))
+            old_project = str(project.get("projekt", ""))
+            old_pointcloud_names = [
+                str(pointcloud.get("name", "")) if isinstance(pointcloud, dict) else ""
+                for pointcloud in project.get("pointclouds", [])
+            ]
             renamed_project = apply_project_rename_metadata(
                 project,
                 new_kunde,
                 new_projekt,
                 pointcloud_names,
             )
+            changes = []
+            if old_customer != new_kunde:
+                changes.append(f"Kunde von '{old_customer}' zu '{new_kunde}' geändert")
+            if old_project != new_projekt:
+                changes.append(f"Projekt von '{old_project}' zu '{new_projekt}' umbenannt")
+            for index, new_name in enumerate(pointcloud_names):
+                old_name = old_pointcloud_names[index] if index < len(old_pointcloud_names) else ""
+                if old_name != new_name:
+                    changes.append(f"Punktwolke von '{old_name}' zu '{new_name}' umbenannt")
+            append_project_history(renamed_project, timestamp, "; ".join(changes))
             project.clear()
             project.update(renamed_project)
 
@@ -181,14 +199,24 @@ class ProjectManagementService:
                 message=f"Projekt-Link ist bereits {state_text}.",
             )
 
+        timestamp = self.timestamp_factory()
         changed_count = update_project_link_disabled_state(
             index_data,
             (project_id,),
             disabled,
-            timestamp=self.timestamp_factory(),
+            timestamp=timestamp,
         )
         if not changed_count:
             raise RuntimeError("Projekt-Link-Status konnte nicht aktualisiert werden.")
+        update_project_in_index(
+            index_data,
+            project_id,
+            lambda project: append_project_history(
+                project,
+                timestamp,
+                "Projekt wurde inaktiv geschaltet." if disabled else "Projekt wurde aktiv geschaltet.",
+            ),
+        )
         if not self._save_projects_index(index_data):
             raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
         action_text = "deaktiviert" if disabled else "aktiviert"
@@ -232,6 +260,7 @@ class ProjectManagementService:
             delete_keys=lambda keys: delete_s3_objects(self.s3_client, keys, bucket_name=self._bucket_name),
             on_progress=on_progress,
             bucket_name=self._bucket_name,
+            timestamp=self.timestamp_factory(),
         )
 
     def replace_project_pointclouds_from_sources(
@@ -281,6 +310,7 @@ class ProjectManagementService:
             delete_keys=lambda keys: delete_s3_objects(self.s3_client, keys, bucket_name=self._bucket_name),
             on_progress=on_progress,
             bucket_name=self._bucket_name,
+            timestamp=self.timestamp_factory(),
         )
 
     def replace_single_project_pointcloud(
@@ -322,6 +352,7 @@ class ProjectManagementService:
             delete_keys=lambda keys: delete_s3_objects(self.s3_client, keys, bucket_name=self._bucket_name),
             on_progress=on_progress,
             bucket_name=self._bucket_name,
+            timestamp=self.timestamp_factory(),
         )
 
     def replace_single_project_pointcloud_from_source(
@@ -389,6 +420,7 @@ class ProjectManagementService:
             delete_keys=lambda keys: delete_s3_objects(self.s3_client, keys, bucket_name=self._bucket_name),
             on_progress=on_progress,
             bucket_name=self._bucket_name,
+            timestamp=self.timestamp_factory(),
         )
 
     def _find_project(self, index_data: dict[str, Any], project_id: str) -> tuple[dict[str, Any], bool]:

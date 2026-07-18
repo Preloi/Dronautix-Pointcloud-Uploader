@@ -446,4 +446,4 @@ def test_replace_from_sources_forwards_preparation_and_upload_progress_events(tm
     assert any(event.kind == "step" and event.message == "Bereite Punktwolke vor..." for event in events)
     assert any(event.kind == "log" and event.message == "runner progress" for event in events)
     assert any(event.kind == "log" and event.message.startswith("[UPLOAD]") for event in events)
-    assert events[-1] == ProgressEvent(kind="log", message="[UPLOAD] Alle Dateien hochgeladen")
+    assert events[-1] == ProgressEvent(kind="log", message="[UPLOAD] Alle Dateien hochgeladen", phase="upload")

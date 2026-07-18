@@ -2,11 +2,11 @@
 
 
 a = Analysis(
-    ['Dronautix_Pointcloud_Uploader.py'],
+    ['Dronautix_Pointcloud_Uploader_v2_final.py'],
     pathex=[],
     binaries=[],
     datas=[('icon.ico', '.'), ('bundled_tools', 'bundled_tools')],
-    hiddenimports=['keyring', 'keyring.backends.Windows'],
+    hiddenimports=['keyring', 'keyring.backends.Windows', 'PySide6.QtCore', 'PySide6.QtGui', 'PySide6.QtWidgets', 'boto3'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -103,11 +103,94 @@ def test_projects_page_keeps_all_matching_rows_visible_after_selection_when_qt_a
         )
 
         assert model.rowCount() == 3
+        assert [model.headerData(column, QtCore.Qt.Horizontal) for column in range(2)] == ["Kunde", "Projekt"]
         assert [model.index(row, 0).data() for row in range(model.rowCount())] == [
+            "Dronautix",
+            "Interner Test",
+            "Kunde",
+        ]
+        assert [model.index(row, 1).data() for row in range(model.rowCount())] == [
             "Beispielprojekt Nord",
             "COPC Demo",
             "Deaktivierter Upload",
         ]
+        assert model.index(0, 3).data(QtCore.Qt.ForegroundRole).color().name() == "#2ecc71"
+        assert model.index(2, 3).data(QtCore.Qt.ForegroundRole).color().name() == "#e74c3c"
+        assert page.findChild(QtWidgets.QPlainTextEdit, "ProjectHistoryLog").isHidden()
+    finally:
+        page.deleteLater()
+
+
+def test_projects_page_shows_persistent_history_only_when_present_when_qt_available():
+    QtCore, QtGui, QtWidgets = _import_qt()
+    _app(QtWidgets)
+
+    from dronautix_uploader.qt_app.pages import create_projects_page
+    from dronautix_uploader.qt_app.project_management import make_project_preview
+
+    preview = make_project_preview(
+        {
+            "id": "changed",
+            "projekt": "Projekt",
+            "kunde": "Kunde",
+            "pointclouds": [{"name": "Scan", "crs": "EPSG:25832"}],
+            "history": [
+                {"timestamp": "2026-07-18T12:30:00", "message": "Punktwolke 'Scan' wurde ausgetauscht."}
+            ],
+        },
+        disabled=False,
+    )
+    page = create_projects_page(QtCore, QtGui, QtWidgets, project_previews=(preview,))
+
+    try:
+        history_log = page.findChild(QtWidgets.QPlainTextEdit, "ProjectHistoryLog")
+        assert not history_log.isHidden()
+        assert history_log.toPlainText() == "18.07.2026 12:30 – Punktwolke 'Scan' wurde ausgetauscht."
+    finally:
+        page.deleteLater()
+
+
+def test_project_status_cells_toggle_existing_link_state_actions_when_qt_available():
+    QtCore, QtGui, QtWidgets = _import_qt()
+    app = _app(QtWidgets)
+
+    from dronautix_uploader.qt_app.pages import create_projects_page
+    from dronautix_uploader.qt_app.project_management import example_project_previews
+    from dronautix_uploader.qt_app.project_management_actions import ACTION_DISABLE_LINK, ACTION_ENABLE_LINK
+
+    calls = []
+    page = create_projects_page(
+        QtCore,
+        QtGui,
+        QtWidgets,
+        project_previews=example_project_previews(),
+        on_project_action=lambda action, project, pointcloud: calls.append((action, project.project_id, pointcloud)),
+    )
+
+    try:
+        table = page.findChild(QtWidgets.QTableView, "ProjectsTable")
+        model = table.model()
+        assert table.itemDelegateForColumn(3).objectName() == "ProjectStatusToggleDelegate"
+        active_status = model.index(0, 3)
+        inactive_status = model.index(2, 3)
+        assert active_status.data() == "Aktiv"
+        assert inactive_status.data() == "Inaktiv"
+        assert active_status.data(QtCore.Qt.CheckStateRole) == QtCore.Qt.CheckState.Checked.value
+        assert inactive_status.data(QtCore.Qt.CheckStateRole) == QtCore.Qt.CheckState.Unchecked.value
+
+        model.setData(active_status, QtCore.Qt.CheckState.Unchecked, QtCore.Qt.CheckStateRole)
+        app.processEvents()
+        assert calls[-1] == (ACTION_DISABLE_LINK, "example-north", None)
+        assert active_status.data(QtCore.Qt.CheckStateRole) == QtCore.Qt.CheckState.Checked.value
+
+        model.setData(inactive_status, QtCore.Qt.CheckState.Checked, QtCore.Qt.CheckStateRole)
+        app.processEvents()
+        assert calls[-1] == (ACTION_ENABLE_LINK, "disabled-upload", None)
+        assert inactive_status.data(QtCore.Qt.CheckStateRole) == QtCore.Qt.CheckState.Unchecked.value
+
+        page.reload_projects()
+        app.processEvents()
+        assert len(calls) == 2
     finally:
         page.deleteLater()
 
@@ -138,7 +221,7 @@ def test_settings_page_exposes_direct_form_and_actions_when_qt_available():
 
     try:
         assert page.findChild(QtWidgets.QLineEdit, "AwsAccessInput").text() == "access"
-        assert page.findChild(QtWidgets.QLineEdit, "ConverterPathInput").text() == "C:/Tools/PotreeConverter.exe"
+        assert page.findChild(QtWidgets.QLineEdit, "ConverterPathInput") is None
 
         buttons = {button.text(): button for button in page.findChildren(QtWidgets.QPushButton)}
         assert {"Speichern", "Verbindung testen", "Update prüfen", "Neu laden"} <= set(buttons)
@@ -164,11 +247,41 @@ def test_main_window_has_no_dashboard_sidebar_entry_when_qt_available():
         assert list(window._buttons) == [
             "Upload",
             "Projektverwaltung",
-            "Aktivitäten",
             "Einstellungen",
         ]
     finally:
         window.deleteLater()
+
+
+def test_upload_page_shows_independent_process_progress_when_qt_available():
+    QtCore, _QtGui, QtWidgets = _import_qt()
+    _app(QtWidgets)
+
+    from dronautix_uploader.core.contracts import ProgressEvent
+    from dronautix_uploader.qt_app.pages import create_upload_page
+
+    page = create_upload_page(QtCore, QtWidgets, on_start=lambda: None)
+
+    try:
+        page.set_running(True)
+        preparation = page.findChild(QtWidgets.QProgressBar, "UploadPreparationProgress")
+        conversion = page.findChild(QtWidgets.QProgressBar, "UploadConversionProgress")
+        upload = page.findChild(QtWidgets.QProgressBar, "UploadTransferProgress")
+        index = page.findChild(QtWidgets.QProgressBar, "UploadIndexProgress")
+
+        assert all(bar is not None for bar in (preparation, conversion, upload, index))
+        assert conversion.value() == 100
+        assert conversion.format() == "Nicht erforderlich"
+
+        page.handle_progress(ProgressEvent(kind="progress", percent=0.4, phase="preparation"))
+        page.handle_progress(ProgressEvent(kind="progress", percent=0.65, phase="upload"))
+        page.handle_progress(ProgressEvent(kind="progress", percent=1.0, phase="index"))
+
+        assert preparation.value() == 40
+        assert upload.value() == 65
+        assert index.value() == 100
+    finally:
+        page.deleteLater()
 
 
 def test_main_window_releases_busy_state_after_background_task_completes_when_qt_available():

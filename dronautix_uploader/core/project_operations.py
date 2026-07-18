@@ -19,7 +19,7 @@ from .contracts import (
 )
 from .metadata_service import apply_crs_metadata, create_pointcloud_index_entry, get_common_crs_info
 from .naming_service import get_pointcloud_display_name, make_unique_slug
-from .project_index_service import apply_common_crs_or_clear, update_project_in_index
+from .project_index_service import append_project_history, apply_common_crs_or_clear, update_project_in_index
 from .project_index_service import remove_project_from_index
 from .s3_service import (
     UploadFile,
@@ -357,6 +357,7 @@ def replace_project_pointclouds(
     delete_keys: Callable[[tuple[str, ...]], None],
     on_progress: ProgressCallback | None = None,
     bucket_name: str = BUCKET_NAME,
+    timestamp: str = "",
 ) -> ProjectOperationResult:
     """Upload replacement clouds, save index, then clean obsolete old keys.
 
@@ -395,6 +396,7 @@ def replace_project_pointclouds(
                     pointcloud_entries=pointcloud_entries,
                 )
             )
+            append_project_history(project, timestamp, "Alle Punktwolken wurden ausgetauscht.")
 
         if not update_project_in_index(index_data, project_id, update_project):
             raise RuntimeError("Projekt konnte im Index nicht gefunden werden.")
@@ -443,6 +445,7 @@ def replace_single_project_pointcloud(
     delete_keys: Callable[[tuple[str, ...]], None],
     on_progress: ProgressCallback | None = None,
     bucket_name: str = BUCKET_NAME,
+    timestamp: str = "",
 ) -> ProjectOperationResult:
     """Replace one child pointcloud while preserving the other children."""
 
@@ -479,9 +482,14 @@ def replace_single_project_pointcloud(
                 )
                 if disabled_at is not None:
                     project["disabled_at"] = disabled_at
-                for key in ("visible",):
+                for key in ("visible", "history"):
                     if key in original_project:
                         project[key] = original_project[key]
+                append_project_history(
+                    project,
+                    timestamp,
+                    f"Punktwolke '{original_project.get('projekt', 'Punktwolke')}' wurde ausgetauscht.",
+                )
                 return
 
             replaced = False
@@ -510,6 +518,16 @@ def replace_single_project_pointcloud(
                     pointcloud_entries=pointcloud_entries,
                 )
             )
+            replaced_name = next(
+                (
+                    str(pointcloud.get("name", "Punktwolke"))
+                    for pointcloud in pointclouds
+                    if isinstance(pointcloud, dict)
+                    and _pointcloud_matches_s3_path(pointcloud, target_pointcloud_s3_path)
+                ),
+                "Punktwolke",
+            )
+            append_project_history(project, timestamp, f"Punktwolke '{replaced_name}' wurde ausgetauscht.")
 
         if not update_project_in_index(index_data, project_id, update_project):
             raise RuntimeError("Projekt konnte im Index nicht gefunden werden.")
@@ -577,8 +595,10 @@ def upload_new_project(
             projects = []
             index_data["projects"] = projects
         projects.insert(0, dict(prepared_upload.project_metadata))
+        _emit(on_progress, ProgressEvent(kind="progress", percent=0.0, message="Projekt wird gespeichert...", phase="index"))
         if not save_index(index_data):
             raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
+        _emit(on_progress, ProgressEvent(kind="progress", percent=1.0, message="Projekt wurde gespeichert.", phase="index"))
     except OperationCancelledError:
         if ledger.uploaded_keys:
             _emit(on_progress, ProgressEvent(kind="log", message="[ABBRUCH] Entferne bereits hochgeladene Dateien..."))
@@ -910,8 +930,8 @@ def snapshot_project(project: dict[str, Any], snapshot: dict[str, Any]) -> dict[
     for key in ("projects", "disabled_projects"):
         for candidate in snapshot.get(key, []):
             if isinstance(candidate, dict) and str(candidate.get("id", "")).strip() == project_id:
-                return dict(candidate)
-    return dict(project)
+                return copy.deepcopy(candidate)
+    return copy.deepcopy(project)
 
 
 __all__ = [

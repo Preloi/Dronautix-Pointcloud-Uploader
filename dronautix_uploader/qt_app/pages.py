@@ -98,7 +98,7 @@ def create_settings_page(
     title_box = QtWidgets.QVBoxLayout()
     title = QtWidgets.QLabel("Einstellungen")
     title.setObjectName("PageTitle")
-    subtitle = QtWidgets.QLabel("AWS-Zugang, Converter, Ausgabeordner und Updates.")
+    subtitle = QtWidgets.QLabel("AWS-Zugang, Ausgabeordner und Updates.")
     subtitle.setObjectName("MutedText")
     title_box.addWidget(title)
     title_box.addWidget(subtitle)
@@ -128,14 +128,12 @@ def create_settings_page(
     secret_input.setEchoMode(QtWidgets.QLineEdit.Password)
     region_input = QtWidgets.QLineEdit()
     bucket_input = QtWidgets.QLineEdit()
-    converter_input = QtWidgets.QLineEdit()
     output_input = QtWidgets.QLineEdit()
     update_channel_input = QtWidgets.QComboBox()
     access_input.setObjectName("AwsAccessInput")
     secret_input.setObjectName("AwsSecretInput")
     region_input.setObjectName("AwsRegionInput")
     bucket_input.setObjectName("S3BucketInput")
-    converter_input.setObjectName("ConverterPathInput")
     output_input.setObjectName("OutputDirInput")
     update_channel_input.setObjectName("UpdateChannelInput")
     update_channel_input.addItems(list(UPDATE_CHANNELS))
@@ -144,18 +142,14 @@ def create_settings_page(
     form.addRow("AWS Secret Key", secret_input)
     form.addRow("Region", region_input)
     form.addRow("S3 Bucket", bucket_input)
-    form.addRow("Potree Converter", converter_input)
     form.addRow("Output-Ordner", output_input)
     form.addRow("Updates", update_channel_input)
     form_root.addLayout(form)
 
     browse_row = QtWidgets.QHBoxLayout()
     browse_row.setSpacing(10)
-    converter_button = QtWidgets.QPushButton("Converter wählen")
-    converter_button.setObjectName("ActionButton")
     output_button = QtWidgets.QPushButton("Output wählen")
     output_button.setObjectName("ActionButton")
-    browse_row.addWidget(converter_button)
     browse_row.addWidget(output_button)
     browse_row.addStretch(1)
     form_root.addLayout(browse_row)
@@ -177,7 +171,7 @@ def create_settings_page(
     action_row.addStretch(1)
     form_root.addLayout(action_row)
 
-    hint = QtWidgets.QLabel("Der integrierte PotreeConverter wird automatisch genutzt, solange kein Override-Pfad gespeichert ist.")
+    hint = QtWidgets.QLabel("Der integrierte PotreeConverter wird automatisch verwendet.")
     hint.setObjectName("MutedText")
     hint.setWordWrap(True)
     form_root.addWidget(hint)
@@ -194,7 +188,6 @@ def create_settings_page(
         secret_input.setText(selected_state.aws_secret_access_key)
         region_input.setText(selected_state.region_name)
         bucket_input.setText(selected_state.bucket_name)
-        converter_input.setText(selected_state.converter_path)
         output_input.setText(selected_state.output_base_dir)
         channel_index = update_channel_input.findText(selected_state.update_channel)
         update_channel_input.setCurrentIndex(channel_index if channel_index >= 0 else 0)
@@ -205,20 +198,10 @@ def create_settings_page(
             aws_secret_access_key=secret_input.text(),
             region_name=region_input.text(),
             bucket_name=bucket_input.text(),
-            converter_path=converter_input.text(),
+            converter_path=state.converter_path,
             output_base_dir=output_input.text(),
             update_channel=update_channel_input.currentText(),
         )
-
-    def browse_converter():
-        path, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
-            page,
-            "PotreeConverter auswählen",
-            "",
-            "PotreeConverter (*.exe);;Alle Dateien (*)",
-        )
-        if path:
-            converter_input.setText(path)
 
     def browse_output():
         path = QtWidgets.QFileDialog.getExistingDirectory(page, "Output-Ordner auswählen")
@@ -243,7 +226,6 @@ def create_settings_page(
         status_container.addWidget(_create_settings_status_panel(QtWidgets, "Status", preview.settings_status))
         status_container.addStretch(1)
 
-    converter_button.clicked.connect(browse_converter)
     output_button.clicked.connect(browse_output)
     save_button.clicked.connect(lambda checked=False: dispatch_settings_action("save", state_from_inputs()))
     test_button.clicked.connect(lambda checked=False: dispatch_settings_action("test_connection", state_from_inputs()))
@@ -459,6 +441,40 @@ def create_upload_page(
     status_line.hide()
     root.addWidget(status_line)
 
+    phase_panel = QtWidgets.QFrame()
+    phase_panel.setObjectName("UploadPhasePanel")
+    phase_layout = QtWidgets.QGridLayout(phase_panel)
+    phase_layout.setContentsMargins(16, 12, 16, 12)
+    phase_layout.setHorizontalSpacing(12)
+    phase_layout.setVerticalSpacing(8)
+    phase_bars = {}
+    phase_statuses = {}
+    phase_rows = {}
+    phase_specs = (
+        ("preparation", "Vorbereitung", "UploadPreparationProgress"),
+        ("conversion", "Konvertierung", "UploadConversionProgress"),
+        ("upload", "Upload", "UploadTransferProgress"),
+        ("index", "Projekt speichern", "UploadIndexProgress"),
+    )
+    for row, (phase, label_text, object_name) in enumerate(phase_specs):
+        label = QtWidgets.QLabel(label_text)
+        bar = QtWidgets.QProgressBar()
+        bar.setObjectName(object_name)
+        bar.setProperty("role", "UploadPhaseProgress")
+        bar.setTextVisible(True)
+        status = QtWidgets.QLabel("Wartet")
+        status.setObjectName("MutedText")
+        status.setMinimumWidth(100)
+        phase_layout.addWidget(label, row, 0)
+        phase_layout.addWidget(bar, row, 1)
+        phase_layout.addWidget(status, row, 2)
+        phase_bars[phase] = bar
+        phase_statuses[phase] = status
+        phase_rows[phase] = (label, bar, status)
+    phase_layout.setColumnStretch(1, 1)
+    phase_panel.hide()
+    root.addWidget(phase_panel)
+
     action_row = QtWidgets.QHBoxLayout()
     progress_bar = QtWidgets.QProgressBar()
     progress_bar.setObjectName("UploadProgress")
@@ -656,6 +672,30 @@ def create_upload_page(
         if running:
             show_error("")
             set_status("Wird vorbereitet...")
+            is_upload = state["mode"] == UPLOAD_MODE_UPLOAD
+            needs_conversion = any(
+                str(path).lower().endswith((".las", ".laz"))
+                and not str(path).lower().endswith(".copc.laz")
+                for path in state["sources"]
+            )
+            required_phases = {"conversion"} if not is_upload else {"preparation", "upload", "index"}
+            if is_upload and needs_conversion:
+                required_phases.add("conversion")
+            for phase, widgets in phase_rows.items():
+                visible = is_upload or phase == "conversion"
+                for widget in widgets:
+                    widget.setVisible(visible)
+                bar = phase_bars[phase]
+                bar.setRange(0, 100)
+                if visible and phase not in required_phases:
+                    bar.setValue(100)
+                    bar.setFormat("Nicht erforderlich")
+                    phase_statuses[phase].setText("Übersprungen")
+                else:
+                    bar.setValue(0)
+                    bar.setFormat("Wartet...")
+                    phase_statuses[phase].setText("Wartet")
+            phase_panel.show()
             progress_bar.setRange(0, 0)
             progress_bar.setFormat("Wird vorbereitet...")
             progress_bar.show()
@@ -666,6 +706,7 @@ def create_upload_page(
         else:
             start_button.setEnabled(on_start is not None)
             progress_bar.hide()
+            phase_panel.hide()
             cancel_button.hide()
 
     def set_status(text: str):
@@ -699,6 +740,25 @@ def create_upload_page(
         percent = getattr(event, "percent", None)
         step = getattr(event, "step", None)
         total = getattr(event, "total_steps", None)
+        phase = str(getattr(event, "phase", "") or "")
+        if phase in phase_bars:
+            phase_bar = phase_bars[phase]
+            phase_status = phase_statuses[phase]
+            if percent is not None:
+                value = normalize_progress_value(percent)
+                phase_bar.setRange(0, 100)
+                phase_bar.setValue(value)
+                phase_bar.setFormat("%p%")
+                phase_status.setText("Fertig" if value >= 100 else "Läuft")
+            elif step is not None and total:
+                phase_bar.setRange(0, int(total))
+                phase_bar.setValue(max(0, min(int(total), int(step))))
+                phase_bar.setFormat(f"{int(step)}/{int(total)}")
+                phase_status.setText("Läuft")
+            elif message:
+                phase_bar.setRange(0, 0)
+                phase_bar.setFormat("Läuft...")
+                phase_status.setText("Läuft")
         if percent is not None:
             progress_bar.setRange(0, 100)
             progress_bar.setValue(normalize_progress_value(percent))
@@ -890,7 +950,52 @@ def create_projects_page(
     table.verticalHeader().setVisible(False)
     table.horizontalHeader().setStretchLastSection(True)
     table.horizontalHeader().setDefaultAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-    source_model = _create_projects_model(QtGui, projects, project_role, disabled_role, search_role, sort_role)
+
+    class StatusToggleDelegate(QtWidgets.QStyledItemDelegate):
+        def paint(self, painter, option, index):
+            checked = index.data(QtCore.Qt.CheckStateRole) == QtCore.Qt.CheckState.Checked.value
+            view_option = QtWidgets.QStyleOptionViewItem(option)
+            self.initStyleOption(view_option, index)
+            view_option.features &= ~QtWidgets.QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
+            view_option.text = ""
+            style = option.widget.style() if option.widget else QtWidgets.QApplication.style()
+            style.drawControl(QtWidgets.QStyle.ControlElement.CE_ItemViewItem, view_option, painter, option.widget)
+
+            track = QtCore.QRect(option.rect.left() + 8, option.rect.center().y() - 8, 32, 16)
+            knob = QtCore.QRect(track.right() - 13 if checked else track.left() + 2, track.top() + 2, 12, 12)
+            painter.save()
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(QtGui.QColor("#238b45" if checked else "#8b2f3b"))
+            painter.drawRoundedRect(track, 8, 8)
+            painter.setBrush(QtGui.QColor("#ffffff"))
+            painter.drawEllipse(knob)
+            painter.setPen(QtGui.QColor("#2ecc71" if checked else "#e74c3c"))
+            painter.drawText(option.rect.adjusted(48, 0, -4, 0), QtCore.Qt.AlignmentFlag.AlignVCenter, index.data())
+            painter.restore()
+
+        def editorEvent(self, event, model, option, index):
+            clicked = (
+                event.type() == QtCore.QEvent.Type.MouseButtonRelease
+                and event.button() == QtCore.Qt.MouseButton.LeftButton
+            )
+            keyed = (
+                event.type() == QtCore.QEvent.Type.KeyPress
+                and event.key() in (QtCore.Qt.Key.Key_Space, QtCore.Qt.Key.Key_Return)
+            )
+            if not clicked and not keyed:
+                return False
+            checked = index.data(QtCore.Qt.CheckStateRole) == QtCore.Qt.CheckState.Checked.value
+            return model.setData(
+                index,
+                QtCore.Qt.CheckState.Unchecked if checked else QtCore.Qt.CheckState.Checked,
+                QtCore.Qt.CheckStateRole,
+            )
+
+    status_toggle_delegate = StatusToggleDelegate(table)
+    status_toggle_delegate.setObjectName("ProjectStatusToggleDelegate")
+    table.setItemDelegateForColumn(3, status_toggle_delegate)
+    source_model = _create_projects_model(QtCore, QtGui, projects, project_role, disabled_role, search_role, sort_role)
     proxy_model = ProjectsFilterProxy()
     proxy_model.setSourceModel(source_model)
     proxy_model.setFilterKeyColumn(-1)
@@ -974,6 +1079,17 @@ def create_projects_page(
     detail_layout.addWidget(cloud_label)
     detail_layout.addWidget(cloud_list, 1)
 
+    history_label = QtWidgets.QLabel("Historie")
+    history_label.setObjectName("SectionTitle")
+    history_label.hide()
+    history_log = QtWidgets.QPlainTextEdit()
+    history_log.setObjectName("ProjectHistoryLog")
+    history_log.setReadOnly(True)
+    history_log.setMaximumHeight(130)
+    history_log.hide()
+    detail_layout.addWidget(history_label)
+    detail_layout.addWidget(history_log)
+
     primary_action_ids = (ACTION_OPEN_LINK, ACTION_COPY_LINK)
     edit_action_ids = (
         ACTION_RENAME,
@@ -1047,7 +1163,20 @@ def create_projects_page(
             None if project_provider is not None else project_previews,
             project_provider,
         )
-        _populate_projects_model(QtGui, source_model, projects, project_role, disabled_role, search_role, sort_role)
+        source_model.blockSignals(True)
+        try:
+            _populate_projects_model(
+                QtCore,
+                QtGui,
+                source_model,
+                projects,
+                project_role,
+                disabled_role,
+                search_role,
+                sort_role,
+            )
+        finally:
+            source_model.blockSignals(False)
         table.resizeColumnsToContents()
         if selected_project_id:
             _select_project_by_id(selected_project_id)
@@ -1102,17 +1231,40 @@ def create_projects_page(
                 return True
         return False
 
-    def _handle_project_action_click(action_id: str):
+    def _handle_project_action_click(action_id: str, project_override=None):
         # Capture the current selection now, then run the action on the next
         # event-loop tick. Opening a modal dialog directly from a QMenu/QToolButton
         # "triggered" slot re-enters the menu's popup loop and can crash Qt on
         # Windows, so the dispatch is deferred until the menu has fully closed.
-        project = selected_project()
-        pointcloud = selected_pointcloud()
+        project = project_override or selected_project()
+        pointcloud = None if project_override is not None else selected_pointcloud()
         QtCore.QTimer.singleShot(
             0,
             lambda: _dispatch_project_action(action_callback, action_id, project, pointcloud),
         )
+
+    def _handle_status_toggle(item):
+        if item.column() != 3:
+            return
+        project = item.data(project_role)
+        if project is None:
+            return
+        requested_disabled = item.checkState() != QtCore.Qt.CheckState.Checked
+        if requested_disabled == project.disabled:
+            return
+        source_model.blockSignals(True)
+        try:
+            item.setCheckState(
+                QtCore.Qt.CheckState.Unchecked if project.disabled else QtCore.Qt.CheckState.Checked
+            )
+        finally:
+            source_model.blockSignals(False)
+        _handle_project_action_click(
+            ACTION_ENABLE_LINK if project.disabled else ACTION_DISABLE_LINK,
+            project,
+        )
+
+    source_model.itemChanged.connect(_handle_status_toggle)
 
     def show_project_context_menu(position):
         index = table.indexAt(position)
@@ -1187,10 +1339,12 @@ def create_projects_page(
             info_container.hide()
             cloud_label.hide()
             cloud_list.hide()
+            history_label.hide()
+            history_log.hide()
             return
 
         detail_title.setText(project.project)
-        status_badge.setText("Deaktiviert" if project.disabled else "Aktiv")
+        status_badge.setText("Inaktiv" if project.disabled else "Aktiv")
         status_badge.setObjectName("PreviewBadgeDanger" if project.disabled else "PreviewBadgeLight")
         status_badge.style().unpolish(status_badge)
         status_badge.style().polish(status_badge)
@@ -1215,6 +1369,15 @@ def create_projects_page(
             if pointcloud.s3_path:
                 item.setToolTip(pointcloud.s3_path)
             cloud_list.addItem(item)
+
+        if project.history:
+            history_log.setPlainText("\n".join(project.history))
+            history_label.show()
+            history_log.show()
+        else:
+            history_log.clear()
+            history_label.hide()
+            history_log.hide()
 
         update_action_buttons()
 
@@ -1616,17 +1779,17 @@ def _dispatch_project_action(
     return callback(action_id)
 
 
-def _create_projects_model(QtGui, projects, project_role, disabled_role, search_role, sort_role):
+def _create_projects_model(QtCore, QtGui, projects, project_role, disabled_role, search_role, sort_role):
     model = QtGui.QStandardItemModel(0, 5)
-    _populate_projects_model(QtGui, model, projects, project_role, disabled_role, search_role, sort_role)
+    _populate_projects_model(QtCore, QtGui, model, projects, project_role, disabled_role, search_role, sort_role)
     return model
 
 
-def _populate_projects_model(QtGui, model, projects, project_role, disabled_role, search_role, sort_role):
+def _populate_projects_model(QtCore, QtGui, model, projects, project_role, disabled_role, search_role, sort_role):
     model.setRowCount(0)
-    model.setHorizontalHeaderLabels(["Projekt", "Kunde", "Format", "Status", "Aktualisiert"])
+    model.setHorizontalHeaderLabels(["Kunde", "Projekt", "Format", "Status", "Aktualisiert"])
     for project in projects:
-        row = (project.project, project.customer, project.format, project.status, project.updated)
+        row = (project.customer, project.project, project.format, project.status, project.updated)
         items = [QtGui.QStandardItem(value) for value in row]
         search_text = _format_project_search_text(project)
         for item in items:
@@ -1635,6 +1798,11 @@ def _populate_projects_model(QtGui, model, projects, project_role, disabled_role
             item.setData(project.disabled, disabled_role)
             item.setData(search_text, search_role)
             item.setData(project.updated_sort, sort_role)
+        items[3].setForeground(QtGui.QBrush(QtGui.QColor("#e74c3c" if project.disabled else "#2ecc71")))
+        items[3].setCheckable(True)
+        items[3].setCheckState(
+            QtCore.Qt.CheckState.Unchecked if project.disabled else QtCore.Qt.CheckState.Checked
+        )
         model.appendRow(items)
 
 

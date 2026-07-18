@@ -40,8 +40,18 @@ def prepare_pointcloud_sources(
         source = str(source_path or "").strip()
         if not source:
             raise ValueError("Leerer Punktwolkenpfad ist ungueltig.")
-        _emit(on_progress, ProgressEvent(kind="step", step=index, total_steps=total, message="Bereite Punktwolke vor..."))
-        _emit(on_progress, ProgressEvent(kind="detail", detail=source))
+        _emit(
+            on_progress,
+            ProgressEvent(
+                kind="step",
+                step=index,
+                total_steps=total,
+                percent=(index - 1) / total,
+                message="Bereite Punktwolke vor...",
+                phase="preparation",
+            ),
+        )
+        _emit(on_progress, ProgressEvent(kind="detail", detail=source, phase="preparation"))
 
         input_format = classify_pointcloud_source(source)
         name = get_pointcloud_display_name(source)
@@ -100,7 +110,7 @@ def prepare_pointcloud_sources(
 
         raise ValueError(f"Nicht unterstuetzte Punktwolkenquelle: {source}")
 
-    _emit(on_progress, ProgressEvent(kind="progress", percent=1.0))
+    _emit(on_progress, ProgressEvent(kind="progress", percent=1.0, phase="preparation"))
     return tuple(prepared)
 
 

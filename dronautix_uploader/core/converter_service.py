@@ -63,9 +63,9 @@ def run_potree_conversion(
 
     os.makedirs(output_dir, exist_ok=True)
     command = build_potree_command(source_file, converter_path, output_dir)
-    _emit(on_progress, ProgressEvent(kind="log", message="[KONVERTIERUNG] Starte Potree Converter..."))
-    _emit(on_progress, ProgressEvent(kind="log", message=f"[CONVERTER] {converter_path}"))
-    _emit(on_progress, ProgressEvent(kind="log", message=f"[OUTPUT] {output_dir}"))
+    _emit(on_progress, ProgressEvent(kind="log", message="[KONVERTIERUNG] Starte Potree Converter...", phase="conversion"))
+    _emit(on_progress, ProgressEvent(kind="log", message=f"[CONVERTER] {converter_path}", phase="conversion"))
+    _emit(on_progress, ProgressEvent(kind="log", message=f"[OUTPUT] {output_dir}", phase="conversion"))
 
     process = subprocess.Popen(
         list(command.args),
@@ -82,10 +82,10 @@ def run_potree_conversion(
             line = raw_line.strip()
             if not line:
                 continue
-            _emit(on_progress, ProgressEvent(kind="log", message=f"[POTREE] {line}"))
+            _emit(on_progress, ProgressEvent(kind="log", message=f"[POTREE] {line}", phase="conversion"))
             percent = parse_potree_percent(line)
             if percent is not None:
-                _emit(on_progress, ProgressEvent(kind="progress", percent=percent))
+                _emit(on_progress, ProgressEvent(kind="progress", percent=percent, phase="conversion"))
     except BaseException:
         # Ein Abbruch aus dem Progress-Callback darf keinen verwaisten
         # PotreeConverter-Prozess zuruecklassen.
@@ -99,5 +99,5 @@ def run_potree_conversion(
 
     validate_brotli_output(output_dir)
 
-    _emit(on_progress, ProgressEvent(kind="log", message="[KONVERTIERUNG] Potree Konvertierung mit BROTLI abgeschlossen"))
-    _emit(on_progress, ProgressEvent(kind="progress", percent=1.0))
+    _emit(on_progress, ProgressEvent(kind="log", message="[KONVERTIERUNG] Potree Konvertierung mit BROTLI abgeschlossen", phase="conversion"))
+    _emit(on_progress, ProgressEvent(kind="progress", percent=1.0, phase="conversion"))

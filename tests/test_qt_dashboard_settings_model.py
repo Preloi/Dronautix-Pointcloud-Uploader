@@ -27,15 +27,13 @@ def test_credential_status_distinguishes_ready_and_missing_credentials():
     assert missing.action == "Credentials eintragen"
 
 
-def test_converter_status_prefers_override_over_bundle():
-    override = converter_status(True, "D:/Tools/PotreeConverter.exe")
+def test_converter_status_reports_integrated_bundle():
     bundle = converter_status(True)
     missing = converter_status(False)
 
-    assert override.status == "Override aktiv"
-    assert override.level == STATUS_WARNING
     assert bundle.status == "Bereit"
     assert bundle.level == STATUS_OK
+    assert bundle.action == ""
     assert missing.level == STATUS_ERROR
 
 
@@ -63,7 +61,7 @@ def test_update_channels_offer_stable_and_manual_only():
 def test_settings_status_action_ids_match_page_actions():
     assert settings_status_action_id(credential_status(True, True, "dronautix")) == "test_connection"
     assert settings_status_action_id(credential_status(False, False)) == "edit"
-    assert settings_status_action_id(converter_status(True)) == "edit"
+    assert settings_status_action_id(converter_status(True)) == ""
     assert settings_status_action_id(output_folder_status("C:/Output", True)) == "edit"
     assert settings_status_action_id(update_channel_status(UPDATE_CHANNEL_STABLE)) == "check_update"
 

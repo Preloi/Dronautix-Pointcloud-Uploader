@@ -90,7 +90,6 @@ def create_main_window(
     """Create the main window after PySide6 has been imported."""
 
     from .pages import (
-        create_activity_page,
         create_projects_page,
         create_settings_page,
         create_upload_page,
@@ -194,15 +193,7 @@ def create_main_window(
                     on_project_action=on_project_action or self._handle_project_action,
                 ),
             )
-            self._activity_page = self._add_page(
-                "Aktivitäten",
-                lambda: create_activity_page(
-                    QtCore,
-                    QtGui,
-                    QtWidgets,
-                    activity_provider=self._activity_store.preview,
-                ),
-            )
+            self._activity_page = None
             self._settings_page = self._add_page(
                 "Einstellungen",
                 lambda: create_settings_page(
@@ -315,7 +306,6 @@ def create_main_window(
             for name in (
                 "Upload",
                 "Projektverwaltung",
-                "Aktivitäten",
                 "Einstellungen",
             ):
                 button = QtWidgets.QPushButton(name)
@@ -552,7 +542,6 @@ def create_main_window(
 
             from .project_management_dialogs import (
                 confirm_delete_project,
-                confirm_set_project_link_state,
                 prompt_download_project,
                 prompt_duplicate_project,
                 prompt_rename_project,
@@ -641,11 +630,11 @@ def create_main_window(
                         cancel_requested=download_cancel_event.is_set,
                     )
                 elif action_id == ACTION_DISABLE_LINK:
-                    if project is None or not confirm_set_project_link_state(QtWidgets, self, project, True):
+                    if project is None:
                         return
                     operation = lambda: project_controller.disable_project_link(project)
                 elif action_id == ACTION_ENABLE_LINK:
-                    if project is None or not confirm_set_project_link_state(QtWidgets, self, project, False):
+                    if project is None:
                         return
                     operation = lambda: project_controller.enable_project_link(project)
                 elif action_id == ACTION_REPLACE_ALL_POINTCLOUDS:
@@ -739,7 +728,8 @@ def create_main_window(
                     actor="Projektverwaltung",
                     target_path=(project.s3_path or project.viewer_path) if project is not None else "",
                 )
-                self._notify_operation_summary(summary, action_label)
+                if action_id not in {ACTION_DISABLE_LINK, ACTION_ENABLE_LINK} or summary.status != "success":
+                    self._notify_operation_summary(summary, action_label)
                 self._refresh_projects_page()
 
             self.statusBar().showMessage(f"{action_label} gestartet")

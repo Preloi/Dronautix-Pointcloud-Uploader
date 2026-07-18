@@ -22,6 +22,20 @@ PROJECT_CRS_METADATA_KEYS = (
 )
 
 
+def append_project_history(project: MutableMapping[str, Any], timestamp: str, message: str) -> None:
+    """Persist one successful project or pointcloud change."""
+
+    timestamp = str(timestamp or "").strip()
+    message = str(message or "").strip()
+    if not timestamp or not message:
+        return
+    history = project.get("history")
+    if not isinstance(history, list):
+        history = []
+        project["history"] = history
+    history.append({"timestamp": timestamp, "message": message})
+
+
 def get_index_project_list(index_data: MutableMapping[str, Any], key: str = PROJECTS_KEY) -> list[Any]:
     """Return a project list from an index, initializing missing or invalid lists."""
 
@@ -191,6 +205,7 @@ def strip_project_ui_state(project: dict[str, Any]) -> dict[str, Any]:
 __all__ = [
     "PROJECT_CRS_METADATA_KEYS",
     "PROJECTS_KEY",
+    "append_project_history",
     "apply_common_crs_or_clear",
     "clear_project_crs_metadata",
     "get_all_projects_for_management",

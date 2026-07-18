@@ -9,7 +9,13 @@
       "link": "https://pointcloud.dronautix.at/index.html?id=disable-target",
       "viewer_path": "golden/disable_target/source.copc.laz",
       "s3_path": "pointclouds/golden/disable_target/source.copc.laz",
-      "disabled_at": "2026-06-21T12:00:00"
+      "disabled_at": "2026-06-21T12:00:00",
+      "history": [
+        {
+          "timestamp": "2026-06-21T12:00:00",
+          "message": "Projekt wurde inaktiv geschaltet."
+        }
+      ]
     },
     {
       "datum": "",
@@ -28,7 +34,17 @@
         "projection": "EPSG:4326",
         "epsg": "EPSG:4326"
       },
-      "disabled_at": "2026-06-20T12:00:00"
+      "disabled_at": "2026-06-20T12:00:00",
+      "history": [
+        {
+          "timestamp": "2026-06-21T12:00:00",
+          "message": "Kunde von 'Disabled Kunde' zu 'Disabled Kunde Neu' geändert; Projekt von 'Disabled Projekt' zu 'Disabled Projekt Neu' umbenannt"
+        },
+        {
+          "timestamp": "2026-06-21T12:00:00",
+          "message": "Punktwolke 'Disabled Projekt Neu' wurde ausgetauscht."
+        }
+      ]
     }
   ],
   "last_updated": "2026-06-21T12:30:00"

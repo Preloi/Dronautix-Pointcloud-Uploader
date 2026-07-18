@@ -114,6 +114,13 @@ def test_rename_project_updates_active_project_without_changing_paths():
     assert renamed["viewer_path"] == "alt/active/altprojekt"
     assert renamed["s3_path"] == "pointclouds/alt/active/altprojekt"
     assert [cloud["name"] for cloud in renamed["pointclouds"]] == ["Cloud A", "Cloud B"]
+    assert renamed["history"] == [
+        {
+            "timestamp": "2026-06-21T13:00:00",
+            "message": "Kunde von 'Alt' zu 'Neu' geändert; Projekt von 'Altprojekt' zu 'Neuprojekt' umbenannt; "
+            "Punktwolke von 'A' zu 'Cloud A' umbenannt; Punktwolke von 'B' zu 'Cloud B' umbenannt",
+        }
+    ]
     assert repository.index_data["projects"][0] == renamed
     assert repository.saved_indexes[-1]["projects"][0] == renamed
 
@@ -330,6 +337,12 @@ def test_set_project_link_state_moves_active_project_to_disabled_and_saves_index
             "kunde": "Kunde",
             "projekt": "Projekt",
             "disabled_at": "2026-06-21T13:00:00",
+            "history": [
+                {
+                    "timestamp": "2026-06-21T13:00:00",
+                    "message": "Projekt wurde inaktiv geschaltet.",
+                }
+            ],
         }
     ]
     assert repository.saved_indexes[-1][S3_DISABLED_PROJECTS_KEY][0]["id"] == "active"
@@ -354,7 +367,19 @@ def test_set_project_link_state_moves_disabled_project_to_active_and_removes_dis
 
     assert result.status == "success"
     assert result.message == "Projekt-Link wurde aktiviert."
-    assert repository.index_data["projects"] == [{"id": "disabled", "kunde": "Kunde", "projekt": "Projekt"}]
+    assert repository.index_data["projects"] == [
+        {
+            "id": "disabled",
+            "kunde": "Kunde",
+            "projekt": "Projekt",
+            "history": [
+                {
+                    "timestamp": "2026-06-21T13:00:00",
+                    "message": "Projekt wurde aktiv geschaltet.",
+                }
+            ],
+        }
+    ]
     assert repository.index_data[S3_DISABLED_PROJECTS_KEY] == []
 
 

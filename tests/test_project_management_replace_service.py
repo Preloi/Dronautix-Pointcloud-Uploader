@@ -136,6 +136,10 @@ def test_full_replacement_disabled_multi_project_keeps_disabled_and_deletes_old_
         f"{project_root}/versions/versionid/new_a/source.copc.laz",
         f"{project_root}/versions/versionid/new_b/source.copc.laz",
     ]
+    assert disabled_project["history"][-1] == {
+        "timestamp": "2026-06-21T13:00:00",
+        "message": "Alle Punktwolken wurden ausgetauscht.",
+    }
     assert s3_client.deleted == [
         f"{project_root}/old_a/cloud.js",
         f"{project_root}/old_b/metadata.json",
@@ -217,6 +221,10 @@ def test_single_replacement_active_multi_project_replaces_only_target_and_delete
     ]
     assert f"{project_root}/cloud_a/cloud.js" not in s3_client.deleted
     assert repository.saved_indexes[-1]["projects"][0]["pointclouds"][1]["name"] == "Cloud B Replacement"
+    assert repository.index_data["projects"][0]["history"][-1] == {
+        "timestamp": "2026-06-21T13:00:00",
+        "message": "Punktwolke 'Cloud B' wurde ausgetauscht.",
+    }
 
 
 def test_single_replacement_active_legacy_single_project_keeps_top_level_shape_and_deletes_old_keys(tmp_path):

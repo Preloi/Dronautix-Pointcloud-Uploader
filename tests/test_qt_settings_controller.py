@@ -55,7 +55,7 @@ def test_settings_controller_loads_config_and_keyring_credentials(tmp_path):
     assert state.aws_secret_access_key == "secret-from-legacy-keyring"
     assert state.region_name == "eu-central-1"
     assert state.bucket_name == "bucket"
-    assert state.converter_path == "PotreeConverter.exe"
+    assert state.converter_path.endswith("bundled_tools\\PotreeConverter\\PotreeConverter.exe")
     assert state.output_base_dir == "C:/out"
     assert state.update_channel == "Preview"
 
@@ -67,7 +67,7 @@ def test_settings_controller_uses_bundled_converter_when_no_override_is_configur
     bundled_converter.parent.mkdir(parents=True)
     bundled_converter.write_bytes(b"converter")
 
-    monkeypatch.setattr(settings_controller, "resolve_converter_path", lambda configured: str(bundled_converter))
+    monkeypatch.setattr(settings_controller, "resolve_converter_path", lambda: str(bundled_converter))
     monkeypatch.setattr(settings_controller, "is_converter_bundle_available", lambda: True)
     monkeypatch.setattr(settings_controller, "get_bundled_converter_path", lambda: bundled_converter)
 
@@ -82,7 +82,7 @@ def test_settings_controller_uses_bundled_converter_when_no_override_is_configur
 
     assert state.converter_path == str(bundled_converter)
     assert preview.converter_bundle == str(bundled_converter)
-    assert preview.converter_override == "Kein Override"
+    assert preview.converter_override == "Nicht unterstützt"
     assert any(item.name == "Converter" and item.status == "Bereit" for item in preview.settings_status)
 
 
@@ -160,7 +160,7 @@ def test_settings_controller_saves_config_and_secrets_to_keyring(tmp_path):
     assert saved["aws_access_key_id"] == "access"
     assert saved["region_name"] == "eu-central-1"
     assert saved["bucket_name"] == "bucket"
-    assert saved["converter_path"] == "converter.exe"
+    assert "converter_path" not in saved
     assert saved["output_base_dir"] == "C:/out"
     assert "aws_secret_access_key" not in saved
     assert credentials == {
@@ -169,7 +169,7 @@ def test_settings_controller_saves_config_and_secrets_to_keyring(tmp_path):
     }
 
 
-def test_settings_controller_does_not_persist_bundled_converter_as_override(tmp_path, monkeypatch):
+def test_settings_controller_removes_legacy_converter_overrides_on_save(tmp_path, monkeypatch):
     import dronautix_uploader.qt_app.settings_controller as settings_controller
 
     bundled_converter = tmp_path / "bundle" / "PotreeConverter.exe"
@@ -177,8 +177,13 @@ def test_settings_controller_does_not_persist_bundled_converter_as_override(tmp_
     bundled_converter.write_bytes(b"converter")
     monkeypatch.setattr(settings_controller, "get_bundled_converter_path", lambda: bundled_converter)
 
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        '{"converter_path": "external.exe", "potree_converter_path": "legacy.exe"}',
+        encoding="utf-8",
+    )
     controller = settings_controller.SettingsController(
-        config_path=tmp_path / "config.json",
+        config_path=config_path,
         credential_loader=lambda service, user: "",
     )
 
@@ -192,8 +197,9 @@ def test_settings_controller_does_not_persist_bundled_converter_as_override(tmp_
         )
     )
 
-    saved = load_config_file(tmp_path / "config.json")
-    assert saved["converter_path"] == ""
+    saved = load_config_file(config_path)
+    assert "converter_path" not in saved
+    assert "potree_converter_path" not in saved
 
 
 def test_settings_controller_rejects_missing_region_or_bucket(tmp_path):

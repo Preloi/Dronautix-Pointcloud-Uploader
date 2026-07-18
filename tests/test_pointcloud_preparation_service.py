@@ -76,7 +76,7 @@ def test_prepare_pointcloud_sources_classifies_mixed_sources_and_converts_only_r
         )
     ]
     assert any(event.message == "runner progress" for event in events)
-    assert events[-1] == ProgressEvent(kind="progress", percent=1.0)
+    assert events[-1] == ProgressEvent(kind="progress", percent=1.0, phase="preparation")
 
 
 def test_prepare_pointcloud_sources_uses_build_local_output_dir_and_stable_slugs(tmp_path):

@@ -223,8 +223,13 @@ def test_upload_new_project_forwards_preparation_and_upload_progress_events(tmp_
     assert any(event.kind == "step" and event.message == "Bereite Punktwolke vor..." for event in events)
     assert any(event.kind == "log" and event.message == "converter progress" for event in events)
     assert any(event.kind == "log" and event.message.startswith("[UPLOAD]") for event in events)
-    assert events[-2].kind == "progress"
-    assert events[-2].percent == 1.0
+    assert {event.phase for event in events} >= {"preparation", "conversion", "upload", "index"}
+    assert events[-1] == ProgressEvent(
+        kind="progress",
+        message="Projekt wurde gespeichert.",
+        percent=1.0,
+        phase="index",
+    )
 
 
 def test_upload_new_project_applies_crs_info_per_source_path_to_metadata(tmp_path):

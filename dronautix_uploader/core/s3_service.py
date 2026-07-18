@@ -109,6 +109,7 @@ def upload_files_to_s3(
         ProgressEvent(
             kind="log",
             message=f"[UPLOAD] {len(files_to_upload)} Dateien ({format_bytes(total_size)})",
+            phase="upload",
         ),
     )
 
@@ -123,6 +124,7 @@ def upload_files_to_s3(
             ProgressEvent(
                 kind="log",
                 message=f"[{idx}/{len(files_to_upload)}] {os.path.basename(local_path)} ({format_bytes(file_size)})",
+                phase="upload",
             ),
         )
 
@@ -152,6 +154,7 @@ def upload_files_to_s3(
                     kind="progress",
                     percent=fraction,
                     detail=f"{format_bytes(current)} / {format_bytes(total_size)}",
+                    phase="upload",
                 ),
             )
 
@@ -177,8 +180,8 @@ def upload_files_to_s3(
         upload_ledger.record(s3_key)
         uploaded_total += file_size
 
-    _emit(on_progress, ProgressEvent(kind="progress", percent=1.0))
-    _emit(on_progress, ProgressEvent(kind="log", message="[UPLOAD] Alle Dateien hochgeladen"))
+    _emit(on_progress, ProgressEvent(kind="progress", percent=1.0, phase="upload"))
+    _emit(on_progress, ProgressEvent(kind="log", message="[UPLOAD] Alle Dateien hochgeladen", phase="upload"))
     return upload_ledger
 
 

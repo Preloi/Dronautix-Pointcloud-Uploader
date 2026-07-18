@@ -23,6 +23,7 @@ class ProgressEvent:
     total_steps: int | None = None
     percent: float | None = None
     detail: str = ""
+    phase: str = ""
 
 
 ProgressCallback = Callable[[ProgressEvent], None]

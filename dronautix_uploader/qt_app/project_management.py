@@ -64,7 +64,7 @@ def project_datum_sort_key(raw: Any) -> str:
 
 STATUS_ALL = "Alle Status"
 STATUS_ACTIVE = "Aktiv"
-STATUS_DISABLED = "Deaktiviert"
+STATUS_DISABLED = "Inaktiv"
 STATUS_FILTERS = (STATUS_ALL, STATUS_ACTIVE, STATUS_DISABLED)
 
 
@@ -92,6 +92,7 @@ class ProjectPreview:
     s3_path: str = ""
     viewer_path: str = ""
     updated_sort: str = ""
+    history: tuple[str, ...] = ()
 
     @property
     def status(self) -> str:
@@ -136,6 +137,7 @@ def make_project_preview(project: dict[str, Any], disabled: bool) -> ProjectPrev
         pointclouds=pointclouds,
         s3_path=str(project.get("s3_path", "")).strip(),
         viewer_path=str(project.get("viewer_path", "")).strip(),
+        history=_format_project_history(project.get("history")),
     )
 
 
@@ -300,6 +302,20 @@ def _get_pointcloud_crs_label(pointcloud: dict[str, Any]) -> str:
         return top_level
     summary = get_crs_summary_text(pointcloud.get("crs_info") if isinstance(pointcloud.get("crs_info"), dict) else None)
     return summary or "Unbekannt"
+
+
+def _format_project_history(raw_history: Any) -> tuple[str, ...]:
+    if not isinstance(raw_history, list):
+        return ()
+    lines = []
+    for entry in reversed(raw_history):
+        if not isinstance(entry, dict):
+            continue
+        timestamp = str(entry.get("timestamp", "")).strip()
+        message = str(entry.get("message", "")).strip()
+        if timestamp and message:
+            lines.append(f"{format_project_datum(timestamp)} – {message}")
+    return tuple(lines)
 
 
 __all__ = [

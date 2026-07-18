@@ -91,13 +91,12 @@ class SettingsController:
         )
         access_key = access_key or loaded_access
         secret_key = secret_key or loaded_secret
-        configured_converter_path = _first_value(config, "converter_path", "potree_converter_path")
         return SettingsFormState(
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
             region_name=_first_value(config, "region_name", "aws_region", "region") or REGION_NAME,
             bucket_name=_first_value(config, "bucket_name", "s3_bucket", "bucket") or BUCKET_NAME,
-            converter_path=resolve_converter_path(configured_converter_path),
+            converter_path=resolve_converter_path(),
             output_base_dir=_first_value(config, "output_base_dir", "output_folder"),
             update_channel=_first_value(config, "update_channel") or UPDATE_CHANNEL_STABLE,
         )
@@ -112,13 +111,14 @@ class SettingsController:
                 "aws_access_key_id": state.aws_access_key_id.strip(),
                 "region_name": state.region_name.strip(),
                 "bucket_name": state.bucket_name.strip(),
-                "converter_path": _configured_converter_path_for_save(state.converter_path),
                 "output_base_dir": state.output_base_dir.strip(),
                 "update_channel": state.update_channel.strip() or UPDATE_CHANNEL_STABLE,
             }
         )
         config.pop("aws_secret_access_key", None)
         config.pop("aws_secret", None)
+        config.pop("converter_path", None)
+        config.pop("potree_converter_path", None)
         self.config_saver(self.config_path, config)
         if state.aws_access_key_id.strip():
             self.credential_writer(self.keyring_service, "aws_access", state.aws_access_key_id.strip())
@@ -137,18 +137,12 @@ class SettingsController:
 
     def preview(self) -> SettingsPreview:
         state = self.load_state()
-        converter_path = state.converter_path.strip()
         output_dir = state.output_base_dir.strip()
         bundle_available = is_converter_bundle_available()
         bundled_converter_path = str(get_bundled_converter_path()) if bundle_available else "Nicht gefunden"
-        config = self.config_loader(self.config_path)
-        if not isinstance(config, dict):
-            config = {}
-        configured_converter = _first_value(config, "converter_path", "potree_converter_path")
-        has_override = bool(configured_converter.strip())
         settings_status = (
             credential_status(bool(state.aws_access_key_id), bool(state.aws_secret_access_key), "Direkte Keys"),
-            converter_status(bundle_available, configured_converter if has_override else ""),
+            converter_status(bundle_available),
             output_folder_status(output_dir, bool(output_dir and os.path.isdir(output_dir) and os.access(output_dir, os.W_OK))),
             update_channel_status(state.update_channel),
         )
@@ -157,7 +151,7 @@ class SettingsController:
             update_channel=state.update_channel,
             output_folder=output_dir or "Nicht gesetzt",
             converter_bundle=bundled_converter_path,
-            converter_override=configured_converter or "Kein Override",
+            converter_override="Nicht unterstützt",
             aws_profile="Direkte Keys" if state.aws_access_key_id else "Nicht gesetzt",
         )
 
@@ -245,18 +239,6 @@ def _first_value(config: dict[str, Any], *keys: str) -> str:
         if value:
             return value
     return ""
-
-
-def _configured_converter_path_for_save(converter_path: str) -> str:
-    selected = str(converter_path or "").strip()
-    if not selected:
-        return ""
-    try:
-        if Path(selected).resolve() == get_bundled_converter_path().resolve():
-            return ""
-    except OSError:
-        return selected
-    return selected
 
 
 __all__ = [

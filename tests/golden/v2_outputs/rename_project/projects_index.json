@@ -32,6 +32,12 @@
           "s3_path": "pointclouds/golden/rename_target/cloud_b/source.copc.laz",
           "visible": false
         }
+      ],
+      "history": [
+        {
+          "timestamp": "2026-06-21T12:00:00",
+          "message": "Kunde von 'Alt Kunde' zu 'Neue Kunde' geändert; Projekt von 'Alt Projekt' zu 'Neues Projekt' umbenannt; Punktwolke von 'Cloud Alt A' zu 'Cloud Neu A' umbenannt; Punktwolke von 'Cloud Alt B' zu 'Cloud Neu B' umbenannt"
+        }
       ]
     }
   ],

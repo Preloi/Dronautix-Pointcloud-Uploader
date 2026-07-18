@@ -42,6 +42,7 @@ INNO_SETUP_CANDIDATES = [
 GITHUB_UPDATE_OWNER = "Preloi"
 GITHUB_UPDATE_REPO = "Dronautix-Pointcloud-Uploader"
 GITHUB_UPDATE_BRANCH = "master"
+ENTRYPOINT = "Dronautix_Pointcloud_Uploader_v2_final.py"
 
 
 def write_text_file(path, content):
@@ -187,7 +188,7 @@ except ImportError:
 
 # Prüfe ob alle erforderlichen Dateien vorhanden sind
 required_files = [
-    "Dronautix_Pointcloud_Uploader.py",
+    ENTRYPOINT,
     "icon.ico",
     VERSION_INFO_FILE,
     INSTALLER_VERSION_FILE,
@@ -214,27 +215,26 @@ print()
 print("Starte PyInstaller...")
 print()
 
+data_separator = ";" if sys.platform == "win32" else ":"
 cmd = [
-    "pyinstaller",
+    sys.executable,
+    "-m",
+    "PyInstaller",
     "--name=Dronautix_Pointcloud_Uploader",
     "--onefile",                              # Eine einzelne .exe Datei
     "--windowed",                             # Kein Konsolen-Fenster (GUI-App)
     "--icon=icon.ico",                        # Icon einbinden
     f"--version-file={VERSION_INFO_FILE}",    # Windows-Dateiversion
-    "--add-data=icon.ico;.",                  # Icon als Ressource
-    "--add-data=bundled_tools;bundled_tools", # Integrierten PotreeConverter mitnehmen
+    f"--add-data=icon.ico{data_separator}.",
+    f"--add-data=bundled_tools{data_separator}bundled_tools",
     "--hidden-import=keyring",
     "--hidden-import=keyring.backends.Windows",
-    "Dronautix_Pointcloud_Uploader.py"
+    "--hidden-import=PySide6.QtCore",
+    "--hidden-import=PySide6.QtGui",
+    "--hidden-import=PySide6.QtWidgets",
+    "--hidden-import=boto3",
+    ENTRYPOINT,
 ]
-
-# Für Windows muss das add-data Format angepasst werden
-if sys.platform == "win32":
-    cmd[6] = "--add-data=icon.ico;."
-    cmd[7] = "--add-data=bundled_tools;bundled_tools"
-else:
-    cmd[6] = "--add-data=icon.ico:."
-    cmd[7] = "--add-data=bundled_tools:bundled_tools"
 
 print("Befehl:", " ".join(cmd))
 print()

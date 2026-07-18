@@ -32,11 +32,9 @@ def is_converter_bundle_available(resource_root: str | Path | None = None) -> bo
 
 
 def resolve_converter_path(configured_path: str = "", resource_root: str | Path | None = None) -> str:
-    """Return an explicit override path or the bundled converter path if available."""
+    """Return the bundled converter path if available."""
 
-    override = str(configured_path or "").strip()
-    if override:
-        return override
+    del configured_path  # Retained for compatibility with older callers/config files.
     if is_converter_bundle_available(resource_root):
         return str(get_bundled_converter_path(resource_root))
     return ""
