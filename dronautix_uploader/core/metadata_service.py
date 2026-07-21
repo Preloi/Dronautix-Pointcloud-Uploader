@@ -128,6 +128,28 @@ def write_potree_metadata_crs_for_sources(sources) -> tuple[Path, ...]:
     return tuple(updated_files)
 
 
+def write_potree_metadata_name(output_dir: str | Path, name: str) -> Path | None:
+    """Keep the viewer-visible Potree name independent from technical file aliases."""
+
+    display_name = str(name or "").strip()
+    metadata_path = Path(output_dir) / "metadata.json"
+    if not display_name or not metadata_path.is_file():
+        return None
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    metadata["name"] = display_name
+    metadata_path.write_text(
+        json.dumps(metadata, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+        newline="\n",
+    )
+    return metadata_path
+
+
 def _write_potree_metadata_json(path: Path, crs_info: dict[str, Any]) -> bool:
     try:
         metadata = json.loads(path.read_text(encoding="utf-8"))
@@ -214,4 +236,5 @@ __all__ = [
     "get_vertical_crs_display_value",
     "write_potree_metadata_crs",
     "write_potree_metadata_crs_for_sources",
+    "write_potree_metadata_name",
 ]

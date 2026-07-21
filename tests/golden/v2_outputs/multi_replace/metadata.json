@@ -2,6 +2,7 @@
   "spacing": 0.125,
   "source": "Raw",
   "points": 12345,
+  "name": "Raw",
   "projection": "EPSG:4326",
   "crs": "EPSG:4326",
   "epsg": "EPSG:4326",

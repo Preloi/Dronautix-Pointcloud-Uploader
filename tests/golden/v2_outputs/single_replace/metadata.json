@@ -2,6 +2,7 @@
   "spacing": 0.125,
   "source": "Cloud B Replacement",
   "points": 12345,
+  "name": "Cloud B Replacement",
   "projection": "EPSG:25832",
   "crs": "EPSG:25832",
   "epsg": "EPSG:25832",

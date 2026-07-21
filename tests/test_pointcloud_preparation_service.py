@@ -1,4 +1,5 @@
 import os
+import json
 
 import pytest
 
@@ -113,6 +114,33 @@ def test_prepare_pointcloud_sources_uses_build_local_output_dir_and_stable_slugs
     assert [source.slug for source in prepared] == ["floor_1", "floor_1_2"]
     assert all(source.input_format == "potree" for source in prepared)
     assert all(source.source_type == "potree_dir" for source in prepared)
+
+
+def test_prepare_unicode_source_restores_original_name_in_potree_metadata(tmp_path):
+    source = tmp_path / "Bäume.las"
+    source.write_bytes(b"las")
+    converter = tmp_path / "PotreeConverter.exe"
+    converter.write_bytes(b"exe")
+    output_base = tmp_path / "converted"
+
+    def fake_runner(_source_file, _converter_path, output_dir, _on_progress):
+        os.makedirs(output_dir, exist_ok=True)
+        with open(os.path.join(output_dir, "metadata.json"), "w", encoding="utf-8") as file:
+            json.dump({"name": "BUME~1", "points": 1}, file)
+
+    prepared = prepare_pointcloud_sources(
+        PointcloudPreparationRequest(
+            sources=(str(source),),
+            converter_path=str(converter),
+            output_base_dir=str(output_base),
+            overwrite=True,
+        ),
+        converter_runner=fake_runner,
+    )
+
+    metadata_path = output_base / "baeume_potree" / "metadata.json"
+    assert prepared[0].name == "Bäume"
+    assert json.loads(metadata_path.read_text(encoding="utf-8"))["name"] == "Bäume"
 
 
 @pytest.mark.parametrize(

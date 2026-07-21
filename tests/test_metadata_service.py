@@ -6,6 +6,7 @@ from dronautix_uploader.core.metadata_service import (
     get_common_crs_info,
     get_crs_summary_text,
     write_potree_metadata_crs,
+    write_potree_metadata_name,
 )
 
 
@@ -104,3 +105,14 @@ def test_write_potree_metadata_crs_updates_metadata_json_and_cloudjs(tmp_path):
     }
     assert cloudjs["projection"] == "EPSG:25832"
     assert cloudjs["crs_info"]["vertical_name"] == "DHHN2016"
+
+
+def test_write_potree_metadata_name_replaces_technical_short_name(tmp_path):
+    metadata_path = tmp_path / "metadata.json"
+    metadata_path.write_text('{"name":"BUME~1","points":1096789}', encoding="utf-8")
+
+    assert write_potree_metadata_name(tmp_path, "Bäume") == metadata_path
+    assert json.loads(metadata_path.read_text(encoding="utf-8")) == {
+        "name": "Bäume",
+        "points": 1096789,
+    }

@@ -94,6 +94,34 @@ def run(
     environments where Qt is not installed.
     """
 
+    from .single_instance import SingleInstanceGuard, show_single_instance_message
+
+    raw_argv = list(sys.argv if argv is None else argv)
+    identity = resolve_app_identity(mode) if mode is not None else resolve_runtime_identity(raw_argv, environ=environ)
+    instance_guard = SingleInstanceGuard()
+    try:
+        acquired = instance_guard.acquire()
+    except OSError as error:
+        show_single_instance_message(
+            identity.window_title,
+            f"Die Instanzsperre konnte nicht erstellt werden.\n\n{error}",
+        )
+        return 1
+    if not acquired:
+        show_single_instance_message(
+            identity.window_title,
+            "Der Dronautix Pointcloud Uploader läuft bereits.\n"
+            "Bitte verwenden Sie das bereits geöffnete Fenster.",
+        )
+        return 0
+
+    try:
+        return _run_qt_application(raw_argv, identity)
+    finally:
+        instance_guard.release()
+
+
+def _run_qt_application(raw_argv: list[str], identity: QtAppIdentity) -> int:
     try:
         from PySide6 import QtCore, QtGui, QtWidgets
     except ImportError as exc:
@@ -112,8 +140,6 @@ def run(
     )
     from .style import APP_STYLE
 
-    raw_argv = list(sys.argv if argv is None else argv)
-    identity = resolve_app_identity(mode) if mode is not None else resolve_runtime_identity(raw_argv, environ=environ)
     app = QtWidgets.QApplication(qt_argv_without_runtime_mode(raw_argv))
     app.setApplicationName(identity.application_name)
     app.setOrganizationName("Dronautix")

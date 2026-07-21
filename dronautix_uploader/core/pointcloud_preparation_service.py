@@ -12,6 +12,7 @@ from .local_conversion_service import (
     build_local_output_dir,
     run_local_conversion,
 )
+from .metadata_service import write_potree_metadata_name
 from .naming_service import get_pointcloud_display_name, make_unique_slug
 
 
@@ -97,6 +98,7 @@ def prepare_pointcloud_sources(
                 on_progress=on_progress,
                 converter_runner=converter_runner or _default_converter_runner,
             )
+            write_potree_metadata_name(result.output_dir, name)
             prepared.append(
                 PointcloudSource(
                     source_path=result.output_dir,
