@@ -146,7 +146,12 @@ def test_projects_page_shows_persistent_history_only_when_present_when_qt_availa
     try:
         table = page.findChild(QtWidgets.QTableView, "ProjectsTable")
         history_log = page.findChild(QtWidgets.QPlainTextEdit, "ProjectHistoryLog")
-        assert table.model().index(0, 4).data() == "18.07.2026 12:30"
+        assert [
+            table.model().headerData(column, QtCore.Qt.Horizontal)
+            for column in range(table.model().columnCount())
+        ] == ["Kunde", "Projekt", "Format", "Status", "Erstellt am", "Aktualisiert"]
+        assert table.model().index(0, 4).data() == "01.07.2026 08:00"
+        assert table.model().index(0, 5).data() == "18.07.2026 12:30"
         assert "Erstellt am" in {label.text() for label in page.findChildren(QtWidgets.QLabel)}
         assert "01.07.2026 08:00" in {label.text() for label in page.findChildren(QtWidgets.QLabel)}
         assert not history_log.isHidden()

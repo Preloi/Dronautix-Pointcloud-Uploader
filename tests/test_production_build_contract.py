@@ -12,5 +12,7 @@ def test_production_build_packages_v2_and_uses_safe_postinstall_launch():
     assert 'sys.executable,' in build_script
     assert '"PyInstaller",' in build_script
     assert '"--hidden-import=PySide6.QtWidgets"' in build_script
-    assert 'Filename: "{sys}\\explorer.exe"' in installer
+    assert 'Name: "desktopicon"' in installer
+    assert "Flags: unchecked" not in installer
+    assert 'Filename: "{win}\\explorer.exe"' in installer
     assert "%TEMP%\\_MEI*" not in installer

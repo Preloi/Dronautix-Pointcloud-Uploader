@@ -65,7 +65,9 @@ def test_v2_final_candidate_installer_files_are_isolated_and_keep_production_ide
     assert '#include "installer_version_v2_final_candidate.iss"' in iss
     assert '#define SourceExe "dist_v2_final_candidate\\Dronautix_Pointcloud_Uploader.exe"' in iss
     assert "OutputDir=Output_v2_final_candidate" in iss
-    assert 'Filename: "{sys}\\explorer.exe"' in iss
+    assert 'Name: "desktopicon"' in iss
+    assert "Flags: unchecked" not in iss
+    assert 'Filename: "{win}\\explorer.exe"' in iss
     assert 'Parameters: """{app}\\{#AppExeName}"""' in iss
     assert '_MEI*' not in iss
     assert f"OutputBaseFilename=Dronautix_Pointcloud_Uploader_Setup_{{#AppVersion}}" in iss

@@ -35,6 +35,7 @@ from .project_management import (
     STATUS_ALL,
     STATUS_FILTERS,
     load_project_previews,
+    project_datum_sort_key,
     status_filter_accepts,
 )
 from .project_management_actions import (
@@ -869,7 +870,7 @@ def create_projects_page(
     pointcloud_role = QtCore.Qt.UserRole + 3
     search_role = QtCore.Qt.UserRole + 4
     sort_role = QtCore.Qt.UserRole + 5
-    updated_column = 4
+    date_columns = (4, 5)
 
     class ProjectsFilterProxy(QtCore.QSortFilterProxyModel):
         def __init__(self):
@@ -891,9 +892,9 @@ def create_projects_page(
             return super().filterAcceptsRow(source_row, source_parent)
 
         def lessThan(self, left, right):
-            # The "Aktualisiert" column is displayed in German DD.MM.YYYY order but
-            # must sort chronologically, so compare a stable ISO sort key instead.
-            if left.column() == updated_column:
+            # Date columns are displayed in German DD.MM.YYYY order but must sort
+            # chronologically, so compare stable ISO sort keys instead.
+            if left.column() in date_columns:
                 source_model = self.sourceModel()
                 left_key = source_model.data(left, sort_role) or ""
                 right_key = source_model.data(right, sort_role) or ""
@@ -1780,16 +1781,16 @@ def _dispatch_project_action(
 
 
 def _create_projects_model(QtCore, QtGui, projects, project_role, disabled_role, search_role, sort_role):
-    model = QtGui.QStandardItemModel(0, 5)
+    model = QtGui.QStandardItemModel(0, 6)
     _populate_projects_model(QtCore, QtGui, model, projects, project_role, disabled_role, search_role, sort_role)
     return model
 
 
 def _populate_projects_model(QtCore, QtGui, model, projects, project_role, disabled_role, search_role, sort_role):
     model.setRowCount(0)
-    model.setHorizontalHeaderLabels(["Kunde", "Projekt", "Format", "Status", "Aktualisiert"])
+    model.setHorizontalHeaderLabels(["Kunde", "Projekt", "Format", "Status", "Erstellt am", "Aktualisiert"])
     for project in projects:
-        row = (project.customer, project.project, project.format, project.status, project.updated)
+        row = (project.customer, project.project, project.format, project.status, project.created, project.updated)
         items = [QtGui.QStandardItem(value) for value in row]
         search_text = _format_project_search_text(project)
         for item in items:
@@ -1797,7 +1798,8 @@ def _populate_projects_model(QtCore, QtGui, model, projects, project_role, disab
             item.setData(project, project_role)
             item.setData(project.disabled, disabled_role)
             item.setData(search_text, search_role)
-            item.setData(project.updated_sort, sort_role)
+        items[4].setData(project_datum_sort_key(project.created), sort_role)
+        items[5].setData(project.updated_sort, sort_role)
         items[3].setForeground(QtGui.QBrush(QtGui.QColor("#e74c3c" if project.disabled else "#2ecc71")))
         items[3].setCheckable(True)
         items[3].setCheckState(
@@ -1818,6 +1820,7 @@ def _format_project_search_text(project) -> str:
             project.customer,
             project.format,
             project.status,
+            project.created,
             project.updated,
             project.link,
             project.s3_path,
