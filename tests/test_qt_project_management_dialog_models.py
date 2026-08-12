@@ -10,6 +10,7 @@ from dronautix_uploader.qt_app.project_management_controller import (
     RenameProjectInput,
     ReplaceAllPointcloudsInput,
     ReplaceSinglePointcloudInput,
+    AddPointcloudsInput,
 )
 
 
@@ -240,6 +241,41 @@ def test_validate_replace_all_dialog_state_maps_crs_to_each_replacement_source(d
             "vertical_projection": "DHHN2016",
         },
     }
+
+
+def test_validate_add_dialog_state_reuses_multi_source_selection_and_conversion_settings(dialog_models):
+    payload = dialog_models.validate_add_pointclouds_dialog_state(
+        dialog_models.ProjectReplaceDialogState(
+            source_paths=(" scan-a.copc.laz ", "scan-b.copc.laz"),
+            horizontal_crs="EPSG:25832",
+        )
+    )
+
+    assert payload == AddPointcloudsInput(
+        source_paths=("scan-a.copc.laz", "scan-b.copc.laz"),
+        crs_info_by_source_path={
+            "scan-a.copc.laz": {"value": "EPSG:25832", "projection": "EPSG:25832"},
+            "scan-b.copc.laz": {"value": "EPSG:25832", "projection": "EPSG:25832"},
+        },
+    )
+
+
+def test_build_remove_pointcloud_dialog_state_names_only_the_selected_cloud_and_preserved_project_identity(dialog_models):
+    first = _pointcloud("Bestand EG")
+    selected = _pointcloud("Dach")
+    project = _project(project_id="abc-123", project="Bestand Nord", customer="Dronautix", pointclouds=(first, selected))
+
+    state = dialog_models.build_remove_pointcloud_dialog_state(project, selected)
+
+    assert isinstance(state, dialog_models.ProjectRemovePointcloudDialogState)
+    assert state.requires_confirmation is True
+    assert "Dach" in state.detail_text
+    assert selected.format in state.detail_text
+    assert selected.s3_path in state.detail_text
+    assert "abc-123" in state.detail_text
+    assert "Projektname" in state.detail_text
+    assert "Viewer-Link" in state.detail_text
+    assert "unver" in state.detail_text
 
 
 def test_validate_replace_single_dialog_state_requires_exactly_one_source(dialog_models):

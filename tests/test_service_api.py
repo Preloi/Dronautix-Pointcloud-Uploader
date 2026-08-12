@@ -9,6 +9,8 @@ from dronautix_uploader.core.constants import S3_DISABLED_PROJECTS_KEY
 from dronautix_uploader.core.contracts import (
     DownloadRequest,
     MultiReplacementRequest,
+    PointcloudAddRequest,
+    PointcloudRemoveRequest,
     PointcloudSource,
     ProjectDeleteRequest,
     ProjectLinkStateUpdate,
@@ -126,6 +128,9 @@ class CapturingProjectService:
         self.single_kwargs = None
         self.multi_args = None
         self.multi_kwargs = None
+        self.add_args = None
+        self.add_kwargs = None
+        self.remove_args = None
 
     def replace_single_project_pointcloud_from_source(self, *args, **kwargs):
         self.single_args = args
@@ -136,6 +141,15 @@ class CapturingProjectService:
         self.multi_args = args
         self.multi_kwargs = kwargs
         return "multi"
+
+    def add_project_pointclouds_from_sources(self, *args, **kwargs):
+        self.add_args = args
+        self.add_kwargs = kwargs
+        return "add"
+
+    def remove_project_pointcloud(self, *args):
+        self.remove_args = args
+        return "remove"
 
 
 def test_build_upload_workflow_request_maps_contract_sources_and_crs_defaults():
@@ -213,6 +227,41 @@ def test_core_service_api_propagates_overwrite_to_upload_and_replacement_pipelin
     assert upload_service.request.overwrite is True
     assert project_service.single_kwargs["overwrite"] is True
     assert project_service.multi_kwargs["overwrite"] is True
+
+
+def test_core_service_api_routes_add_and_remove_pointcloud_contracts():
+    upload_service = CapturingUploadService()
+    project_service = CapturingProjectService()
+    api = CoreServiceApi(upload_service=upload_service, project_service=project_service)
+    project = {
+        "id": "project",
+        "format": "multi",
+        "s3_path": "pointclouds/kunde/project/projekt",
+        "pointclouds": [{"s3_path": "pointclouds/kunde/project/projekt/old"}],
+    }
+
+    assert api.add_pointclouds(
+        PointcloudAddRequest(
+            project=project,
+            additions=(PointcloudSource("new.copc.laz", crs_info={"value": "EPSG:25832"}),),
+            aws_access="access",
+            aws_secret="secret",
+            overwrite=True,
+        )
+    ) == "add"
+    assert api.remove_pointcloud(
+        PointcloudRemoveRequest(
+            project=project,
+            target_pointcloud=project["pointclouds"][0],
+            aws_access="access",
+            aws_secret="secret",
+        )
+    ) == "remove"
+
+    assert project_service.add_args == ("project", ("new.copc.laz",))
+    assert project_service.add_kwargs["overwrite"] is True
+    assert project_service.add_kwargs["source_overrides"][0].crs_info == {"value": "EPSG:25832"}
+    assert project_service.remove_args == ("project", "pointclouds/kunde/project/projekt/old")
 
 
 def test_core_service_api_upload_project_uses_contract_dataclass_and_existing_pipeline(tmp_path):

@@ -390,3 +390,54 @@ def test_full_replacement_rolls_back_uploaded_keys_when_index_save_fails(tmp_pat
 
     assert repository.index_data == original_index
     assert s3_client.deleted == [f"{project_root}/versions/versionid/new/source.copc.laz"]
+
+
+def test_remove_multi_child_lists_and_deletes_only_the_exact_copc_object():
+    project_root = "pointclouds/kunde/project/projekt"
+    viewer_root = "kunde/project/projekt"
+    target_path = f"{project_root}/remove/source.copc.laz"
+    repository = FakeRepository(
+        {
+            "projects": [
+                {
+                    "id": "project",
+                    "format": "multi",
+                    "viewer_path": viewer_root,
+                    "s3_path": project_root,
+                    "pointclouds": [
+                        {
+                            "name": "Keep",
+                            "format": "potree",
+                            "viewer_path": f"{viewer_root}/keep",
+                            "s3_path": f"{project_root}/keep",
+                        },
+                        {
+                            "name": "Remove",
+                            "format": "copc",
+                            "viewer_path": f"{viewer_root}/remove/source.copc.laz",
+                            "s3_path": target_path,
+                        },
+                    ],
+                }
+            ],
+            S3_DISABLED_PROJECTS_KEY: [],
+        }
+    )
+    s3_client = FakeS3Client(
+        pages=[
+            {
+                "Contents": [
+                    {"Key": target_path, "Size": 10},
+                    {"Key": f"{target_path}.backup", "Size": 10},
+                    {"Key": f"{project_root}/keep/cloud.js", "Size": 10},
+                ]
+            }
+        ]
+    )
+
+    result = make_service(repository, s3_client).remove_project_pointcloud("project", target_path)
+
+    assert result.status == "success"
+    assert s3_client.prefixes == [target_path]
+    assert s3_client.deleted == [target_path]
+    assert [cloud["name"] for cloud in repository.index_data["projects"][0]["pointclouds"]] == ["Keep"]

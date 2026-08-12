@@ -13,6 +13,8 @@ from dronautix_uploader.qt_app.project_management_actions import (
     ACTION_RENAME,
     ACTION_REPLACE_ALL_POINTCLOUDS,
     ACTION_REPLACE_SINGLE_POINTCLOUD,
+    ACTION_ADD_POINTCLOUDS,
+    ACTION_REMOVE_POINTCLOUD,
     ProjectOperationSummary,
 )
 from dronautix_uploader.qt_app.project_management_controller import (
@@ -22,6 +24,7 @@ from dronautix_uploader.qt_app.project_management_controller import (
     RenameProjectInput,
     ReplaceAllPointcloudsInput,
     ReplaceSinglePointcloudInput,
+    AddPointcloudsInput,
 )
 
 
@@ -119,6 +122,38 @@ class FakeService:
                 crs_info,
             )
         )
+        return self.result
+
+    def add_project_pointclouds(self, project_id, prepared_clouds, on_progress=None):
+        self.calls.append(("add_project_pointclouds", project_id, tuple(prepared_clouds), on_progress))
+        return self.result
+
+    def add_project_pointclouds_from_sources(
+        self,
+        project_id,
+        source_paths,
+        converter_path="",
+        output_base_dir="",
+        overwrite=False,
+        on_progress=None,
+        crs_info_by_source_path=None,
+    ):
+        self.calls.append(
+            (
+                "add_project_pointclouds_from_sources",
+                project_id,
+                tuple(source_paths),
+                converter_path,
+                output_base_dir,
+                overwrite,
+                on_progress,
+                crs_info_by_source_path,
+            )
+        )
+        return self.result
+
+    def remove_project_pointcloud(self, project_id, target_pointcloud_s3_path):
+        self.calls.append(("remove_project_pointcloud", project_id, target_pointcloud_s3_path))
         return self.result
 
 
@@ -338,6 +373,71 @@ def test_replace_single_pointcloud_forwards_progress_callback_to_service():
     assert service.calls[0][7] is on_progress
 
 
+def test_add_pointclouds_routes_sources_and_progress_to_the_expected_service_method():
+    service = FakeService()
+    controller = ProjectManagementController(service)
+
+    def on_progress(event):
+        return event
+
+    controller.add_pointclouds(
+        _project(explicit=True),
+        AddPointcloudsInput(
+            source_paths=("scan.copc.laz",),
+            converter_path="PotreeConverter.exe",
+            output_base_dir="out",
+            overwrite=True,
+            crs_info_by_source_path={"scan.copc.laz": {"value": "EPSG:25832"}},
+        ),
+        on_progress=on_progress,
+    )
+
+    assert service.calls == [
+        (
+            "add_project_pointclouds_from_sources",
+            "project-1",
+            ("scan.copc.laz",),
+            "PotreeConverter.exe",
+            "out",
+            True,
+            on_progress,
+            {"scan.copc.laz": {"value": "EPSG:25832"}},
+        )
+    ]
+
+
+def test_add_and_remove_reject_legacy_projects_and_remove_routes_the_selected_s3_child():
+    service = FakeService()
+    controller = ProjectManagementController(service)
+    first = _pointcloud("Scan A", "projects/project-1/a")
+    second = _pointcloud("Scan B", "projects/project-1/b")
+    explicit_project = _project(first, second, explicit=True)
+
+    controller.remove_pointcloud(explicit_project, second)
+    assert service.calls == [("remove_project_pointcloud", "project-1", "projects/project-1/b")]
+
+    with pytest.raises(ValueError, match="pointclouds"):
+        controller.add_pointclouds(_project(first), AddPointcloudsInput(prepared_clouds=("prepared",)))
+    with pytest.raises(ValueError, match="letzte Punktwolke"):
+        controller.remove_pointcloud(_project(first, explicit=True), first)
+
+
+def test_handle_action_routes_add_and_remove_actions():
+    service = FakeService()
+    controller = ProjectManagementController(service)
+    first = _pointcloud("Scan A", "projects/project-1/a")
+    second = _pointcloud("Scan B", "projects/project-1/b")
+    project = _project(first, second, explicit=True)
+
+    controller.handle_action(ACTION_ADD_POINTCLOUDS, project, payload=AddPointcloudsInput(prepared_clouds=("new",)))
+    controller.handle_action(ACTION_REMOVE_POINTCLOUD, project, pointcloud_preview=first)
+
+    assert service.calls == [
+        ("add_project_pointclouds", "project-1", ("new",), None),
+        ("remove_project_pointcloud", "project-1", "projects/project-1/a"),
+    ]
+
+
 def test_missing_project_selection_raises_value_error_with_context():
     controller = ProjectManagementController(FakeService())
 
@@ -477,7 +577,7 @@ def test_handle_action_forwards_download_cancel_callback():
     assert service.calls == [("download_project", "project-1", "C:/Downloads", None, cancel_requested)]
 
 
-def _project(*pointclouds: PointcloudPreview, disabled: bool = False) -> ProjectPreview:
+def _project(*pointclouds: PointcloudPreview, disabled: bool = False, explicit: bool = False) -> ProjectPreview:
     return ProjectPreview(
         project_id="project-1",
         project="Projekt 1",
@@ -488,6 +588,7 @@ def _project(*pointclouds: PointcloudPreview, disabled: bool = False) -> Project
         disabled=disabled,
         pointclouds=pointclouds,
         s3_path="projects/project-1",
+        has_explicit_pointclouds=explicit,
     )
 
 

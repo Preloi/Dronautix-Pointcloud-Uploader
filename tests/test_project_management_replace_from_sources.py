@@ -447,3 +447,86 @@ def test_replace_from_sources_forwards_preparation_and_upload_progress_events(tm
     assert any(event.kind == "log" and event.message == "runner progress" for event in events)
     assert any(event.kind == "log" and event.message.startswith("[UPLOAD]") for event in events)
     assert events[-1] == ProgressEvent(kind="log", message="[UPLOAD] Alle Dateien hochgeladen", phase="upload")
+
+
+def test_add_from_sources_uses_immutable_child_path_and_preserves_project_metadata(tmp_path):
+    project_root = "pointclouds/kunde/project/projekt"
+    viewer_root = "kunde/project/projekt"
+    source = write_copc(tmp_path, "New.copc.laz")
+    repository = FakeRepository(
+        {
+            "projects": [],
+            S3_DISABLED_PROJECTS_KEY: [
+                {
+                    "id": "project",
+                    "kunde": "Kunde",
+                    "projekt": "Projekt",
+                    "datum": "2026-06-20T12:00:00",
+                    "link": "https://viewer/?id=project",
+                    "format": "multi",
+                    "viewer_path": viewer_root,
+                    "s3_path": project_root,
+                    "disabled_at": "2026-06-21T12:00:00",
+                    "models": [{"s3_path": "models/model/versions/one/model.json"}],
+                    "pointclouds": [
+                        {
+                            "name": "Keep",
+                            "format": "potree",
+                            "viewer_path": f"{viewer_root}/keep",
+                            "s3_path": f"{project_root}/keep",
+                            "crs_info": {"value": "EPSG:25832"},
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    s3_client = FakeS3Client()
+
+    result = make_service(repository, s3_client).add_project_pointclouds_from_sources(
+        "project",
+        (str(source),),
+        crs_info_by_source_path={str(source): {"value": "EPSG:25832"}},
+    )
+
+    project = repository.index_data[S3_DISABLED_PROJECTS_KEY][0]
+    assert result.status == "success"
+    assert project["viewer_path"] == viewer_root
+    assert project["s3_path"] == project_root
+    assert project["models"] == [{"s3_path": "models/model/versions/one/model.json"}]
+    assert project["disabled_at"] == "2026-06-21T12:00:00"
+    assert project["pointcloud_count"] == 2
+    assert project["pointclouds"][1]["s3_path"] == f"{project_root}/versions/versionid/new/{COPC_OBJECT_NAME}"
+    assert [key for _bucket, key, _extra in s3_client.uploads] == [
+        f"{project_root}/versions/versionid/new/{COPC_OBJECT_NAME}"
+    ]
+
+
+def test_add_from_sources_rejects_existing_child_slug_collision(tmp_path):
+    project_root = "pointclouds/kunde/project/projekt"
+    viewer_root = "kunde/project/projekt"
+    source = write_copc(tmp_path, "Scan.copc.laz")
+    repository = FakeRepository(
+        {
+            "projects": [
+                {
+                    "id": "project",
+                    "format": "multi",
+                    "viewer_path": viewer_root,
+                    "s3_path": project_root,
+                    "pointclouds": [
+                        {
+                            "name": "Scan",
+                            "format": "copc",
+                            "viewer_path": f"{viewer_root}/scan/{COPC_OBJECT_NAME}",
+                            "s3_path": f"{project_root}/scan/{COPC_OBJECT_NAME}",
+                        }
+                    ],
+                }
+            ],
+            S3_DISABLED_PROJECTS_KEY: [],
+        }
+    )
+
+    with pytest.raises(ValueError, match="Slug"):
+        make_service(repository).add_project_pointclouds_from_sources("project", (str(source),))

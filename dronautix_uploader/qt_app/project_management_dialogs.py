@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .path_drop import append_unique_paths, create_path_drop_plain_text_edit
-from .project_management import ProjectPreview
+from .project_management import PointcloudPreview, ProjectPreview
 from .project_management_dialog_models import (
     ProjectDuplicateDialogState,
     ProjectDownloadDialogState,
@@ -14,6 +14,8 @@ from .project_management_dialog_models import (
     build_link_state_dialog_state,
     build_duplicate_dialog_state,
     build_rename_dialog_state,
+    build_remove_pointcloud_dialog_state,
+    validate_add_pointclouds_dialog_state,
     validate_download_dialog_state,
     validate_duplicate_dialog_state,
     validate_rename_dialog_state,
@@ -82,6 +84,30 @@ def confirm_delete_project(QtWidgets, parent, project: ProjectPreview) -> bool:
     buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Cancel)
     delete_button = buttons.addButton(state.confirmation_label, QtWidgets.QDialogButtonBox.DestructiveRole)
     delete_button.clicked.connect(dialog.accept)
+    buttons.rejected.connect(dialog.reject)
+    layout.addWidget(buttons)
+    return dialog.exec() == QtWidgets.QDialog.Accepted
+
+
+def confirm_remove_pointcloud(QtWidgets, parent, project: ProjectPreview, pointcloud: PointcloudPreview) -> bool:
+    state = build_remove_pointcloud_dialog_state(project, pointcloud)
+    dialog = QtWidgets.QDialog(parent)
+    dialog.setWindowTitle("Punktwolke entfernen")
+    layout = QtWidgets.QVBoxLayout(dialog)
+    layout.setContentsMargins(20, 20, 20, 20)
+    layout.setSpacing(12)
+
+    title = QtWidgets.QLabel(state.project_label)
+    title.setObjectName("PanelTitle")
+    detail = QtWidgets.QLabel(state.detail_text)
+    detail.setObjectName("MutedText")
+    detail.setWordWrap(True)
+    layout.addWidget(title)
+    layout.addWidget(detail)
+
+    buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Cancel)
+    remove_button = buttons.addButton(state.confirmation_label, QtWidgets.QDialogButtonBox.DestructiveRole)
+    remove_button.clicked.connect(dialog.accept)
     buttons.rejected.connect(dialog.reject)
     layout.addWidget(buttons)
     return dialog.exec() == QtWidgets.QDialog.Accepted
@@ -189,6 +215,27 @@ def prompt_replace_all_pointclouds(QtWidgets, parent, project: ProjectPreview, d
     )
 
 
+def prompt_add_project_pointclouds(QtWidgets, parent, project: ProjectPreview, defaults=None, output_base_dir=""):
+    converter_path = _default_text(defaults, "converter_path")
+    dialog, source_paths = _build_replace_dialog(
+        QtWidgets,
+        parent,
+        "Punktwolken hinzufügen",
+        f"Punktwolke(n) zu „{project.project}“ hinzufügen - "
+        "LAS/LAZ, COPC oder bereits konvertierte Potree-Ordner. "
+        "Konvertierung und CRS-Erkennung laufen automatisch.",
+        allow_multiple=True,
+        converter_path=converter_path,
+        output_base_dir=output_base_dir,
+        confirm_label="Hinzufügen",
+    )
+    if dialog.exec() != QtWidgets.QDialog.Accepted:
+        return None
+    return validate_add_pointclouds_dialog_state(
+        _replace_dialog_state_from_inputs(source_paths, converter_path, output_base_dir)
+    )
+
+
 def prompt_replace_single_pointcloud(QtWidgets, parent, project: ProjectPreview, pointcloud, defaults=None, output_base_dir=""):
     converter_path = _default_text(defaults, "converter_path")
     dialog, source_paths = _build_replace_dialog(
@@ -275,6 +322,7 @@ def _build_replace_dialog(
     allow_multiple: bool,
     converter_path: str = "",
     output_base_dir: str = "",
+    confirm_label: str = "Austauschen",
 ):
     dialog = QtWidgets.QDialog(parent)
     dialog.setWindowTitle(title)
@@ -349,13 +397,15 @@ def _build_replace_dialog(
     folder_button.clicked.connect(browse_folder)
 
     buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-    buttons.button(QtWidgets.QDialogButtonBox.Ok).setText("Austauschen")
+    buttons.button(QtWidgets.QDialogButtonBox.Ok).setText(confirm_label)
     buttons.button(QtWidgets.QDialogButtonBox.Cancel).setText("Abbrechen")
 
     def accept_if_valid():
         state = _replace_dialog_state_from_inputs(source_paths, converter_path, output_base_dir)
         try:
-            if allow_multiple:
+            if confirm_label == "Hinzufügen":
+                validate_add_pointclouds_dialog_state(state)
+            elif allow_multiple:
                 validate_replace_all_dialog_state(state)
             else:
                 validate_replace_single_dialog_state(state)
@@ -392,9 +442,11 @@ def _default_text(defaults, attribute: str) -> str:
 
 __all__ = [
     "confirm_delete_project",
+    "confirm_remove_pointcloud",
     "confirm_set_project_link_state",
     "prompt_download_project",
     "prompt_replace_all_pointclouds",
+    "prompt_add_project_pointclouds",
     "prompt_replace_single_pointcloud",
     "prompt_duplicate_project",
     "prompt_rename_project",

@@ -21,16 +21,22 @@ from .project_index_service import (
 )
 from .project_operations import (
     PreparedCloudUpload,
+    add_project_pointclouds as add_project_pointclouds_operation,
     apply_project_rename_metadata,
     delete_project as delete_project_operation,
     duplicate_project as duplicate_project_operation,
     download_project as download_project_operation,
+    filter_pointcloud_object_keys,
+    pointcloud_object_list_prefix,
     prepare_cloud_uploads,
     prepare_single_project_upload,
     rebase_prepared_cloud_upload,
     ProjectDownloadCancelledError,
+    remove_project_pointcloud as remove_project_pointcloud_operation,
     replace_project_pointclouds as replace_project_pointclouds_operation,
     replace_single_project_pointcloud as replace_single_project_pointcloud_operation,
+    resolve_unique_multi_project_child,
+    validate_explicit_multi_project,
 )
 from .project_repository import ProjectMetadataRepository
 from .s3_service import collect_project_objects, delete_s3_objects
@@ -310,6 +316,118 @@ class ProjectManagementService:
             delete_keys=lambda keys: delete_s3_objects(self.s3_client, keys, bucket_name=self._bucket_name),
             on_progress=on_progress,
             bucket_name=self._bucket_name,
+            timestamp=self.timestamp_factory(),
+        )
+
+    def add_project_pointclouds(
+        self,
+        project_id: str,
+        prepared_clouds: tuple[PreparedCloudUpload, ...] | list[PreparedCloudUpload],
+        on_progress=None,
+    ):
+        index_data = self.repository.load_projects_index()
+        project_info, _is_disabled = self._find_project(index_data, project_id)
+        project_viewer_root, project_s3_prefix = self._stable_project_roots(project_info)
+        validate_explicit_multi_project(project_info, project_viewer_root, project_s3_prefix)
+        version_viewer_root, version_s3_prefix = self._versioned_roots(project_info)
+        versioned_clouds = tuple(
+            rebase_prepared_cloud_upload(cloud, version_viewer_root, version_s3_prefix)
+            for cloud in prepared_clouds
+        )
+        return add_project_pointclouds_operation(
+            s3_client=self.s3_client,
+            index_data=index_data,
+            project_id=project_id,
+            project_viewer_root=project_viewer_root,
+            project_s3_prefix=project_s3_prefix,
+            prepared_clouds=versioned_clouds,
+            save_index=self._save_projects_index,
+            delete_keys=lambda keys: delete_s3_objects(self.s3_client, keys, bucket_name=self._bucket_name),
+            on_progress=on_progress,
+            bucket_name=self._bucket_name,
+            timestamp=self.timestamp_factory(),
+        )
+
+    def add_project_pointclouds_from_sources(
+        self,
+        project_id: str,
+        source_paths: tuple[str, ...] | list[str],
+        converter_path: str = "",
+        output_base_dir: str = "",
+        overwrite: bool = False,
+        on_progress=None,
+        converter_runner=None,
+        crs_info_by_source_path: dict[str, dict[str, Any]] | None = None,
+        source_overrides=None,
+    ):
+        index_data = self.repository.load_projects_index()
+        project_info, _is_disabled = self._find_project(index_data, project_id)
+        project_viewer_root, project_s3_prefix = self._stable_project_roots(project_info)
+        validate_explicit_multi_project(project_info, project_viewer_root, project_s3_prefix)
+        prepared_sources = prepare_pointcloud_sources(
+            PointcloudPreparationRequest(
+                sources=tuple(source_paths),
+                converter_path=converter_path,
+                output_base_dir=output_base_dir,
+                overwrite=overwrite,
+            ),
+            on_progress=on_progress,
+            converter_runner=converter_runner,
+        )
+        prepared_sources = _attach_source_overrides(prepared_sources, source_overrides)
+        prepared_sources = _attach_crs_info(prepared_sources, tuple(source_paths), crs_info_by_source_path)
+        write_potree_metadata_crs_for_sources(prepared_sources)
+        version_viewer_root, version_s3_prefix = self._versioned_roots(project_info)
+        prepared_clouds = prepare_cloud_uploads(prepared_sources, version_viewer_root, version_s3_prefix)
+        return add_project_pointclouds_operation(
+            s3_client=self.s3_client,
+            index_data=index_data,
+            project_id=project_id,
+            project_viewer_root=project_viewer_root,
+            project_s3_prefix=project_s3_prefix,
+            prepared_clouds=prepared_clouds,
+            save_index=self._save_projects_index,
+            delete_keys=lambda keys: delete_s3_objects(self.s3_client, keys, bucket_name=self._bucket_name),
+            on_progress=on_progress,
+            bucket_name=self._bucket_name,
+            timestamp=self.timestamp_factory(),
+        )
+
+    def remove_project_pointcloud(
+        self,
+        project_id: str,
+        target_pointcloud_s3_path: str,
+    ):
+        index_data = self.repository.load_projects_index()
+        project_info, _is_disabled = self._find_project(index_data, project_id)
+        project_viewer_root, project_s3_prefix = self._stable_project_roots(project_info)
+        target = resolve_unique_multi_project_child(
+            project_info,
+            target_pointcloud_s3_path,
+            project_viewer_root,
+            project_s3_prefix,
+        )
+        list_prefix = pointcloud_object_list_prefix(target, project_viewer_root, project_s3_prefix)
+        listed_keys = collect_project_objects(
+            self.s3_client,
+            list_prefix,
+            bucket_name=self._bucket_name,
+        )
+        existing_target_keys = filter_pointcloud_object_keys(
+            target,
+            listed_keys,
+            project_viewer_root,
+            project_s3_prefix,
+        )
+        return remove_project_pointcloud_operation(
+            index_data=index_data,
+            project_id=project_id,
+            project_viewer_root=project_viewer_root,
+            project_s3_prefix=project_s3_prefix,
+            target_pointcloud_s3_path=target_pointcloud_s3_path,
+            existing_target_keys=existing_target_keys,
+            save_index=self._save_projects_index,
+            delete_keys=lambda keys: delete_s3_objects(self.s3_client, keys, bucket_name=self._bucket_name),
             timestamp=self.timestamp_factory(),
         )
 

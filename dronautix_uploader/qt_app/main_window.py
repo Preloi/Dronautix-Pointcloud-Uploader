@@ -34,6 +34,8 @@ from .project_management_actions import (
     ACTION_RENAME,
     ACTION_REPLACE_ALL_POINTCLOUDS,
     ACTION_REPLACE_SINGLE_POINTCLOUD,
+    ACTION_ADD_POINTCLOUDS,
+    ACTION_REMOVE_POINTCLOUD,
     ProjectOperationSummary,
     action_by_id,
 )
@@ -542,6 +544,8 @@ def create_main_window(
 
             from .project_management_dialogs import (
                 confirm_delete_project,
+                confirm_remove_pointcloud,
+                prompt_add_project_pointclouds,
                 prompt_download_project,
                 prompt_duplicate_project,
                 prompt_rename_project,
@@ -670,6 +674,39 @@ def create_main_window(
                         payload,
                         on_progress=progress_callback,
                     )
+                elif action_id == ACTION_ADD_POINTCLOUDS:
+                    if project is None:
+                        self._placeholder_action(action_id, project, pointcloud)
+                        return
+                    replace_temp_dir = tempfile.mkdtemp(prefix=UPLOAD_TEMP_PREFIX)
+                    payload = prompt_add_project_pointclouds(
+                        QtWidgets,
+                        self,
+                        project,
+                        self._settings_dialog_defaults(),
+                        replace_temp_dir,
+                    )
+                    if payload is None:
+                        shutil.rmtree(replace_temp_dir, ignore_errors=True)
+                        return
+                    payload = self._with_detected_crs_all(payload)
+                    progress_dialog = self._create_action_progress_dialog(
+                        "Punktwolken hinzufügen",
+                        f"Punktwolken werden zu „{project.project}“ hinzugefügt...",
+                    )
+                    progress_callback = self._make_progress_callback(
+                        ACTIVITY_ACTION_UPLOAD,
+                        project=project.project,
+                        customer=project.customer,
+                        actor="Projektverwaltung",
+                        target_path=project.s3_path or project.viewer_path,
+                        extra_sink=self._progress_dialog_sink(progress_dialog),
+                    )
+                    operation = lambda: project_controller.add_pointclouds(
+                        project,
+                        payload,
+                        on_progress=progress_callback,
+                    )
                 elif action_id == ACTION_REPLACE_SINGLE_POINTCLOUD:
                     if project is None or pointcloud is None:
                         self._placeholder_action(action_id, project, pointcloud)
@@ -706,6 +743,17 @@ def create_main_window(
                         payload,
                         on_progress=progress_callback,
                     )
+                elif action_id == ACTION_REMOVE_POINTCLOUD:
+                    if project is None or pointcloud is None:
+                        self._placeholder_action(action_id, project, pointcloud)
+                        return
+                    if not confirm_remove_pointcloud(QtWidgets, self, project, pointcloud):
+                        return
+                    progress_dialog = self._create_action_progress_dialog(
+                        "Punktwolke entfernen",
+                        f"„{pointcloud.name}“ wird entfernt...",
+                    )
+                    operation = lambda: project_controller.remove_pointcloud(project, pointcloud)
                 else:
                     self._placeholder_action(action_id, project, pointcloud)
                     return
@@ -1189,7 +1237,9 @@ def _detect_crs_or_none(source_path: str):
 def _activity_action_for_project_action(action_id: str) -> str:
     if action_id in {ACTION_REPLACE_ALL_POINTCLOUDS, ACTION_REPLACE_SINGLE_POINTCLOUD}:
         return ACTIVITY_ACTION_REPLACE
-    if action_id == ACTION_DELETE:
+    if action_id == ACTION_ADD_POINTCLOUDS:
+        return ACTIVITY_ACTION_UPLOAD
+    if action_id in {ACTION_DELETE, ACTION_REMOVE_POINTCLOUD}:
         return ACTIVITY_ACTION_DELETE
     if action_id == ACTION_DOWNLOAD:
         return ACTIVITY_ACTION_DOWNLOAD

@@ -98,6 +98,17 @@ def test_project_format_column_shows_einzel_or_multi_instead_of_stored_format():
     assert legacy_without_pointcloud_list.format == "Einzel"
 
 
+def test_project_preview_marks_only_explicit_pointcloud_lists_for_pointcloud_management():
+    explicit = make_project_preview(
+        {"projekt": "Multi", "format": "multi", "pointclouds": [{"name": "A"}]},
+        disabled=False,
+    )
+    legacy = make_project_preview({"projekt": "Legacy", "format": "COPC"}, disabled=False)
+
+    assert explicit.has_explicit_pointclouds is True
+    assert legacy.has_explicit_pointclouds is False
+
+
 def test_make_project_previews_converts_service_rows_with_paths_and_crs_info():
     previews = make_project_previews(
         [

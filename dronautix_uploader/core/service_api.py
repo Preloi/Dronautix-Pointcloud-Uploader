@@ -9,6 +9,8 @@ from .contracts import (
     CancelCallback,
     DownloadRequest,
     MultiReplacementRequest,
+    PointcloudAddRequest,
+    PointcloudRemoveRequest,
     PointcloudSource,
     ProjectDeleteRequest,
     ProjectLinkStateUpdate,
@@ -125,6 +127,35 @@ class CoreServiceApi:
             ),
             source_overrides=request.replacements,
             overwrite=request.overwrite,
+        )
+
+    def add_pointclouds(
+        self,
+        request: PointcloudAddRequest,
+        *,
+        on_progress: ProgressCallback | None = None,
+        converter_runner=None,
+    ):
+        return self.project_service.add_project_pointclouds_from_sources(
+            _project_id_from_contract_project(request.project),
+            tuple(source.source_path for source in request.additions),
+            converter_path=request.converter_path,
+            output_base_dir=request.output_base_dir,
+            on_progress=on_progress,
+            converter_runner=converter_runner,
+            crs_info_by_source_path=_crs_info_by_source_path(
+                request.additions,
+                request.crs_input,
+                request.vertical_input,
+            ),
+            source_overrides=request.additions,
+            overwrite=request.overwrite,
+        )
+
+    def remove_pointcloud(self, request: PointcloudRemoveRequest):
+        return self.project_service.remove_project_pointcloud(
+            _project_id_from_contract_project(request.project),
+            _target_pointcloud_s3_path(request.project, request.target_pointcloud),
         )
 
 

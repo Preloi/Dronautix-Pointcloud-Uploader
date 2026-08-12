@@ -6,6 +6,7 @@ import pytest
 from dronautix_uploader.core.constants import S3_DISABLED_PROJECTS_KEY
 from dronautix_uploader.core.contracts import PointcloudSource, ProgressEvent
 from dronautix_uploader.core.project_operations import (
+    add_project_pointclouds,
     apply_project_rename_metadata,
     build_duplicate_project_metadata,
     build_new_project_upload,
@@ -18,6 +19,7 @@ from dronautix_uploader.core.project_operations import (
     ProjectDownloadCancelledError,
     replace_project_pointclouds,
     replace_single_project_pointcloud,
+    remove_project_pointcloud,
     upload_new_project,
 )
 
@@ -961,3 +963,365 @@ def test_replace_single_project_pointcloud_supports_disabled_legacy_single_proje
     assert "pointclouds" not in project
     assert project["crs"] == "EPSG:4326"
     assert deleted_keys == ["pointclouds/kunde/project/projekt/old.bin"]
+
+
+def test_add_project_pointclouds_preserves_multi_project_identity_and_existing_children(tmp_path):
+    source = tmp_path / "new.copc.laz"
+    source.write_bytes(b"new")
+    project_root = "pointclouds/kunde/project/projekt"
+    viewer_root = "kunde/project/projekt"
+    original_child = {
+        "name": "Keep",
+        "format": "potree",
+        "viewer_path": f"{viewer_root}/keep",
+        "s3_path": f"{project_root}/keep",
+        "crs_info": {"value": "EPSG:25832"},
+        "custom": {"unchanged": True},
+    }
+    index_data = {
+        "projects": [],
+        S3_DISABLED_PROJECTS_KEY: [
+            {
+                "id": "project",
+                "kunde": "Kunde",
+                "projekt": "Projekt",
+                "datum": "2026-06-20T12:00:00",
+                "link": "https://viewer/?id=project",
+                "format": "multi",
+                "viewer_path": viewer_root,
+                "s3_path": project_root,
+                "disabled_at": "2026-06-21T12:00:00",
+                "models": [{"viewer_path": "models/model/model.json"}],
+                "unknown": {"keep": True},
+                "crs_info": {"value": "EPSG:25832"},
+                "pointclouds": [original_child],
+            }
+        ],
+    }
+    prepared = prepare_cloud_uploads(
+        (PointcloudSource(str(source), name="New", input_format="copc", crs_info={"value": "EPSG:25832"}),),
+        f"{viewer_root}/versions/versionid",
+        f"{project_root}/versions/versionid",
+    )
+
+    result = add_project_pointclouds(
+        s3_client=FakeS3Client(),
+        index_data=index_data,
+        project_id="project",
+        project_viewer_root=viewer_root,
+        project_s3_prefix=project_root,
+        prepared_clouds=prepared,
+        save_index=lambda _data: True,
+        delete_keys=lambda _keys: None,
+        timestamp="2026-06-21T13:00:00",
+    )
+
+    project = index_data[S3_DISABLED_PROJECTS_KEY][0]
+    assert result.status == "success"
+    assert project["id"] == "project"
+    assert project["kunde"] == "Kunde"
+    assert project["projekt"] == "Projekt"
+    assert project["datum"] == "2026-06-20T12:00:00"
+    assert project["link"] == "https://viewer/?id=project"
+    assert project["viewer_path"] == viewer_root
+    assert project["s3_path"] == project_root
+    assert project["disabled_at"] == "2026-06-21T12:00:00"
+    assert project["models"] == [{"viewer_path": "models/model/model.json"}]
+    assert project["unknown"] == {"keep": True}
+    assert project["pointcloud_count"] == 2
+    assert project["pointclouds"][0] == original_child
+    assert project["pointclouds"][0] is not original_child
+    assert project["pointclouds"][1]["s3_path"] == f"{project_root}/versions/versionid/new/source.copc.laz"
+    assert project["history"][-1]["message"] == "1 Punktwolke(n) wurden hinzugefuegt."
+
+
+def test_add_project_pointclouds_rolls_back_uploaded_keys_before_index_save(tmp_path):
+    source = tmp_path / "new.copc.laz"
+    source.write_bytes(b"new")
+    project_root = "pointclouds/kunde/project/projekt"
+    viewer_root = "kunde/project/projekt"
+    original = {
+        "projects": [
+            {
+                "id": "project",
+                "format": "multi",
+                "viewer_path": viewer_root,
+                "s3_path": project_root,
+                "pointclouds": [
+                    {
+                        "name": "Keep",
+                        "format": "potree",
+                        "viewer_path": f"{viewer_root}/keep",
+                        "s3_path": f"{project_root}/keep",
+                    }
+                ],
+            }
+        ],
+        S3_DISABLED_PROJECTS_KEY: [],
+    }
+    index_data = copy.deepcopy(original)
+    prepared = prepare_cloud_uploads(
+        (PointcloudSource(str(source), name="New", input_format="copc"),),
+        f"{viewer_root}/versions/versionid",
+        f"{project_root}/versions/versionid",
+    )
+    deleted_keys = []
+
+    with pytest.raises(RuntimeError, match="Projekt-Index"):
+        add_project_pointclouds(
+            s3_client=FakeS3Client(),
+            index_data=index_data,
+            project_id="project",
+            project_viewer_root=viewer_root,
+            project_s3_prefix=project_root,
+            prepared_clouds=prepared,
+            save_index=lambda _data: False,
+            delete_keys=lambda keys: deleted_keys.extend(keys),
+        )
+
+    assert index_data == original
+    assert deleted_keys == [f"{project_root}/versions/versionid/new/source.copc.laz"]
+
+
+def test_add_project_pointclouds_restores_index_when_upload_cleanup_also_fails(tmp_path):
+    source = tmp_path / "new.copc.laz"
+    source.write_bytes(b"new")
+    project_root = "pointclouds/kunde/project/projekt"
+    viewer_root = "kunde/project/projekt"
+    original = {
+        "projects": [
+            {
+                "id": "project",
+                "format": "multi",
+                "viewer_path": viewer_root,
+                "s3_path": project_root,
+                "pointclouds": [
+                    {
+                        "name": "Keep",
+                        "format": "potree",
+                        "viewer_path": f"{viewer_root}/keep",
+                        "s3_path": f"{project_root}/keep",
+                    }
+                ],
+            }
+        ],
+        S3_DISABLED_PROJECTS_KEY: [],
+    }
+    index_data = copy.deepcopy(original)
+    prepared = prepare_cloud_uploads(
+        (PointcloudSource(str(source), name="New", input_format="copc"),),
+        f"{viewer_root}/versions/versionid",
+        f"{project_root}/versions/versionid",
+    )
+
+    with pytest.raises(RuntimeError, match="verwaiste S3-Keys") as error:
+        add_project_pointclouds(
+            s3_client=FakeS3Client(),
+            index_data=index_data,
+            project_id="project",
+            project_viewer_root=viewer_root,
+            project_s3_prefix=project_root,
+            prepared_clouds=prepared,
+            save_index=lambda _data: False,
+            delete_keys=lambda _keys: (_ for _ in ()).throw(RuntimeError("delete denied")),
+        )
+
+    assert index_data == original
+    assert "Projekt-Index konnte nicht gespeichert werden" in str(error.value)
+    assert f"{project_root}/versions/versionid/new/source.copc.laz" in str(error.value)
+
+
+def test_add_and_remove_preserve_legacy_child_crs_without_crs_info(tmp_path):
+    source = tmp_path / "new.copc.laz"
+    source.write_bytes(b"new")
+    project_root = "pointclouds/kunde/project/projekt"
+    viewer_root = "kunde/project/projekt"
+    index_data = {
+        "projects": [
+            {
+                "id": "project",
+                "format": "multi",
+                "viewer_path": viewer_root,
+                "s3_path": project_root,
+                "crs": "EPSG:25832",
+                "projection": "EPSG:25832",
+                "pointclouds": [
+                    {
+                        "name": "Keep",
+                        "format": "potree",
+                        "viewer_path": f"{viewer_root}/keep",
+                        "s3_path": f"{project_root}/keep",
+                        "crs_info": {},
+                        "crs": "EPSG:25832",
+                        "projection": "EPSG:25832",
+                    },
+                    {
+                        "name": "Remove",
+                        "format": "potree",
+                        "viewer_path": f"{viewer_root}/remove",
+                        "s3_path": f"{project_root}/remove",
+                        "crs": "EPSG:25832",
+                        "projection": "EPSG:25832",
+                    },
+                ],
+            }
+        ],
+        S3_DISABLED_PROJECTS_KEY: [],
+    }
+    prepared = prepare_cloud_uploads(
+        (PointcloudSource(str(source), name="New", input_format="copc", crs_info={"value": "EPSG:25832"}),),
+        f"{viewer_root}/versions/versionid",
+        f"{project_root}/versions/versionid",
+    )
+
+    add_project_pointclouds(
+        s3_client=FakeS3Client(),
+        index_data=index_data,
+        project_id="project",
+        project_viewer_root=viewer_root,
+        project_s3_prefix=project_root,
+        prepared_clouds=prepared,
+        save_index=lambda _data: True,
+        delete_keys=lambda _keys: None,
+    )
+    project = index_data["projects"][0]
+    assert project["crs"] == "EPSG:25832"
+    assert project["projection"] == "EPSG:25832"
+
+    remove_project_pointcloud(
+        index_data=index_data,
+        project_id="project",
+        project_viewer_root=viewer_root,
+        project_s3_prefix=project_root,
+        target_pointcloud_s3_path=f"{project_root}/remove",
+        existing_target_keys=(f"{project_root}/remove/cloud.js",),
+        save_index=lambda _data: True,
+        delete_keys=lambda _keys: None,
+    )
+    project = index_data["projects"][0]
+    assert project["crs"] == "EPSG:25832"
+    assert project["projection"] == "EPSG:25832"
+
+
+def test_remove_project_pointcloud_deletes_only_the_exact_child_after_index_save():
+    project_root = "pointclouds/kunde/project/projekt"
+    viewer_root = "kunde/project/projekt"
+    target_path = f"{project_root}/remove"
+    index_data = {
+        "projects": [
+            {
+                "id": "project",
+                "format": "multi",
+                "viewer_path": viewer_root,
+                "s3_path": project_root,
+                "models": [{"s3_path": "models/model/versions/one/model.json"}],
+                "pointclouds": [
+                    {
+                        "name": "Keep",
+                        "format": "copc",
+                        "viewer_path": f"{viewer_root}/keep/source.copc.laz",
+                        "s3_path": f"{project_root}/keep/source.copc.laz",
+                        "crs_info": {"value": "EPSG:25832"},
+                    },
+                    {
+                        "name": "Remove",
+                        "format": "potree",
+                        "viewer_path": f"{viewer_root}/remove",
+                        "s3_path": target_path,
+                        "crs_info": {"value": "EPSG:4326"},
+                    },
+                ],
+            }
+        ],
+        S3_DISABLED_PROJECTS_KEY: [],
+    }
+    actions = []
+
+    result = remove_project_pointcloud(
+        index_data=index_data,
+        project_id="project",
+        project_viewer_root=viewer_root,
+        project_s3_prefix=project_root,
+        target_pointcloud_s3_path=target_path,
+        existing_target_keys=(
+            f"{target_path}/cloud.js",
+            f"{target_path}/metadata.json",
+            f"{target_path}-other/cloud.js",
+            f"{project_root}/keep/source.copc.laz",
+            f"{project_root}/root-file.bin",
+        ),
+        save_index=lambda _data: actions.append("save") or True,
+        delete_keys=lambda keys: actions.append(("delete", keys)),
+        timestamp="2026-06-21T13:00:00",
+    )
+
+    project = index_data["projects"][0]
+    assert result.status == "success"
+    assert actions == [
+        "save",
+        ("delete", (f"{target_path}/cloud.js", f"{target_path}/metadata.json")),
+    ]
+    assert project["models"] == [{"s3_path": "models/model/versions/one/model.json"}]
+    assert project["pointcloud_count"] == 1
+    assert project["pointclouds"][0]["name"] == "Keep"
+    assert project["crs"] == "EPSG:25832"
+    assert project["history"][-1]["message"] == "Punktwolke 'Remove' wurde entfernt."
+
+
+def test_remove_project_pointcloud_rejects_last_child_and_reports_cleanup_failure():
+    project_root = "pointclouds/kunde/project/projekt"
+    viewer_root = "kunde/project/projekt"
+    only_project = {
+        "projects": [
+            {
+                "id": "project",
+                "format": "multi",
+                "viewer_path": viewer_root,
+                "s3_path": project_root,
+                "pointclouds": [
+                    {
+                        "name": "Only",
+                        "format": "copc",
+                        "viewer_path": f"{viewer_root}/only/source.copc.laz",
+                        "s3_path": f"{project_root}/only/source.copc.laz",
+                    }
+                ],
+            }
+        ],
+        S3_DISABLED_PROJECTS_KEY: [],
+    }
+
+    with pytest.raises(ValueError, match="letzte Punktwolke"):
+        remove_project_pointcloud(
+            index_data=only_project,
+            project_id="project",
+            project_viewer_root=viewer_root,
+            project_s3_prefix=project_root,
+            target_pointcloud_s3_path=f"{project_root}/only/source.copc.laz",
+            existing_target_keys=(),
+            save_index=lambda _data: True,
+            delete_keys=lambda _keys: None,
+        )
+
+    index_data = copy.deepcopy(only_project)
+    second = {
+        "name": "Second",
+        "format": "potree",
+        "viewer_path": f"{viewer_root}/second",
+        "s3_path": f"{project_root}/second",
+    }
+    index_data["projects"][0]["pointclouds"].append(second)
+    result = remove_project_pointcloud(
+        index_data=index_data,
+        project_id="project",
+        project_viewer_root=viewer_root,
+        project_s3_prefix=project_root,
+        target_pointcloud_s3_path=second["s3_path"],
+        existing_target_keys=(f"{second['s3_path']}/cloud.js",),
+        save_index=lambda _data: True,
+        delete_keys=lambda _keys: (_ for _ in ()).throw(RuntimeError("delete denied")),
+    )
+
+    assert result.status == "partial"
+    assert result.orphaned_keys == (f"{second['s3_path']}/cloud.js",)
+    assert [cloud["name"] for cloud in index_data["projects"][0]["pointclouds"]] == ["Only"]

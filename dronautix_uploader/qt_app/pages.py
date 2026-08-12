@@ -49,6 +49,8 @@ from .project_management_actions import (
     ACTION_RENAME,
     ACTION_REPLACE_ALL_POINTCLOUDS,
     ACTION_REPLACE_SINGLE_POINTCLOUD,
+    ACTION_ADD_POINTCLOUDS,
+    ACTION_REMOVE_POINTCLOUD,
     action_by_id,
     is_action_available,
 )
@@ -1095,7 +1097,9 @@ def create_projects_page(
     edit_action_ids = (
         ACTION_RENAME,
         ACTION_REPLACE_ALL_POINTCLOUDS,
+        ACTION_ADD_POINTCLOUDS,
         ACTION_REPLACE_SINGLE_POINTCLOUD,
+        ACTION_REMOVE_POINTCLOUD,
         ACTION_DUPLICATE,
         ACTION_DOWNLOAD,
         ACTION_DISABLE_LINK,
@@ -1127,7 +1131,7 @@ def create_projects_page(
     edit_menu = QtWidgets.QMenu(edit_button)
     edit_actions = {}
     for action_id in edit_action_ids:
-        if action_id == ACTION_DELETE:
+        if action_id in {ACTION_REMOVE_POINTCLOUD, ACTION_DELETE}:
             edit_menu.addSeparator()
         menu_action = edit_menu.addAction(action_by_id(action_id).label)
         menu_action.triggered.connect(
@@ -1290,6 +1294,7 @@ def create_projects_page(
             ACTION_ENABLE_LINK,
             ACTION_DELETE,
             ACTION_REPLACE_ALL_POINTCLOUDS,
+            ACTION_ADD_POINTCLOUDS,
         ):
             if not is_action_available(action_id, project):
                 continue
@@ -1306,15 +1311,18 @@ def create_projects_page(
         cloud_list.setCurrentItem(item)
         project = selected_project()
         pointcloud = selected_pointcloud()
-        if not is_action_available(ACTION_REPLACE_SINGLE_POINTCLOUD, project, pointcloud):
-            return
         menu = QtWidgets.QMenu(cloud_list)
-        action = action_by_id(ACTION_REPLACE_SINGLE_POINTCLOUD)
-        menu_action = menu.addAction(action.label)
-        menu_action.triggered.connect(
-            lambda checked=False: _handle_project_action_click(ACTION_REPLACE_SINGLE_POINTCLOUD)
-        )
-        menu.exec(cloud_list.viewport().mapToGlobal(position))
+        for action_id in (ACTION_REPLACE_SINGLE_POINTCLOUD, ACTION_REMOVE_POINTCLOUD):
+            if not is_action_available(action_id, project, pointcloud):
+                continue
+            if action_id == ACTION_REMOVE_POINTCLOUD and menu.actions():
+                menu.addSeparator()
+            menu_action = menu.addAction(action_by_id(action_id).label)
+            menu_action.triggered.connect(
+                lambda checked=False, selected_action_id=action_id: _handle_project_action_click(selected_action_id)
+            )
+        if menu.actions():
+            menu.exec(cloud_list.viewport().mapToGlobal(position))
 
     def update_action_buttons():
         project = selected_project()

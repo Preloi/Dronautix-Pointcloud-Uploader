@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .project_management import ProjectPreview
+from .project_management import PointcloudPreview, ProjectPreview
 from .project_management_controller import (
+    AddPointcloudsInput,
     DownloadProjectInput,
     DuplicateProjectInput,
     RenameProjectInput,
@@ -59,6 +60,14 @@ class ProjectReplaceDialogState:
     overwrite: bool = False
     horizontal_crs: str = ""
     vertical_crs: str = ""
+
+
+@dataclass(frozen=True)
+class ProjectRemovePointcloudDialogState:
+    project_label: str
+    detail_text: str
+    confirmation_label: str = "Punktwolke entfernen"
+    requires_confirmation: bool = True
 
 
 def build_rename_dialog_state(project: ProjectPreview) -> ProjectRenameDialogState:
@@ -117,6 +126,22 @@ def build_link_state_dialog_state(project: ProjectPreview, disabled: bool) -> Pr
     )
 
 
+def build_remove_pointcloud_dialog_state(
+    project: ProjectPreview,
+    pointcloud: PointcloudPreview,
+) -> ProjectRemovePointcloudDialogState:
+    project_label = f"{project.customer} / {project.project}".strip(" /")
+    detail = (
+        f"Projekt-ID: {project.project_id}\n"
+        f"Punktwolke: {pointcloud.name}\n"
+        f"Format: {pointcloud.format}\n"
+        f"S3-Pfad: {pointcloud.s3_path or '-'}\n"
+        "Nur diese Punktwolke und ihre S3-Daten werden entfernt. Projektname, Projekt-ID, "
+        "Viewer-Link sowie Projekt- und übrige S3-Pfade bleiben unverändert."
+    )
+    return ProjectRemovePointcloudDialogState(project_label=project_label, detail_text=detail)
+
+
 def validate_rename_dialog_state(state: ProjectRenameDialogState) -> RenameProjectInput:
     customer = state.customer.strip()
     project = state.project.strip()
@@ -155,6 +180,21 @@ def validate_replace_all_dialog_state(state: ProjectReplaceDialogState) -> Repla
     _validate_conversion_settings(source_paths, state.converter_path, state.output_base_dir)
     crs_info = _build_crs_info(state.horizontal_crs, state.vertical_crs)
     return ReplaceAllPointcloudsInput(
+        source_paths=source_paths,
+        converter_path=state.converter_path.strip(),
+        output_base_dir=state.output_base_dir.strip(),
+        overwrite=state.overwrite,
+        crs_info_by_source_path={source_path: dict(crs_info) for source_path in source_paths} if crs_info else None,
+    )
+
+
+def validate_add_pointclouds_dialog_state(state: ProjectReplaceDialogState) -> AddPointcloudsInput:
+    source_paths = _normalize_source_paths(state.source_paths)
+    if not source_paths:
+        raise ValueError("Mindestens eine Punktwolke zum Hinzufügen auswählen.")
+    _validate_conversion_settings(source_paths, state.converter_path, state.output_base_dir)
+    crs_info = _build_crs_info(state.horizontal_crs, state.vertical_crs)
+    return AddPointcloudsInput(
         source_paths=source_paths,
         converter_path=state.converter_path.strip(),
         output_base_dir=state.output_base_dir.strip(),
@@ -230,14 +270,17 @@ __all__ = [
     "ProjectLinkStateDialogState",
     "ProjectReplaceDialogState",
     "ProjectRenameDialogState",
+    "ProjectRemovePointcloudDialogState",
     "build_delete_dialog_state",
     "build_download_dialog_state",
     "build_link_state_dialog_state",
     "build_duplicate_dialog_state",
     "build_rename_dialog_state",
+    "build_remove_pointcloud_dialog_state",
     "validate_download_dialog_state",
     "validate_duplicate_dialog_state",
     "validate_rename_dialog_state",
     "validate_replace_all_dialog_state",
+    "validate_add_pointclouds_dialog_state",
     "validate_replace_single_dialog_state",
 ]

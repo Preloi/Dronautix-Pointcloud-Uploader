@@ -17,6 +17,8 @@ from .project_management_actions import (
     ACTION_RENAME,
     ACTION_REPLACE_ALL_POINTCLOUDS,
     ACTION_REPLACE_SINGLE_POINTCLOUD,
+    ACTION_ADD_POINTCLOUDS,
+    ACTION_REMOVE_POINTCLOUD,
     ProjectOperationSummary,
     summarize_project_operation_result,
 )
@@ -58,6 +60,16 @@ class ReplaceSinglePointcloudInput:
     output_base_dir: str = ""
     overwrite: bool = False
     crs_info: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class AddPointcloudsInput:
+    prepared_clouds: tuple[Any, ...] = ()
+    source_paths: tuple[str, ...] = ()
+    converter_path: str = ""
+    output_base_dir: str = ""
+    overwrite: bool = False
+    crs_info_by_source_path: dict[str, dict[str, Any]] | None = None
 
 
 class ProjectManagementController:
@@ -192,6 +204,47 @@ class ProjectManagementController:
         )
         return summarize_project_operation_result(result)
 
+    def add_pointclouds(
+        self,
+        project_preview: ProjectPreview | None,
+        request: AddPointcloudsInput,
+        on_progress: ProgressCallback | None = None,
+    ) -> ProjectOperationSummary:
+        project = _require_explicit_pointcloud_project(project_preview)
+        if request.source_paths:
+            result = self.service.add_project_pointclouds_from_sources(
+                project.project_id,
+                request.source_paths,
+                converter_path=request.converter_path,
+                output_base_dir=request.output_base_dir,
+                overwrite=request.overwrite,
+                on_progress=on_progress,
+                crs_info_by_source_path=request.crs_info_by_source_path,
+            )
+            return summarize_project_operation_result(result)
+        if not request.prepared_clouds:
+            raise ValueError("Mindestens eine vorbereitete Punktwolke ist erforderlich.")
+        result = self.service.add_project_pointclouds(
+            project.project_id,
+            request.prepared_clouds,
+            on_progress=on_progress,
+        )
+        return summarize_project_operation_result(result)
+
+    def remove_pointcloud(
+        self,
+        project_preview: ProjectPreview | None,
+        pointcloud_preview: PointcloudPreview | None,
+    ) -> ProjectOperationSummary:
+        project = _require_explicit_pointcloud_project(project_preview)
+        pointcloud = _require_pointcloud(pointcloud_preview)
+        if len(project.pointclouds) <= 1:
+            raise ValueError("Die letzte Punktwolke eines Projekts kann nicht entfernt werden.")
+        if not pointcloud.s3_path:
+            raise ValueError("Ausgewählte Punktwolke hat keinen S3-Pfad.")
+        result = self.service.remove_project_pointcloud(project.project_id, pointcloud.s3_path)
+        return summarize_project_operation_result(result)
+
     def handle_action(
         self,
         action_id: str,
@@ -232,6 +285,12 @@ class ProjectManagementController:
             if not isinstance(payload, ReplaceSinglePointcloudInput):
                 raise ValueError("ReplaceSinglePointcloudInput ist für einzelnen Austausch erforderlich.")
             return self.replace_single_pointcloud(project_preview, pointcloud_preview, payload, on_progress=on_progress)
+        if action_id == ACTION_ADD_POINTCLOUDS:
+            if not isinstance(payload, AddPointcloudsInput):
+                raise ValueError("AddPointcloudsInput ist für das Hinzufügen erforderlich.")
+            return self.add_pointclouds(project_preview, payload, on_progress=on_progress)
+        if action_id == ACTION_REMOVE_POINTCLOUD:
+            return self.remove_pointcloud(project_preview, pointcloud_preview)
         raise ValueError(f"Unbekannte Projektverwaltungsaktion: {action_id}")
 
 
@@ -249,8 +308,16 @@ def _require_pointcloud(pointcloud_preview: PointcloudPreview | None) -> Pointcl
     return pointcloud_preview
 
 
+def _require_explicit_pointcloud_project(project_preview: ProjectPreview | None) -> ProjectPreview:
+    project = _require_project(project_preview)
+    if not project.has_explicit_pointclouds:
+        raise ValueError("Punktwolken können nur in Projekten mit expliziter pointclouds[]-Liste verwaltet werden.")
+    return project
+
+
 __all__ = [
     "DownloadProjectInput",
+    "AddPointcloudsInput",
     "DuplicateProjectInput",
     "ProjectManagementController",
     "RenameProjectInput",

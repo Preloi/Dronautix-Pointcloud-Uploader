@@ -18,9 +18,12 @@ ACTION_COPY_LINK = "copy_link"
 ACTION_RENAME = "rename"
 ACTION_REPLACE_ALL_POINTCLOUDS = "replace_all_pointclouds"
 ACTION_REPLACE_SINGLE_POINTCLOUD = "replace_single_pointcloud"
+ACTION_ADD_POINTCLOUDS = "add_pointclouds"
+ACTION_REMOVE_POINTCLOUD = "remove_pointcloud"
 
 PROJECT_MANAGEMENT_SECTION = "Projektverwaltung"
 POINTCLOUD_REPLACEMENT_SECTION = "Punktwolkendaten austauschen"
+POINTCLOUD_MANAGEMENT_SECTION = "Punktwolken verwalten"
 
 SUCCESS_STATUS = "success"
 PARTIAL_STATUS = "partial"
@@ -90,6 +93,16 @@ PROJECT_MANAGEMENT_ACTIONS = (
         "Ausgewählte Punktwolke austauschen",
         POINTCLOUD_REPLACEMENT_SECTION,
     ),
+    ProjectManagementAction(
+        ACTION_ADD_POINTCLOUDS,
+        "Punktwolke hinzufügen",
+        POINTCLOUD_MANAGEMENT_SECTION,
+    ),
+    ProjectManagementAction(
+        ACTION_REMOVE_POINTCLOUD,
+        "Ausgewählte Punktwolke entfernen",
+        POINTCLOUD_MANAGEMENT_SECTION,
+    ),
 )
 PROJECT_MANAGEMENT_ACTION_BY_ID = {action.action_id: action for action in PROJECT_MANAGEMENT_ACTIONS}
 
@@ -129,6 +142,15 @@ def action_availability(
         return ActionAvailability(action, False, "Projekt-Link ist bereits aktiv.")
     if action_id == ACTION_REPLACE_SINGLE_POINTCLOUD and pointcloud is None:
         return ActionAvailability(action, False, "Keine konkrete Punktwolke ausgewählt.")
+    if action_id in {ACTION_ADD_POINTCLOUDS, ACTION_REMOVE_POINTCLOUD} and not project.has_explicit_pointclouds:
+        return ActionAvailability(action, False, "Nur Projekte mit expliziter pointclouds[]-Liste können Punktwolken verwalten.")
+    if action_id == ACTION_REMOVE_POINTCLOUD:
+        if pointcloud is None:
+            return ActionAvailability(action, False, "Keine konkrete Punktwolke ausgewählt.")
+        if not pointcloud.s3_path:
+            return ActionAvailability(action, False, "Ausgewählte Punktwolke hat keinen S3-Pfad.")
+        if len(project.pointclouds) <= 1:
+            return ActionAvailability(action, False, "Die letzte Punktwolke eines Projekts kann nicht entfernt werden.")
     return ActionAvailability(action, True)
 
 
@@ -230,10 +252,13 @@ __all__ = [
     "ACTION_RENAME",
     "ACTION_REPLACE_ALL_POINTCLOUDS",
     "ACTION_REPLACE_SINGLE_POINTCLOUD",
+    "ACTION_ADD_POINTCLOUDS",
+    "ACTION_REMOVE_POINTCLOUD",
     "CANCELLED_STATUS",
     "FAILED_STATUS",
     "PARTIAL_STATUS",
     "POINTCLOUD_REPLACEMENT_SECTION",
+    "POINTCLOUD_MANAGEMENT_SECTION",
     "PROJECT_MANAGEMENT_ACTIONS",
     "PROJECT_MANAGEMENT_ACTION_BY_ID",
     "PROJECT_MANAGEMENT_SECTION",

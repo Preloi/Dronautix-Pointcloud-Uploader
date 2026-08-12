@@ -111,6 +111,31 @@ class MultiReplacementRequest:
 
 
 @dataclass(frozen=True)
+class PointcloudAddRequest:
+    """Add prepared sources to an existing explicit multi-cloud project."""
+
+    project: dict[str, Any]
+    additions: tuple[PointcloudSource, ...]
+    aws_access: str
+    aws_secret: str
+    converter_path: str = ""
+    output_base_dir: str = ""
+    crs_input: str = ""
+    vertical_input: str = ""
+    overwrite: bool = False
+
+
+@dataclass(frozen=True)
+class PointcloudRemoveRequest:
+    """Remove one explicit child pointcloud from a multi-cloud project."""
+
+    project: dict[str, Any]
+    target_pointcloud: dict[str, Any]
+    aws_access: str
+    aws_secret: str
+
+
+@dataclass(frozen=True)
 class ProjectMetadataUpdate:
     project_id: str
     kunde: str

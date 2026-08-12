@@ -12,6 +12,8 @@ from dronautix_uploader.qt_app.project_management_actions import (
     ACTION_RENAME,
     ACTION_REPLACE_ALL_POINTCLOUDS,
     ACTION_REPLACE_SINGLE_POINTCLOUD,
+    ACTION_ADD_POINTCLOUDS,
+    ACTION_REMOVE_POINTCLOUD,
     POINTCLOUD_REPLACEMENT_SECTION,
     PROJECT_MANAGEMENT_ACTIONS,
     PROJECT_MANAGEMENT_SECTION,
@@ -47,6 +49,8 @@ def test_project_management_action_ids_labels_and_sections_are_stable():
         ACTION_DELETE,
         ACTION_REPLACE_ALL_POINTCLOUDS,
         ACTION_REPLACE_SINGLE_POINTCLOUD,
+        ACTION_ADD_POINTCLOUDS,
+        ACTION_REMOVE_POINTCLOUD,
     )
     assert actions[ACTION_OPEN_LINK].label == "Im Browser öffnen"
     assert actions[ACTION_COPY_LINK].label == "Link kopieren"
@@ -60,6 +64,8 @@ def test_project_management_action_ids_labels_and_sections_are_stable():
     assert actions[ACTION_REPLACE_SINGLE_POINTCLOUD].label == "Ausgewählte Punktwolke austauschen"
     assert actions[ACTION_RENAME].section == PROJECT_MANAGEMENT_SECTION
     assert actions[ACTION_REPLACE_SINGLE_POINTCLOUD].section == POINTCLOUD_REPLACEMENT_SECTION
+    assert actions[ACTION_ADD_POINTCLOUDS].label.startswith("Punktwolke")
+    assert actions[ACTION_REMOVE_POINTCLOUD].label.startswith("Ausgew")
     assert PROJECT_MANAGEMENT_SECTION == "Projektverwaltung"
     assert POINTCLOUD_REPLACEMENT_SECTION == "Punktwolkendaten austauschen"
 
@@ -105,6 +111,25 @@ def test_single_replace_requires_concrete_pointcloud_context_for_multi_project()
         ACTION_REPLACE_ALL_POINTCLOUDS,
         ACTION_REPLACE_SINGLE_POINTCLOUD,
     }
+
+
+def test_add_and_remove_require_an_explicit_pointcloud_list_and_removal_needs_a_nonfinal_child_with_s3_path():
+    legacy_project = _project(_pointcloud("Altbestand"))
+    explicit_project = _project(
+        _pointcloud("Scan A", "projects/project-1/a"),
+        _pointcloud("Scan B", "projects/project-1/b"),
+        explicit=True,
+    )
+    single_explicit_project = _project(_pointcloud("Scan", "projects/project-1/scan"), explicit=True)
+    pathless_child = _pointcloud("Ohne Pfad")
+
+    assert not is_action_available(ACTION_ADD_POINTCLOUDS, legacy_project)
+    assert not is_action_available(ACTION_REMOVE_POINTCLOUD, legacy_project, legacy_project.pointclouds[0])
+    assert is_action_available(ACTION_ADD_POINTCLOUDS, explicit_project)
+    assert not is_action_available(ACTION_REMOVE_POINTCLOUD, explicit_project)
+    assert is_action_available(ACTION_REMOVE_POINTCLOUD, explicit_project, explicit_project.pointclouds[0])
+    assert not is_action_available(ACTION_REMOVE_POINTCLOUD, single_explicit_project, single_explicit_project.pointclouds[0])
+    assert not is_action_available(ACTION_REMOVE_POINTCLOUD, explicit_project, pathless_child)
 
 
 def test_success_result_summary_is_compact_for_statusbar_and_activity_log():
@@ -250,7 +275,7 @@ def test_link_state_actions_follow_current_project_status():
     assert is_action_available(ACTION_ENABLE_LINK, disabled_project)
 
 
-def _project(*pointclouds: PointcloudPreview) -> ProjectPreview:
+def _project(*pointclouds: PointcloudPreview, explicit: bool = False) -> ProjectPreview:
     return ProjectPreview(
         project_id="project-1",
         project="Projekt 1",
@@ -261,8 +286,9 @@ def _project(*pointclouds: PointcloudPreview) -> ProjectPreview:
         disabled=False,
         pointclouds=pointclouds,
         s3_path="projects/project-1",
+        has_explicit_pointclouds=explicit,
     )
 
 
-def _pointcloud(name: str) -> PointcloudPreview:
-    return PointcloudPreview(name=name, format="Potree", points="-", crs="EPSG:25832")
+def _pointcloud(name: str, s3_path: str = "") -> PointcloudPreview:
+    return PointcloudPreview(name=name, format="Potree", points="-", crs="EPSG:25832", s3_path=s3_path)

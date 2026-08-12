@@ -94,6 +94,7 @@ class ProjectPreview:
     viewer_path: str = ""
     updated_sort: str = ""
     history: tuple[str, ...] = ()
+    has_explicit_pointclouds: bool = False
 
     @property
     def status(self) -> str:
@@ -142,6 +143,11 @@ def make_project_preview(project: dict[str, Any], disabled: bool) -> ProjectPrev
         s3_path=str(project.get("s3_path", "")).strip(),
         viewer_path=str(project.get("viewer_path", "")).strip(),
         history=_format_project_history(project.get("history")),
+        has_explicit_pointclouds=(
+            str(project.get("format", "")).strip().lower() == "multi"
+            and isinstance(project.get("pointclouds"), list)
+            and bool(project.get("pointclouds"))
+        ),
     )
 
 
