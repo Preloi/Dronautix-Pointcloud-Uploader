@@ -1,10 +1,13 @@
+import base64
 import copy
+import hashlib
 import os
 
 import pytest
 
 from dronautix_uploader.core.constants import S3_DISABLED_PROJECTS_KEY
 from dronautix_uploader.core.contracts import PointcloudSource, ProgressEvent
+from dronautix_uploader.core.project_operations import PreparedProjectUpload
 from dronautix_uploader.core.project_operations import (
     add_project_pointclouds,
     apply_project_rename_metadata,
@@ -28,6 +31,7 @@ class FakeS3Client:
     def __init__(self, fail_on_key=""):
         self.fail_on_key = fail_on_key
         self.uploads = []
+        self.objects = {}
 
     def upload_file(self, local_path, bucket, key, ExtraArgs=None, Callback=None):
         if key == self.fail_on_key:
@@ -35,6 +39,18 @@ class FakeS3Client:
         if Callback:
             Callback(os.path.getsize(local_path))
         self.uploads.append((bucket, key, ExtraArgs))
+        with open(local_path, "rb") as stream:
+            content = stream.read()
+        self.objects[key] = {
+            "ContentLength": len(content),
+            "Metadata": dict((ExtraArgs or {}).get("Metadata") or {}),
+            "ChecksumSHA256": base64.b64encode(hashlib.sha256(content).digest()).decode("ascii"),
+            "ChecksumType": "FULL_OBJECT",
+        }
+
+    def head_object(self, Bucket, Key, ChecksumMode=None):
+        assert ChecksumMode == "ENABLED"
+        return dict(self.objects[Key])
 
 
 class FakePaginator:
@@ -309,6 +325,105 @@ def test_upload_new_project_rolls_back_uploaded_keys_when_index_save_fails(tmp_p
     assert deleted_keys == ["pointclouds/kunde/abc123ef/projekt/source.copc.laz"]
 
 
+def test_upload_rollback_keeps_model_hash_version_referenced_by_previous_index(tmp_path):
+    content_hash = "b" * 64
+    model_prefix = f"pointclouds/kunde/abc123ef/projekt/models/halle/versions/{content_hash}"
+    viewer_prefix = f"kunde/abc123ef/projekt/models/halle/versions/{content_hash}"
+    pointcloud = tmp_path / "source.copc.laz"
+    scene = tmp_path / "scene.glb"
+    manifest = tmp_path / "model.json"
+    pointcloud.write_bytes(b"copc")
+    scene.write_bytes(b"glTF")
+    manifest.write_text("{}", encoding="utf-8")
+    model_entry = {
+        "id": "halle",
+        "name": "Halle",
+        "format": "glb",
+        "viewer_path": f"{viewer_prefix}/model.json",
+        "s3_path": model_prefix,
+    }
+    prepared_upload = PreparedProjectUpload(
+        project_metadata={
+            "id": "abc123ef",
+            "format": "multi",
+            "viewer_path": "kunde/abc123ef/projekt",
+            "s3_path": "pointclouds/kunde/abc123ef/projekt",
+            "models": [model_entry],
+        },
+        files_to_upload=(
+            (str(pointcloud), "pointclouds/kunde/abc123ef/projekt/source.copc.laz"),
+            (str(scene), f"{model_prefix}/scene.glb"),
+            (str(manifest), f"{model_prefix}/model.json"),
+        ),
+    )
+    previous_index = {
+        "projects": [{"id": "abc123ef", "models": [dict(model_entry)]}],
+    }
+    deleted_keys = []
+
+    with pytest.raises(RuntimeError, match="Projekt-Index"):
+        upload_new_project(
+            s3_client=FakeS3Client(),
+            index_data=previous_index,
+            prepared_upload=prepared_upload,
+            save_index=lambda _data: False,
+            delete_keys=lambda keys: deleted_keys.extend(keys),
+        )
+
+    assert previous_index == {"projects": [{"id": "abc123ef", "models": [model_entry]}]}
+    assert deleted_keys == ["pointclouds/kunde/abc123ef/projekt/source.copc.laz"]
+
+
+@pytest.mark.parametrize("include_manifest, duplicate_scene", ((False, False), (True, True)))
+def test_model_package_must_contain_each_scene_and_manifest_exactly_once_before_s3_upload(
+    tmp_path,
+    include_manifest,
+    duplicate_scene,
+):
+    data_version = "c" * 64
+    model_prefix = f"pointclouds/kunde/abc123ef/projekt/models/halle/versions/{data_version}"
+    viewer_prefix = f"kunde/abc123ef/projekt/models/halle/versions/{data_version}"
+    scene = tmp_path / "scene.glb"
+    manifest = tmp_path / "model.json"
+    scene.write_bytes(b"glTF")
+    manifest.write_text("{}", encoding="utf-8")
+    model_entry = {
+        "id": "halle",
+        "format": "glb",
+        "viewer_path": f"{viewer_prefix}/model.json",
+        "s3_path": model_prefix,
+    }
+    files = [(str(scene), f"{model_prefix}/scene.glb")]
+    if include_manifest:
+        files.append((str(manifest), f"{model_prefix}/model.json"))
+    if duplicate_scene:
+        files.append((str(scene), f"{model_prefix}/scene.glb"))
+    prepared_upload = PreparedProjectUpload(
+        project_metadata={
+            "id": "abc123ef",
+            "format": "multi",
+            "viewer_path": "kunde/abc123ef/projekt",
+            "s3_path": "pointclouds/kunde/abc123ef/projekt",
+            "models": [model_entry],
+        },
+        files_to_upload=tuple(files),
+    )
+    s3_client = FakeS3Client()
+    index_data = {"projects": []}
+
+    with pytest.raises(ValueError, match="Paketdatei (fehlt|doppelt vorbereitet)"):
+        upload_new_project(
+            s3_client=s3_client,
+            index_data=index_data,
+            prepared_upload=prepared_upload,
+            save_index=lambda _data: True,
+            delete_keys=lambda _keys: None,
+        )
+
+    assert s3_client.uploads == []
+    assert index_data == {"projects": []}
+
+
 def test_build_duplicate_project_metadata_preserves_multi_clouds_and_rewrites_paths():
     source_project = {
         "datum": "old",
@@ -368,6 +483,7 @@ def test_build_duplicate_project_metadata_preserves_multi_clouds_and_rewrites_pa
 
 
 def test_build_duplicate_project_metadata_remaps_model_and_manifest_paths():
+    version = "a" * 64
     source_project = {
         "format": "multi",
         "viewer_path": "alt/oldid/altprojekt",
@@ -375,13 +491,13 @@ def test_build_duplicate_project_metadata_remaps_model_and_manifest_paths():
         "models": [
             {
                 "id": "building",
-                "viewer_path": "alt/oldid/altprojekt/models/building/versions/hash/scene.glb",
-                "s3_path": "pointclouds/alt/oldid/altprojekt/models/building/versions/hash/scene.glb",
-                "manifest_path": "alt/oldid/altprojekt/models/building/versions/hash/model.json",
+                "viewer_path": f"alt/oldid/altprojekt/models/building/versions/{version}/model.json",
+                "s3_path": f"pointclouds/alt/oldid/altprojekt/models/building/versions/{version}",
+                "manifest_path": f"alt/oldid/altprojekt/models/building/versions/{version}/model.json",
                 "assets": [
                     {
-                        "viewer_path": "alt/oldid/altprojekt/models/building/versions/hash/texture.ktx2",
-                        "s3_path": "pointclouds/alt/oldid/altprojekt/models/building/versions/hash/texture.ktx2",
+                        "viewer_path": f"alt/oldid/altprojekt/models/building/versions/{version}/texture.ktx2",
+                        "s3_path": f"pointclouds/alt/oldid/altprojekt/models/building/versions/{version}/texture.ktx2",
                     }
                 ],
             }
@@ -400,15 +516,16 @@ def test_build_duplicate_project_metadata_remaps_model_and_manifest_paths():
     )
 
     model = duplicated["models"][0]
-    assert model["viewer_path"] == "neu/newid/neuprojekt/models/building/versions/hash/scene.glb"
-    assert model["s3_path"] == "pointclouds/neu/newid/neuprojekt/models/building/versions/hash/scene.glb"
-    assert model["manifest_path"] == "neu/newid/neuprojekt/models/building/versions/hash/model.json"
-    assert model["assets"][0]["viewer_path"] == "neu/newid/neuprojekt/models/building/versions/hash/texture.ktx2"
-    assert model["assets"][0]["s3_path"] == "pointclouds/neu/newid/neuprojekt/models/building/versions/hash/texture.ktx2"
+    assert model["viewer_path"] == f"neu/newid/neuprojekt/models/building/versions/{version}/model.json"
+    assert model["s3_path"] == f"pointclouds/neu/newid/neuprojekt/models/building/versions/{version}"
+    assert model["manifest_path"] == f"neu/newid/neuprojekt/models/building/versions/{version}/model.json"
+    assert model["assets"][0]["viewer_path"] == f"neu/newid/neuprojekt/models/building/versions/{version}/texture.ktx2"
+    assert model["assets"][0]["s3_path"] == f"pointclouds/neu/newid/neuprojekt/models/building/versions/{version}/texture.ktx2"
     assert source_project["models"][0]["viewer_path"].startswith("alt/")
 
 
 def test_apply_project_rename_metadata_changes_names_without_paths():
+    version = "a" * 64
     project = {
         "kunde": "Alt",
         "projekt": "Altprojekt",
@@ -420,8 +537,10 @@ def test_apply_project_rename_metadata_changes_names_without_paths():
         ],
         "models": [
             {
-                "viewer_path": "alt/id/altprojekt/models/building/model.json",
-                "s3_path": "pointclouds/alt/id/altprojekt/models/building/model.json",
+                "id": "building",
+                "format": "glb",
+                "viewer_path": f"alt/id/altprojekt/models/building/versions/{version}/model.json",
+                "s3_path": f"pointclouds/alt/id/altprojekt/models/building/versions/{version}",
             }
         ],
     }
@@ -438,6 +557,7 @@ def test_apply_project_rename_metadata_changes_names_without_paths():
 
 
 def test_duplicate_project_copies_s3_objects_and_inserts_active_multi_clone():
+    version = "a" * 64
     source_project = {
         "id": "oldid",
         "kunde": "Alt",
@@ -456,9 +576,8 @@ def test_duplicate_project_copies_s3_objects_and_inserts_active_multi_clone():
         "models": [
             {
                 "id": "building",
-                "viewer_path": "alt/oldid/altprojekt/models/building/versions/hash/model.json",
-                "s3_path": "pointclouds/alt/oldid/altprojekt/models/building/versions/hash/scene.glb",
-                "manifest_path": "alt/oldid/altprojekt/models/building/versions/hash/model.json",
+                "viewer_path": f"alt/oldid/altprojekt/models/building/versions/{version}/model.json",
+                "s3_path": f"pointclouds/alt/oldid/altprojekt/models/building/versions/{version}",
             }
         ],
     }
@@ -468,8 +587,8 @@ def test_duplicate_project_copies_s3_objects_and_inserts_active_multi_clone():
                 "Contents": [
                     {"Key": "pointclouds/alt/oldid/altprojekt/cloud_a/cloud.js", "Size": 10},
                     {"Key": "pointclouds/alt/oldid/altprojekt/cloud_a/metadata.json", "Size": 10},
-                    {"Key": "pointclouds/alt/oldid/altprojekt/models/building/versions/hash/scene.glb", "Size": 10},
-                    {"Key": "pointclouds/alt/oldid/altprojekt/models/building/versions/hash/model.json", "Size": 10},
+                    {"Key": f"pointclouds/alt/oldid/altprojekt/models/building/versions/{version}/scene.glb", "Size": 10},
+                    {"Key": f"pointclouds/alt/oldid/altprojekt/models/building/versions/{version}/model.json", "Size": 10},
                 ]
             }
         ]
@@ -497,8 +616,8 @@ def test_duplicate_project_copies_s3_objects_and_inserts_active_multi_clone():
     assert result.uploaded_keys == (
         "pointclouds/neu/newid/neuprojekt/cloud_a/cloud.js",
         "pointclouds/neu/newid/neuprojekt/cloud_a/metadata.json",
-        "pointclouds/neu/newid/neuprojekt/models/building/versions/hash/scene.glb",
-        "pointclouds/neu/newid/neuprojekt/models/building/versions/hash/model.json",
+        f"pointclouds/neu/newid/neuprojekt/models/building/versions/{version}/scene.glb",
+        f"pointclouds/neu/newid/neuprojekt/models/building/versions/{version}/model.json",
     )
     assert [project["id"] for project in index_data["projects"]] == ["newid", "existing"]
     assert index_data[S3_DISABLED_PROJECTS_KEY] == [{"id": "oldid"}]
@@ -506,9 +625,8 @@ def test_duplicate_project_copies_s3_objects_and_inserts_active_multi_clone():
     assert index_data["projects"][0]["models"] == [
         {
             "id": "building",
-            "viewer_path": "neu/newid/neuprojekt/models/building/versions/hash/model.json",
-            "s3_path": "pointclouds/neu/newid/neuprojekt/models/building/versions/hash/scene.glb",
-            "manifest_path": "neu/newid/neuprojekt/models/building/versions/hash/model.json",
+            "viewer_path": f"neu/newid/neuprojekt/models/building/versions/{version}/model.json",
+            "s3_path": f"pointclouds/neu/newid/neuprojekt/models/building/versions/{version}",
         }
     ]
     assert saved == [["newid", "existing"]]
@@ -589,12 +707,14 @@ def test_duplicate_project_rolls_back_copied_keys_when_index_save_fails():
 
 
 def test_delete_project_removes_from_disabled_list_and_upserts_deleted_entry():
+    version = "a" * 64
     s3_client = FakeProjectS3Client(
         pages=[
             {
                 "Contents": [
                     {"Key": "pointclouds/old/cloud.js", "Size": 10},
-                    {"Key": "pointclouds/old/models/building/versions/hash/scene.glb", "Size": 10},
+                    {"Key": f"pointclouds/old/models/building/versions/{version}/scene.glb", "Size": 10},
+                    {"Key": f"pointclouds/old/models/building/versions/{version}/model.json", "Size": 10},
                 ]
             }
         ]
@@ -623,7 +743,8 @@ def test_delete_project_removes_from_disabled_list_and_upserts_deleted_entry():
     assert result.status == "success"
     assert result.deleted_keys == (
         "pointclouds/old/cloud.js",
-        "pointclouds/old/models/building/versions/hash/scene.glb",
+        f"pointclouds/old/models/building/versions/{version}/scene.glb",
+        f"pointclouds/old/models/building/versions/{version}/model.json",
     )
     assert index_data == {"projects": [{"id": "active"}], S3_DISABLED_PROJECTS_KEY: []}
     assert deleted_data["deleted_projects"][0]["id"] == "oldid"
@@ -1410,12 +1531,12 @@ def test_replacing_all_pointclouds_preserves_models_and_never_cleans_model_objec
     source.write_bytes(b"replacement")
     project_root = "pointclouds/kunde/project/projekt"
     viewer_root = "kunde/project/projekt"
+    version = "a" * 64
     models = [
         {
             "id": "building",
-            "viewer_path": f"{viewer_root}/models/building/versions/hash/model.json",
-            "s3_path": f"{project_root}/models/building/versions/hash/scene.glb",
-            "manifest_path": f"{viewer_root}/models/building/versions/hash/model.json",
+            "viewer_path": f"{viewer_root}/models/building/versions/{version}/model.json",
+            "s3_path": f"{project_root}/models/building/versions/{version}",
         }
     ]
     index_data = {
@@ -1453,8 +1574,8 @@ def test_replacing_all_pointclouds_preserves_models_and_never_cleans_model_objec
         prepared_clouds=prepared,
         existing_keys=(
             f"{project_root}/old/source.copc.laz",
-            f"{project_root}/models/building/versions/hash/scene.glb",
-            f"{project_root}/models/building/versions/hash/model.json",
+            f"{project_root}/models/building/versions/{version}/scene.glb",
+            f"{project_root}/models/building/versions/{version}/model.json",
         ),
         save_index=lambda _data: True,
         delete_keys=lambda keys: deleted_keys.extend(keys),
@@ -1470,7 +1591,13 @@ def test_replacing_single_pointcloud_preserves_models_and_never_cleans_model_obj
     source.write_bytes(b"replacement")
     project_root = "pointclouds/kunde/project/projekt"
     viewer_root = "kunde/project/projekt"
-    models = [{"viewer_path": f"{viewer_root}/models/building/model.json"}]
+    version = "a" * 64
+    models = [{
+        "id": "building",
+        "format": "glb",
+        "viewer_path": f"{viewer_root}/models/building/versions/{version}/model.json",
+        "s3_path": f"{project_root}/models/building/versions/{version}",
+    }]
     index_data = {
         "projects": [
             {
@@ -1507,7 +1634,7 @@ def test_replacing_single_pointcloud_preserves_models_and_never_cleans_model_obj
         target_pointcloud_s3_path=f"{project_root}/target",
         existing_target_keys=(
             f"{project_root}/target/cloud.js",
-            f"{project_root}/models/building/versions/hash/scene.glb",
+            f"{project_root}/models/building/versions/{version}/scene.glb",
         ),
         save_index=lambda _data: True,
         delete_keys=lambda keys: deleted_keys.extend(keys),

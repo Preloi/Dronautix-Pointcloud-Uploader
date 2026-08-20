@@ -89,10 +89,13 @@ class ModelIndexEntry:
     s3_path: str
     crs: str
     vertical_crs: str
+    crs_name: str = ""
+    vertical_name: str = ""
+    vertical_datum: str = ""
     format: Literal["glb"] = "glb"
 
     def as_dict(self) -> dict[str, str]:
-        return {
+        result = {
             "id": self.id,
             "name": self.name,
             "format": self.format,
@@ -101,6 +104,11 @@ class ModelIndexEntry:
             "crs": self.crs,
             "vertical_crs": self.vertical_crs,
         }
+        for key in ("crs_name", "vertical_name", "vertical_datum"):
+            value = str(getattr(self, key, "") or "").strip()
+            if value:
+                result[key] = value
+        return result
 
 
 @dataclass(frozen=True)
@@ -138,7 +146,20 @@ class PreparedModelUpload:
     bounds_max: tuple[float, float, float]
     crs_info: dict[str, Any]
     optimization: GLBOptimizationResult
+    data_version: str = ""
     index_entry: ModelIndexEntry | None = None
+
+    @property
+    def output_sha256(self) -> str:
+        """Return the selected GLB content hash in canonical path form."""
+
+        return str(self.optimization.output_sha256 or "").lower()
+
+    @property
+    def package_sha256(self) -> str:
+        """Return the immutable GLB-plus-manifest package hash."""
+
+        return str(self.data_version or "").lower()
 
 
 @dataclass(frozen=True)

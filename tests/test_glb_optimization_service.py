@@ -4,11 +4,12 @@ from pathlib import Path
 import struct
 import base64
 import zlib
+from dataclasses import replace
 
 import pytest
 
 import dronautix_uploader.core.glb_optimization_service as optimization_module
-from dronautix_uploader.core.contracts import ModelUploadInput, OperationCancelledError
+from dronautix_uploader.core.contracts import ModelUploadInput, OperationCancelledError, PointcloudSource
 from dronautix_uploader.core.glb_optimization_service import (
     BundledGLBOptimizationToolchain,
     BundledGLBCompressedAssetDecoder,
@@ -19,6 +20,7 @@ from dronautix_uploader.core.glb_optimization_service import (
     cleanup_prepared_model_uploads,
 )
 from dronautix_uploader.core.glb_toolchain import GLBToolchainStatus
+from dronautix_uploader.core.project_operations import build_new_project_upload
 
 
 PROJECT_CRS = {"value": "EPSG:25833", "vertical_crs": "EPSG:7837"}
@@ -116,10 +118,66 @@ def test_stages_native_georeference_actual_bounds_and_control_points(tmp_path):
     assert prepared.optimization.original_sha256 == hashlib.sha256(source.read_bytes()).hexdigest()
     assert manifest["original_sha256"] == prepared.optimization.original_sha256
     assert manifest["optimization"]["output_sha256"] == prepared.optimization.output_sha256
-    assert prepared.index_entry.viewer_path.endswith("/models/mast/version/model.json")
-    assert prepared.index_entry.s3_path.endswith("/models/mast/version")
-    assert prepared.optimization.output_sha256 not in prepared.index_entry.s3_path
+    output_sha256 = prepared.optimization.output_sha256
+    assert prepared.output_sha256 == output_sha256
+    assert prepared.package_sha256 == prepared.data_version
+    assert prepared.package_sha256 != output_sha256
+    assert prepared.index_entry.viewer_path.endswith(f"/models/mast/versions/{prepared.package_sha256}/model.json")
+    assert prepared.index_entry.s3_path.endswith(f"/models/mast/versions/{prepared.package_sha256}")
     assert not prepared.index_entry.s3_path.endswith("scene.glb")
+    cleanup_prepared_model_uploads((prepared,))
+
+
+def test_local_live_viewer_contract_from_native_glb_to_manifest_and_models_index(tmp_path):
+    source = tmp_path / "halle.glb"
+    copc = tmp_path / "scan.copc.laz"
+    write_glb(source, native_document())
+    copc.write_bytes(b"copc")
+    project_crs = {
+        "value": "EPSG:25833",
+        "crs_name": "ETRS89 / UTM zone 33N",
+        "vertical_crs": "EPSG:7837",
+        "vertical_datum": "DHHN2016 height",
+    }
+    viewer_root = "kunde/project/projekt"
+    s3_root = "pointclouds/kunde/project/projekt"
+
+    prepared = GLBOptimizationService().prepare(
+        model_input(source),
+        project_crs_info=project_crs,
+        staging_root=tmp_path / "stage",
+        project_viewer_root=viewer_root,
+        project_s3_prefix=s3_root,
+    )
+    upload = build_new_project_upload(
+        sources=(PointcloudSource(str(copc), name="Scan", input_format="copc", crs_info=project_crs),),
+        timestamp="2026-08-20T12:00:00",
+        kunde="Kunde",
+        projekt="Projekt",
+        project_id="project",
+        project_url="https://viewer.invalid/?id=project",
+        project_viewer_root=viewer_root,
+        project_s3_prefix=s3_root,
+        models=(prepared,),
+    )
+
+    manifest = json.loads(Path(prepared.manifest_path).read_text(encoding="utf-8"))
+    model = upload.project_metadata["models"][0]
+    version_root = f"{s3_root}/models/halle/versions/{prepared.package_sha256}"
+    assert manifest["entrypoint"] == "scene.glb"
+    assert manifest["crs"] == model["crs"] == "EPSG:25833"
+    assert manifest["vertical_crs"] == model["vertical_crs"] == "EPSG:7837"
+    assert manifest["crs_name"] == model["crs_name"] == "ETRS89 / UTM zone 33N"
+    assert manifest["vertical_datum"] == model["vertical_datum"] == "DHHN2016 height"
+    assert "(" not in manifest["vertical_crs"]
+    assert manifest["model_to_project"] == MATRIX
+    assert manifest["bounds"] == {"min": [281496.17, 5402058.19, 430.0], "max": [281498.17, 5402061.19, 434.0]}
+    assert model["viewer_path"] == f"{viewer_root}/models/halle/versions/{prepared.package_sha256}/model.json"
+    assert model["s3_path"] == version_root
+    assert [key for _path, key in upload.files_to_upload[-2:]] == [
+        f"{version_root}/scene.glb",
+        f"{version_root}/model.json",
+    ]
     cleanup_prepared_model_uploads((prepared,))
 
 
@@ -216,6 +274,12 @@ def test_embedded_crs_fields_inherit_project_when_missing_and_reject_mismatch(tm
     with pytest.raises(GLBValidationError, match="Punktwolke"):
         GLBOptimizationService().validate_model_upload_input(model_input(source), project_crs_info=PROJECT_CRS)
 
+    document = native_document()
+    document["accessors"][0]["max"] = [2, 3, 9]
+    write_glb(source, document)
+    with pytest.raises(GLBValidationError, match="Vertexdaten"):
+        GLBOptimizationService().validate_model_upload_input(model_input(source), project_crs_info=PROJECT_CRS)
+
 
 def test_decodes_quantized_position_with_normalized_minmax_sparse_stride_and_node_transform(tmp_path):
     source = tmp_path / "quantized.glb"
@@ -298,11 +362,50 @@ def test_rejects_wrong_pointcloud_crs_and_stale_accessor_bounds(tmp_path):
     with pytest.raises(GLBValidationError, match="Punktwolke"):
         GLBOptimizationService().validate_model_upload_input(model_input(source), project_crs_info=PROJECT_CRS)
 
+
+@pytest.mark.parametrize(
+    "project_crs",
+    (
+        {"value": "EPSG:25833"},
+        {"value": "ETRS89 / UTM zone 33N", "vertical_crs": "EPSG:7837"},
+        {"value": "EPSG:25833", "vertical_crs": "DHHN2016 height"},
+    ),
+)
+def test_rejects_missing_or_free_project_crs_before_staging(tmp_path, project_crs):
+    source = tmp_path / "invalid-project-crs.glb"
+    write_glb(source, native_document())
+    staging_root = tmp_path / "stage"
+
+    with pytest.raises(GLBValidationError, match="technische|eindeutig"):
+        GLBOptimizationService().prepare(
+            model_input(source),
+            project_crs_info=project_crs,
+            staging_root=staging_root,
+        )
+
+    assert not tuple(staging_root.glob(".glb-upload-*"))
+
+
+def test_non_epsg_authority_references_are_preserved_in_manifest(tmp_path):
+    source = tmp_path / "authority.glb"
     document = native_document()
-    document["accessors"][0]["max"] = [2, 3, 9]
+    georef_crs = document["asset"]["extras"]["dronautix_georeferencing"]["crs"]
+    georef_crs["horizontal"] = {"urn": "urn:ogc:def:crs:IGNF::LAMB93"}
+    georef_crs["vertical"] = {"uri": "https://www.opengis.net/def/crs/IGNF/0/NGF-IGN69"}
     write_glb(source, document)
-    with pytest.raises(GLBValidationError, match="Vertexdaten"):
-        GLBOptimizationService().validate_model_upload_input(model_input(source), project_crs_info=PROJECT_CRS)
+    project_crs = {
+        "value": "urn:ogc:def:crs:IGNF::LAMB93",
+        "vertical_crs": "urn:ogc:def:crs:IGNF:0:NGF-IGN69",
+    }
+
+    prepared = GLBOptimizationService().prepare(
+        model_input(source), project_crs_info=project_crs, staging_root=tmp_path / "stage"
+    )
+    manifest = json.loads(Path(prepared.manifest_path).read_text(encoding="utf-8"))
+
+    assert manifest["crs"] == "urn:ogc:def:crs:IGNF::LAMB93"
+    assert manifest["vertical_crs"] == "urn:ogc:def:crs:IGNF:0:NGF-IGN69"
+    cleanup_prepared_model_uploads((prepared,))
 
 
 def test_embedded_and_model_json_matrices_must_match(tmp_path):
@@ -689,6 +792,97 @@ def test_model_index_requires_safe_roots(tmp_path):
     with pytest.raises(GLBValidationError, match="nicht sicher"):
         build_model_index_entry(prepared, project_viewer_root="../bad", project_s3_prefix="pointclouds/kunde")
     cleanup_prepared_model_uploads((prepared,))
+
+
+@pytest.mark.parametrize("invalid_hash", ("", "a" * 63, "g" * 64))
+def test_model_index_rejects_missing_or_noncanonical_data_version_before_upload(tmp_path, invalid_hash):
+    source = tmp_path / "source.glb"
+    write_glb(source, native_document())
+    prepared = GLBOptimizationService().prepare(
+        model_input(source), project_crs_info=PROJECT_CRS, staging_root=tmp_path / "stage"
+    )
+    invalid = replace(
+        prepared,
+        data_version=invalid_hash,
+        index_entry=None,
+    )
+    with pytest.raises(ValueError, match="data_version"):
+        build_model_index_entry(
+            invalid,
+            project_viewer_root="kunde/id/projekt",
+            project_s3_prefix="pointclouds/kunde/id/projekt",
+        )
+    cleanup_prepared_model_uploads((prepared,))
+
+
+def test_same_output_content_reuses_hash_path_and_changed_content_gets_new_path(tmp_path):
+    source = tmp_path / "source.glb"
+    write_glb(source, native_document())
+    service = GLBOptimizationService()
+    first = service.prepare(
+        model_input(source), project_crs_info=PROJECT_CRS, staging_root=tmp_path / "stage-a",
+        project_viewer_root="kunde/id/projekt", project_s3_prefix="pointclouds/kunde/id/projekt",
+    )
+    same = service.prepare(
+        model_input(source), project_crs_info=PROJECT_CRS, staging_root=tmp_path / "stage-b",
+        project_viewer_root="kunde/id/projekt", project_s3_prefix="pointclouds/kunde/id/projekt",
+    )
+    changed_positions = (0.0, 0.0, 0.0, 2.01, 0.0, 0.0, 0.0, 3.0, 4.0)
+    changed_document = native_document()
+    changed_document["accessors"][0]["max"] = [2.01, 3, 4]
+    write_glb(source, changed_document, positions=changed_positions)
+    changed = service.prepare(
+        model_input(source), project_crs_info=PROJECT_CRS, staging_root=tmp_path / "stage-c",
+        project_viewer_root="kunde/id/projekt", project_s3_prefix="pointclouds/kunde/id/projekt",
+    )
+
+    assert first.output_sha256 == same.output_sha256
+    assert first.index_entry == same.index_entry
+    assert changed.output_sha256 != first.output_sha256
+    assert changed.index_entry.s3_path != first.index_entry.s3_path
+    cleanup_prepared_model_uploads((first, same, changed))
+
+
+def test_model_package_hash_is_canonical_lowercase(tmp_path):
+    source = tmp_path / "source.glb"
+    write_glb(source, native_document())
+    prepared = GLBOptimizationService().prepare(
+        model_input(source), project_crs_info=PROJECT_CRS, staging_root=tmp_path / "stage"
+    )
+    uppercase = replace(
+        prepared,
+        data_version="A" * 64,
+        index_entry=None,
+    )
+    entry = build_model_index_entry(
+        uppercase,
+        project_viewer_root="kunde/id/projekt",
+        project_s3_prefix="pointclouds/kunde/id/projekt",
+    )
+    assert uppercase.package_sha256 == "a" * 64
+    assert entry.s3_path.endswith("/versions/" + "a" * 64)
+    cleanup_prepared_model_uploads((prepared,))
+
+
+def test_manifest_only_crs_change_gets_new_package_path_with_identical_scene(tmp_path):
+    source = tmp_path / "source.glb"
+    write_glb(source, native_document(asset={"version": "2.0"}))
+    service = GLBOptimizationService()
+    first = service.prepare(
+        model_input(source), project_crs_info=PROJECT_CRS, staging_root=tmp_path / "stage-a",
+        project_viewer_root="kunde/id/projekt", project_s3_prefix="pointclouds/kunde/id/projekt",
+    )
+    changed = service.prepare(
+        model_input(source),
+        project_crs_info={"value": "EPSG:25832", "vertical_crs": "EPSG:7837"},
+        staging_root=tmp_path / "stage-b",
+        project_viewer_root="kunde/id/projekt", project_s3_prefix="pointclouds/kunde/id/projekt",
+    )
+
+    assert first.output_sha256 == changed.output_sha256
+    assert first.package_sha256 != changed.package_sha256
+    assert first.index_entry.s3_path != changed.index_entry.s3_path
+    cleanup_prepared_model_uploads((first, changed))
 
 
 def test_bundled_adapter_resolves_relative_source_and_output_paths(monkeypatch, tmp_path):

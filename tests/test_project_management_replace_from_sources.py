@@ -172,8 +172,8 @@ def test_full_replace_from_sources_disabled_multi_copc_and_raw_keeps_disabled_an
         f"{project_root}/versions/versionid/raw",
     ]
     assert [cloud["crs_info"] for cloud in disabled_project["pointclouds"]] == [
-        {"value": "EPSG:25832", "epsg": 25832},
-        {"value": "EPSG:4326", "epsg": 4326},
+        {"value": "EPSG:25832", "epsg": "EPSG:25832"},
+        {"value": "EPSG:4326", "epsg": "EPSG:4326"},
     ]
     raw_output_dir = converter_calls[0][2]
     raw_metadata = json.loads(open(os.path.join(raw_output_dir, "metadata.json"), encoding="utf-8").read())
@@ -333,7 +333,12 @@ def test_full_replace_from_sources_uses_common_crs_as_top_level_project_crs(tmp_
     viewer_root = "kunde/project/projekt"
     first = write_copc(tmp_path, "First.copc.laz")
     second = write_copc(tmp_path, "Second.copc.laz")
-    crs_info = {"value": "EPSG:25832", "epsg": 25832, "vertical_crs": "DHHN2016"}
+    crs_info = {
+        "value": "EPSG:25832",
+        "epsg": "EPSG:25832",
+        "vertical_crs": "EPSG:7837",
+        "vertical_datum": "DHHN2016 height",
+    }
     repository = FakeRepository(
         {
             "projects": [
@@ -361,7 +366,8 @@ def test_full_replace_from_sources_uses_common_crs_as_top_level_project_crs(tmp_
     project = repository.index_data["projects"][0]
     assert project["crs_info"] == crs_info
     assert project["crs"] == "EPSG:25832"
-    assert project["vertical_crs"] == "DHHN2016"
+    assert project["vertical_crs"] == "EPSG:7837"
+    assert project["vertical_datum"] == "DHHN2016 height"
     assert [cloud["crs_info"] for cloud in project["pointclouds"]] == [crs_info, crs_info]
 
 

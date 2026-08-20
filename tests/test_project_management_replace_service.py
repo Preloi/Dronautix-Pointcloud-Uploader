@@ -446,11 +446,12 @@ def test_remove_multi_child_lists_and_deletes_only_the_exact_copc_object():
 def test_full_replacement_keeps_models_metadata_and_model_s3_objects(tmp_path):
     project_root = "pointclouds/kunde/project/projekt"
     viewer_root = "kunde/project/projekt"
+    version = "a" * 64
     models = [
         {
             "id": "building",
-            "viewer_path": f"{viewer_root}/models/building/versions/hash/model.json",
-            "s3_path": f"{project_root}/models/building/versions/hash/scene.glb",
+            "viewer_path": f"{viewer_root}/models/building/versions/{version}/model.json",
+            "s3_path": f"{project_root}/models/building/versions/{version}",
         }
     ]
     repository = FakeRepository(
@@ -480,8 +481,8 @@ def test_full_replacement_keeps_models_metadata_and_model_s3_objects(tmp_path):
             {
                 "Contents": [
                     {"Key": f"{project_root}/old/source.copc.laz", "Size": 10},
-                    {"Key": f"{project_root}/models/building/versions/hash/scene.glb", "Size": 10},
-                    {"Key": f"{project_root}/models/building/versions/hash/model.json", "Size": 10},
+                    {"Key": f"{project_root}/models/building/versions/{version}/scene.glb", "Size": 10},
+                    {"Key": f"{project_root}/models/building/versions/{version}/model.json", "Size": 10},
                 ]
             }
         ]

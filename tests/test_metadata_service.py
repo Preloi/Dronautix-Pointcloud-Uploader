@@ -1,5 +1,8 @@
 import json
 
+import pytest
+
+from dronautix_uploader.core.crs_service import CrsValidationError
 from dronautix_uploader.core.metadata_service import (
     apply_crs_metadata,
     create_pointcloud_index_entry,
@@ -28,6 +31,7 @@ def test_apply_crs_metadata_writes_horizontal_and_vertical_fields():
     assert target["vertical_crs"] == "EPSG:7837"
     assert target["vertical_epsg"] == "EPSG:7837"
     assert target["vertical_projection"] == "EPSG:7837"
+    assert target["vertical_name"] == "DHHN2016"
     assert target["vertical_datum"] == "DHHN2016"
     assert target["crs_info"] == crs_info
 
@@ -61,6 +65,44 @@ def test_get_common_crs_info_requires_all_clouds_to_match():
     assert get_common_crs_info([crs_a, crs_b]) == crs_a
     assert get_common_crs_info([crs_a, crs_c]) is None
     assert get_common_crs_info([crs_a, None]) is None
+
+
+def test_metadata_serialization_is_canonical_and_keeps_names_separate():
+    target = {}
+    apply_crs_metadata(target, {
+        "value": "25833", "crs_name": "ETRS89 / UTM zone 33N",
+        "vertical_crs": "7837", "vertical_datum": "DHHN2016 height",
+    })
+
+    assert target["crs"] == "EPSG:25833"
+    assert target["vertical_crs"] == "EPSG:7837"
+    assert target["crs_name"] == "ETRS89 / UTM zone 33N"
+    assert target["vertical_name"] == "DHHN2016 height"
+    assert target["vertical_datum"] == "DHHN2016 height"
+    assert "DHHN2016" not in target["vertical_crs"]
+
+
+def test_metadata_serializes_non_epsg_authority_reference():
+    target = {}
+    apply_crs_metadata(target, {
+        "value": "https://www.opengis.net/def/crs/OGC/1.3/CRS84",
+        "vertical_crs": "urn:ogc:def:crs:IGNF:0:NGF-IGN69",
+    })
+
+    assert target["crs"] == "urn:ogc:def:crs:OGC:1.3:CRS84"
+    assert target["vertical_crs"] == "urn:ogc:def:crs:IGNF:0:NGF-IGN69"
+
+
+@pytest.mark.parametrize("crs_info", [
+    {"name": "ETRS89 / UTM zone 33N"},
+    {"value": "EPSG:25833", "vertical_datum": "DHHN2016 height"},
+    {"value": "EPSG:25833", "vertical_crs": "DHHN2016 height"},
+])
+def test_metadata_rejects_missing_or_free_technical_reference_before_write(crs_info):
+    target = {}
+    with pytest.raises(CrsValidationError):
+        apply_crs_metadata(target, crs_info)
+    assert target == {}
 
 
 def test_crs_summary_includes_vertical_datum():

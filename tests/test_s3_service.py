@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import os
 
 import pytest
@@ -13,6 +15,7 @@ from dronautix_uploader.core.s3_service import (
     DownloadCancelledError,
     download_project_objects,
     upload_files_to_s3,
+    verify_uploaded_model_files,
 )
 
 
@@ -132,6 +135,65 @@ def test_upload_files_records_only_successfully_uploaded_keys(tmp_path):
     }
     assert S3_CACHE_CONTROL == "public, max-age=31536000, immutable"
     assert "ContentEncoding" not in fake_s3.uploads[0]["extra_args"]
+
+
+def test_model_upload_requests_s3_sha256_and_persists_the_local_hash_metadata(tmp_path):
+    scene = tmp_path / "scene.glb"
+    scene.write_bytes(b"glTF")
+    fake_s3 = FakeS3Client()
+
+    upload_files_to_s3(
+        fake_s3,
+        [(str(scene), "models/version/scene.glb")],
+        bucket_name="bucket",
+        checksum_sha256_keys=("models/version/scene.glb",),
+    )
+
+    assert fake_s3.uploads[0]["extra_args"] == {
+        "ContentType": "model/gltf-binary",
+        "CacheControl": S3_CACHE_CONTROL,
+        "ChecksumAlgorithm": "SHA256",
+        "Metadata": {"sha256": hashlib.sha256(b"glTF").hexdigest()},
+    }
+
+
+def test_model_head_verification_requires_matching_size_metadata_hash_and_s3_checksum(tmp_path):
+    class HeadClient:
+        def __init__(self, response):
+            self.response = response
+            self.calls = []
+
+        def head_object(self, **kwargs):
+            self.calls.append(kwargs)
+            return dict(self.response)
+
+    scene = tmp_path / "scene.glb"
+    scene.write_bytes(b"glTF")
+    digest = hashlib.sha256(b"glTF").digest()
+    client = HeadClient(
+        {
+            "ContentLength": 4,
+            "Metadata": {"sha256": digest.hex()},
+            "ChecksumSHA256": base64.b64encode(digest).decode("ascii"),
+            "ChecksumType": "FULL_OBJECT",
+        }
+    )
+
+    verify_uploaded_model_files(client, ((str(scene), "models/version/scene.glb"),), bucket_name="bucket")
+
+    assert client.calls == [{"Bucket": "bucket", "Key": "models/version/scene.glb", "ChecksumMode": "ENABLED"}]
+
+
+def test_model_head_verification_fails_closed_for_a_missing_or_wrong_hash(tmp_path):
+    class HeadClient:
+        def head_object(self, **_kwargs):
+            return {"ContentLength": 4, "Metadata": {}, "ChecksumSHA256": "checksum", "ChecksumType": "FULL_OBJECT"}
+
+    scene = tmp_path / "scene.glb"
+    scene.write_bytes(b"glTF")
+
+    with pytest.raises(RuntimeError, match="falschen SHA-256"):
+        verify_uploaded_model_files(HeadClient(), ((str(scene), "models/version/scene.glb"),), bucket_name="bucket")
 
 
 def test_collect_project_object_entries_reads_paginator_pages():

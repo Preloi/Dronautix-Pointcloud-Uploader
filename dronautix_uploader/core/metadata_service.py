@@ -8,10 +8,12 @@ from collections.abc import MutableMapping
 from typing import Any
 
 from .crs_service import (
+    CrsValidationError,
+    crs_metadata_matches,
     get_crs_display_value as _get_crs_display_value,
     get_crs_summary_text as _get_crs_summary_text,
     get_vertical_crs_display_value as _get_vertical_crs_display_value,
-    summarize_crs_metadata,
+    normalize_crs_metadata,
 )
 
 
@@ -25,24 +27,28 @@ def apply_crs_metadata(
     if not isinstance(target, MutableMapping) or not crs_info:
         return
 
-    value = crs_info.get("value")
-    projection = crs_info.get("projection") or value
+    normalized = _require_technical_crs(crs_info)
+    value = normalized.get("value")
+    projection = normalized.get("projection") or value
     if value:
         target["crs"] = value
     if include_projection and projection:
         target["projection"] = projection
-    if crs_info.get("epsg"):
-        target["epsg"] = crs_info["epsg"]
+    if crs_info.get("epsg") and normalized.get("epsg"):
+        target["epsg"] = normalized["epsg"]
+    if normalized.get("crs_name") or normalized.get("name"):
+        target["crs_name"] = normalized.get("crs_name") or normalized["name"]
 
-    vertical_value = crs_info.get("vertical_crs") or crs_info.get("vertical_epsg")
-    vertical_name = crs_info.get("vertical_name") or crs_info.get("vertical_datum")
+    vertical_value = normalized.get("vertical_crs") or normalized.get("vertical_epsg")
+    vertical_name = normalized.get("vertical_name") or normalized.get("vertical_datum")
     if vertical_value:
         target["vertical_crs"] = vertical_value
         target["vertical_epsg"] = vertical_value
         target["vertical_projection"] = vertical_value
     if vertical_name:
+        target["vertical_name"] = vertical_name
         target["vertical_datum"] = vertical_name
-    target["crs_info"] = dict(crs_info)
+    target["crs_info"] = _serialized_crs_info(crs_info, normalized)
 
 
 def create_pointcloud_index_entry(
@@ -78,20 +84,16 @@ def get_crs_summary_text(crs_info: dict[str, Any] | None) -> str:
 
 
 def get_common_crs_info(crs_infos) -> dict[str, Any] | None:
-    """Return a common CRS only when every cloud has the same CRS summary."""
+    """Return a common CRS based only on canonical technical references."""
 
     crs_info_list = list(crs_infos)
     if not crs_info_list or any(not crs_info for crs_info in crs_info_list):
         return None
-
     first = crs_info_list[0]
-    first_summary = summarize_crs_metadata(first)
-    if not first_summary.has_value:
+    if not all(crs_metadata_matches(first, crs_info) for crs_info in crs_info_list[1:]):
         return None
-
-    for crs_info in crs_info_list[1:]:
-        if summarize_crs_metadata(crs_info) != first_summary:
-            return None
+    if not normalize_crs_metadata(first):
+        return None
     return dict(first)
 
 
@@ -100,6 +102,7 @@ def write_potree_metadata_crs(output_dir: str | Path, crs_info: dict[str, Any] |
 
     if not crs_info:
         return ()
+    crs_info = _require_technical_crs(crs_info)
 
     directory = Path(output_dir)
     updated_files: list[Path] = []
@@ -158,6 +161,7 @@ def _write_potree_metadata_json(path: Path, crs_info: dict[str, Any]) -> bool:
     if not isinstance(metadata, dict):
         return False
 
+    crs_info = _require_technical_crs(crs_info)
     projection = crs_info.get("projection") or crs_info.get("value")
     if projection:
         metadata["projection"] = projection
@@ -194,6 +198,7 @@ def _write_potree_cloudjs(path: Path, crs_info: dict[str, Any]) -> bool:
     if not isinstance(cloudjs, dict):
         return False
 
+    crs_info = _require_technical_crs(crs_info)
     projection = crs_info.get("projection") or crs_info.get("value")
     if projection:
         cloudjs["projection"] = projection
@@ -225,6 +230,32 @@ def _epsg_code(crs_info: dict[str, Any], *, key: str = "epsg") -> str:
     if text.upper().startswith("EPSG:"):
         return text.split(":", 1)[1].strip()
     return text
+
+
+def _require_technical_crs(crs_info: dict[str, Any]) -> dict[str, Any]:
+    normalized = normalize_crs_metadata(crs_info)
+    if not normalized or not normalized.get("value"):
+        raise CrsValidationError("Technisches horizontales CRS fehlt oder ist nicht eindeutig bestimmbar.")
+    if (normalized.get("vertical_name") or normalized.get("vertical_datum")) and not normalized.get("vertical_crs"):
+        raise CrsValidationError("Zum vertikalen Namen fehlt eine eindeutige technische CRS-Referenz.")
+    return normalized
+
+
+def _serialized_crs_info(crs_info: dict[str, Any], normalized: dict[str, Any]) -> dict[str, Any]:
+    """Preserve harmless legacy aliases while canonicalizing every technical value."""
+
+    serialized = dict(crs_info)
+    horizontal = normalized.get("value")
+    vertical = normalized.get("vertical_crs")
+    for key in ("value", "projection", "crs", "epsg", "horizontal"):
+        if key in serialized and horizontal:
+            serialized[key] = horizontal
+    if "code" in serialized and normalized.get("code"):
+        serialized["code"] = normalized["code"]
+    for key in ("vertical_crs", "vertical_epsg", "vertical_projection"):
+        if key in serialized and vertical:
+            serialized[key] = vertical
+    return serialized
 
 
 __all__ = [

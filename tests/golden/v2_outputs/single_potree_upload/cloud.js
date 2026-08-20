@@ -7,6 +7,7 @@ cloud.js = {
   "crs_info": {
     "value": "EPSG:25832",
     "projection": "EPSG:25832",
-    "epsg": "EPSG:25832"
+    "epsg": "EPSG:25832",
+    "code": "25832"
   }
 };

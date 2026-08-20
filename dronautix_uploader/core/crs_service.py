@@ -9,6 +9,23 @@ from typing import Any
 
 
 _EPSG_PATTERN = re.compile(r"^\s*(?:EPSG\s*:?\s*)?(\d+)\s*$", re.IGNORECASE)
+_OGC_URN_PATTERN = re.compile(r"^urn:ogc:def:crs:([^:]+):([^:]*):(.+)$", re.IGNORECASE)
+_OGC_URL_PATTERN = re.compile(
+    r"^https?://(?:www\.)?opengis\.net/def/crs/([^/]+)/([^/]+)/([^/?#]+)/?$",
+    re.IGNORECASE,
+)
+_WKT_PATTERN = re.compile(
+    r"^(?:BOUNDCRS|COMPOUNDCRS|COMPD_CS|PROJCRS|PROJCS|GEOGCRS|GEOGCS|GEODCRS|VERTCRS|VERT_CS|ENGCRS|LOCAL_CS)\s*\[",
+    re.IGNORECASE,
+)
+_WKT_AUTHORITY_PATTERN = re.compile(
+    r'(?:AUTHORITY|ID)\s*\[\s*"([^"]+)"\s*,\s*"?([^"\],]+)"?\s*\]',
+    re.IGNORECASE,
+)
+
+
+class CrsValidationError(ValueError):
+    """A supplied CRS value has no stable unambiguous technical reference."""
 
 
 @dataclass(frozen=True)
@@ -52,14 +69,66 @@ def _clean_text(value: Any) -> str:
     return str(value).strip()
 
 
-def _normalize_epsg(value: Any) -> str:
+def _canonical_reference(value: Any, label: str) -> str:
     text = _clean_text(value)
     if not text:
         return ""
     match = _EPSG_PATTERN.match(text)
     if match:
         return f"EPSG:{match.group(1)}"
-    return text
+    urn = _OGC_URN_PATTERN.match(text)
+    url = _OGC_URL_PATTERN.match(text)
+    if urn or url:
+        authority, version, code = (urn or url).groups()
+        authority = authority.upper()
+        code = code.strip()
+        if authority == "EPSG" and code.isdigit():
+            return f"EPSG:{code}"
+        return f"urn:ogc:def:crs:{authority}:{version}:{code}"
+    if _WKT_PATTERN.match(text):
+        authorities = _WKT_AUTHORITY_PATTERN.findall(text)
+        if not authorities:
+            raise CrsValidationError(f"{label} benötigt eine WKT-Authority/ID.")
+        epsg_codes = {
+            code.strip()
+            for authority, code in authorities
+            if authority.upper() == "EPSG" and code.strip().isdigit()
+        }
+        if len(epsg_codes) == 1:
+            return f"EPSG:{epsg_codes.pop()}"
+        # A compound WKT may legitimately contain multiple component EPSG IDs;
+        # collapsing it to either component would change the technical CRS.
+        return " ".join(text.split())
+    raise CrsValidationError(
+        f"{label} ist keine eindeutige technische CRS-Referenz. "
+        "Erwartet wird EPSG, eine OGC-URN/-URL oder WKT mit Authority/ID."
+    )
+
+
+def _technical_reference(
+    metadata: Mapping[str, Any],
+    keys: tuple[str, ...],
+    label: str,
+    fallback_keys: tuple[str, ...] = (),
+) -> str:
+    invalid: list[CrsValidationError] = []
+    for candidate_keys in (keys, fallback_keys):
+        references: set[str] = set()
+        for key in candidate_keys:
+            value = metadata.get(key)
+            if not _clean_text(value):
+                continue
+            try:
+                references.add(_canonical_reference(value, label))
+            except CrsValidationError as error:
+                invalid.append(error)
+        if len(references) > 1:
+            raise CrsValidationError(f"{label} enthält widersprüchliche technische Referenzen.")
+        if references:
+            return references.pop()
+    if invalid:
+        raise invalid[0]
+    return ""
 
 
 def _first_non_empty(metadata: Mapping[str, Any], keys: tuple[str, ...]) -> str:
@@ -76,13 +145,19 @@ def normalize_crs_metadata(crs_info: Mapping[str, Any] | None) -> dict[str, Any]
     if not crs_info:
         return None
 
-    horizontal = _normalize_epsg(
-        _first_non_empty(crs_info, ("epsg", "value", "projection", "crs"))
+    horizontal = _technical_reference(
+        crs_info,
+        ("epsg", "value", "projection", "crs"),
+        "Horizontales CRS",
+        ("wkt",),
     )
-    name = _first_non_empty(crs_info, ("name",))
+    name = _first_non_empty(crs_info, ("crs_name", "name"))
     wkt = _first_non_empty(crs_info, ("wkt",))
-    vertical_value = _normalize_epsg(
-        _first_non_empty(crs_info, ("vertical_epsg", "vertical_crs", "vertical_projection"))
+    vertical_value = _technical_reference(
+        crs_info,
+        ("vertical_epsg", "vertical_crs", "vertical_projection"),
+        "Vertikales CRS",
+        ("vertical_wkt",),
     )
     vertical_name = _first_non_empty(crs_info, ("vertical_name", "vertical_datum"))
 
@@ -96,11 +171,9 @@ def normalize_crs_metadata(crs_info: Mapping[str, Any] | None) -> dict[str, Any]
         if horizontal.upper().startswith("EPSG:"):
             normalized["epsg"] = horizontal
             normalized["code"] = horizontal.split(":", 1)[1]
-    elif name:
-        normalized["value"] = name
-
     if name:
         normalized["name"] = name
+        normalized["crs_name"] = name
     if wkt:
         normalized["wkt"] = wkt
 
@@ -124,6 +197,16 @@ def get_crs_display_value(crs_info: Mapping[str, Any] | None) -> str:
     if not normalized:
         return ""
     return _clean_text(normalized.get("epsg") or normalized.get("value") or normalized.get("name"))
+
+
+def get_crs_technical_value(crs_info: Mapping[str, Any] | None) -> str:
+    normalized = normalize_crs_metadata(crs_info)
+    return _clean_text((normalized or {}).get("epsg") or (normalized or {}).get("value"))
+
+
+def get_vertical_crs_technical_value(crs_info: Mapping[str, Any] | None) -> str:
+    normalized = normalize_crs_metadata(crs_info)
+    return _clean_text((normalized or {}).get("vertical_crs") or (normalized or {}).get("vertical_epsg"))
 
 
 def get_vertical_crs_display_value(crs_info: Mapping[str, Any] | None) -> str:
@@ -153,9 +236,9 @@ def crs_metadata_matches(
     left: Mapping[str, Any] | None,
     right: Mapping[str, Any] | None,
 ) -> bool:
-    left_summary = summarize_crs_metadata(left)
-    right_summary = summarize_crs_metadata(right)
-    return left_summary.has_value and left_summary == right_summary
+    left_summary = _technical_crs_summary(left)
+    right_summary = _technical_crs_summary(right)
+    return bool(left_summary.horizontal) and left_summary == right_summary
 
 
 def get_common_crs_metadata(
@@ -168,14 +251,21 @@ def get_common_crs_metadata(
         return None
 
     first = normalized_infos[0]
-    first_summary = summarize_crs_metadata(first)
-    if not first_summary.has_value:
+    first_summary = _technical_crs_summary(first)
+    if not first_summary.horizontal:
         return None
 
     for crs_info in normalized_infos[1:]:
-        if summarize_crs_metadata(crs_info) != first_summary:
+        if _technical_crs_summary(crs_info) != first_summary:
             return None
     return dict(first)
+
+
+def _technical_crs_summary(crs_info: Mapping[str, Any] | None) -> CrsSummary:
+    return CrsSummary(
+        horizontal=get_crs_technical_value(crs_info),
+        vertical=get_vertical_crs_technical_value(crs_info),
+    )
 
 
 def is_active_pointcloud(pointcloud: Mapping[str, Any]) -> bool:
@@ -197,6 +287,7 @@ def extract_pointcloud_crs_metadata(pointcloud: Mapping[str, Any]) -> dict[str, 
             "epsg",
             "projection",
             "value",
+            "crs_name",
             "vertical_crs",
             "vertical_epsg",
             "vertical_projection",
@@ -230,14 +321,17 @@ def get_common_active_pointcloud_crs(
 
 __all__ = [
     "CrsSummary",
+    "CrsValidationError",
     "ProjectCrsDecision",
     "crs_metadata_matches",
     "extract_pointcloud_crs_metadata",
     "get_common_active_pointcloud_crs",
     "get_common_crs_metadata",
     "get_crs_display_value",
+    "get_crs_technical_value",
     "get_crs_summary_text",
     "get_vertical_crs_display_value",
+    "get_vertical_crs_technical_value",
     "is_active_pointcloud",
     "normalize_crs_metadata",
     "summarize_crs_metadata",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -33,6 +34,7 @@ from .s3_service import (
     DownloadCancelledError,
     download_project_objects,
     upload_files_to_s3,
+    verify_uploaded_model_files,
 )
 
 
@@ -281,6 +283,18 @@ def build_new_project_upload(
             entry = prepared_model.index_entry
             if entry is None:
                 raise ValueError("Vorbereitetes GLB-Modell hat keinen Zielpfad.")
+            from .glb_optimization_service import build_model_index_entry
+
+            expected_entry = build_model_index_entry(
+                prepared_model,
+                project_viewer_root=project_viewer_root,
+                project_s3_prefix=project_s3_prefix,
+            )
+            if entry != expected_entry:
+                raise ValueError(
+                    "GLB-Upload abgebrochen: Modellpfad und data_version stimmen nicht ueberein. "
+                    "Es wurden keine S3-Daten geaendert."
+                )
             if entry.id in model_ids:
                 raise ValueError(f"Doppelte Modell-ID: {entry.id}")
             model_ids.add(entry.id)
@@ -972,12 +986,15 @@ def upload_new_project(
 ) -> UploadResult:
     """Upload a new project and insert it into projects_index.json.
 
-    Failure or cancellation before index save deletes exactly the uploaded-key
-    ledger and restores the input index snapshot.
+    Failure or cancellation before index save restores the input index snapshot
+    and deletes newly uploaded keys, except immutable model versions already
+    referenced by that snapshot.
     """
 
+    _validate_prepared_project_model_paths(prepared_upload)
     snapshot = copy.deepcopy(index_data)
     ledger = UploadedKeyLedger()
+    model_files = _model_files_to_verify(prepared_upload)
     try:
         upload_files_to_s3(
             s3_client,
@@ -986,7 +1003,15 @@ def upload_new_project(
             on_progress=on_progress,
             ledger=ledger,
             cancel_requested=cancel_requested,
+            checksum_sha256_keys=tuple(s3_key for _local_path, s3_key in model_files),
         )
+        if model_files:
+            verify_uploaded_model_files(
+                s3_client,
+                model_files,
+                bucket_name=bucket_name,
+                cancel_requested=cancel_requested,
+            )
         projects = index_data.get("projects")
         if not isinstance(projects, list):
             projects = []
@@ -999,7 +1024,9 @@ def upload_new_project(
     except OperationCancelledError:
         if ledger.uploaded_keys:
             _emit(on_progress, ProgressEvent(kind="log", message="[ABBRUCH] Entferne bereits hochgeladene Dateien..."))
-            delete_keys(ledger.as_tuple())
+            rollback_keys = _rollback_keys_preserving_indexed_models(ledger.as_tuple(), snapshot)
+            if rollback_keys:
+                delete_keys(rollback_keys)
         _restore_index(index_data, snapshot)
         return UploadResult(
             status="cancelled",
@@ -1008,7 +1035,9 @@ def upload_new_project(
         )
     except Exception:
         if ledger.uploaded_keys:
-            delete_keys(ledger.as_tuple())
+            rollback_keys = _rollback_keys_preserving_indexed_models(ledger.as_tuple(), snapshot)
+            if rollback_keys:
+                delete_keys(rollback_keys)
         _restore_index(index_data, snapshot)
         raise
 
@@ -1019,6 +1048,92 @@ def upload_new_project(
         s3_prefix=str(prepared_upload.project_metadata.get("s3_path", "")),
         uploaded_keys=ledger.as_tuple(),
         message="Upload erfolgreich.",
+    )
+
+
+def _model_files_to_verify(prepared_upload: PreparedProjectUpload) -> tuple[UploadFile, ...]:
+    models = prepared_upload.project_metadata.get("models")
+    if not isinstance(models, list):
+        return ()
+    expected_keys = tuple(
+        f"{str(model.get('s3_path') or '').rstrip('/')}/{filename}"
+        for model in models
+        if isinstance(model, dict) and str(model.get("s3_path") or "").strip()
+        for filename in ("scene.glb", "model.json")
+    )
+    if len(set(expected_keys)) != len(expected_keys):
+        raise ValueError("GLB-Upload abgebrochen: models[] enthält doppelte Paketpfade.")
+    expected_key_set = set(expected_keys)
+    files_by_key: dict[str, UploadFile] = {}
+    for file_to_upload in prepared_upload.files_to_upload:
+        s3_key = file_to_upload[1]
+        if s3_key not in expected_key_set:
+            continue
+        if s3_key in files_by_key:
+            raise ValueError(f"GLB-Upload abgebrochen: Paketdatei doppelt vorbereitet: {s3_key}")
+        files_by_key[s3_key] = file_to_upload
+    missing_keys = [s3_key for s3_key in expected_keys if s3_key not in files_by_key]
+    if missing_keys:
+        raise ValueError(f"GLB-Upload abgebrochen: Paketdatei fehlt: {missing_keys[0]}")
+    return tuple(files_by_key[s3_key] for s3_key in expected_keys)
+
+
+def _validate_prepared_project_model_paths(prepared_upload: PreparedProjectUpload) -> None:
+    """Reject malformed content-addressed model plans before the first S3 call."""
+
+    models = prepared_upload.project_metadata.get("models")
+    if models is None:
+        return
+    if not isinstance(models, list):
+        raise ValueError("GLB-Upload abgebrochen: models muss eine Liste sein.")
+    viewer_root = _normalize_s3_path(str(prepared_upload.project_metadata.get("viewer_path", "")))
+    s3_root = _normalize_s3_path(str(prepared_upload.project_metadata.get("s3_path", "")))
+    for model in models:
+        if not isinstance(model, dict):
+            raise ValueError("GLB-Upload abgebrochen: Ungueltiger models[]-Eintrag.")
+        model_id = _normalize_s3_path(str(model.get("id", "")))
+        s3_path = _normalize_s3_path(str(model.get("s3_path", "")))
+        match = re.fullmatch(
+            rf"{re.escape(s3_root)}/models/{re.escape(model_id)}/versions/([0-9a-f]{{64}})",
+            s3_path,
+        )
+        data_version = match.group(1) if match else ""
+        expected_viewer_path = f"{viewer_root}/models/{model_id}/versions/{data_version}/model.json"
+        if (
+            not model_id
+            or not data_version
+            or model.get("format") != "glb"
+            or _normalize_s3_path(str(model.get("viewer_path", ""))) != expected_viewer_path
+        ):
+            raise ValueError(
+                "GLB-Upload abgebrochen: models[] enthaelt keinen gueltigen "
+                "data_version-Pfad. Es wurden keine S3-Daten geaendert."
+            )
+
+
+def _rollback_keys_preserving_indexed_models(
+    uploaded_keys: tuple[str, ...],
+    index_snapshot: dict[str, Any],
+) -> tuple[str, ...]:
+    """Never delete immutable model versions already referenced by the old index."""
+
+    protected_prefixes: list[str] = []
+    for section in ("projects", "disabled_projects"):
+        for project in index_snapshot.get(section, ()):
+            if not isinstance(project, dict):
+                continue
+            for model in project.get("models", ()):
+                if isinstance(model, dict):
+                    prefix = _normalize_s3_path(str(model.get("s3_path", "")))
+                    if prefix:
+                        protected_prefixes.append(prefix)
+    return tuple(
+        key
+        for key in uploaded_keys
+        if not any(
+            _normalize_s3_path(key) == prefix or _normalize_s3_path(key).startswith(f"{prefix}/")
+            for prefix in protected_prefixes
+        )
     )
 
 

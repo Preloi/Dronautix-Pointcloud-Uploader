@@ -17,6 +17,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import struct
@@ -37,10 +38,10 @@ from .contracts import (
     ProgressEvent,
 )
 from .crs_service import (
-    get_crs_display_value,
-    get_vertical_crs_display_value,
+    CrsValidationError,
+    get_crs_technical_value,
+    get_vertical_crs_technical_value,
     normalize_crs_metadata,
-    summarize_crs_metadata,
 )
 from .glb_toolchain import (
     GLBToolchainStatus,
@@ -288,21 +289,19 @@ class GLBOptimizationService:
                 control_points=tuple(_transform_point(point, matrix) for point in output_inspection.control_points),
                 warnings=tuple(warnings),
             )
+            manifest = _build_model_manifest(
+                matrix=matrix,
+                bounds_min=bounds_min,
+                bounds_max=bounds_max,
+                crs_info=crs_info,
+                original_sha256=original_sha256,
+                optimization=result,
+                toolchain_status=status,
+            )
+            data_version = _model_package_sha256(output_sha256, manifest)
             manifest_path = stage_dir / "model.json"
             manifest_path.write_text(
-                json.dumps(
-                    _build_model_manifest(
-                        matrix=matrix,
-                        bounds_min=bounds_min,
-                        bounds_max=bounds_max,
-                        crs_info=crs_info,
-                        original_sha256=original_sha256,
-                        optimization=result,
-                        toolchain_status=status,
-                    ),
-                    indent=2,
-                    ensure_ascii=False,
-                )
+                json.dumps(manifest, indent=2, ensure_ascii=False)
                 + "\n",
                 encoding="utf-8",
             )
@@ -319,6 +318,7 @@ class GLBOptimizationService:
                 bounds_max=bounds_max,
                 crs_info=dict(crs_info),
                 optimization=result,
+                data_version=data_version,
             )
             if project_viewer_root or project_s3_prefix:
                 prepared = replace(
@@ -600,18 +600,27 @@ def build_model_index_entry(
     project_viewer_root: str,
     project_s3_prefix: str,
 ) -> ModelIndexEntry:
-    """Create the viewer's ``models[]`` entry at the stable model version path."""
+    """Create the viewer's ``models[]`` entry at its immutable content path."""
 
     viewer_root = _normalized_relative_root(project_viewer_root, "Viewer-Projektpfad")
     s3_root = _normalized_relative_root(project_s3_prefix, "S3-Projektpfad")
-    relative = f"models/{prepared.slug}/version"
+    data_version = prepared.package_sha256
+    if re.fullmatch(r"[0-9a-f]{64}", data_version) is None:
+        raise ValueError(
+            "GLB-Upload abgebrochen: data_version fehlt oder ist kein gueltiger "
+            "Paket-SHA-256 mit 64 Hex-Zeichen. Es wurden keine S3-Daten geaendert."
+        )
+    relative = f"models/{prepared.slug}/versions/{data_version}"
     return ModelIndexEntry(
         id=prepared.slug,
         name=prepared.name,
         viewer_path=f"{viewer_root}/{relative}/model.json",
         s3_path=f"{s3_root}/{relative}",
-        crs=get_crs_display_value(prepared.crs_info),
-        vertical_crs=get_vertical_crs_display_value(prepared.crs_info),
+        crs=get_crs_technical_value(prepared.crs_info),
+        vertical_crs=get_vertical_crs_technical_value(prepared.crs_info),
+        crs_name=str(prepared.crs_info.get("crs_name") or prepared.crs_info.get("name") or "").strip(),
+        vertical_name=str(prepared.crs_info.get("vertical_name") or "").strip(),
+        vertical_datum=str(prepared.crs_info.get("vertical_datum") or "").strip(),
     )
 
 
@@ -1381,13 +1390,34 @@ def _read_embedded_georeferencing(
         raise GLBValidationError("Das eingebettete horizontale CRS ist ungültig.")
     if vertical is not None and not isinstance(vertical, Mapping):
         raise GLBValidationError("Das eingebettete vertikale CRS ist ungültig.")
-    crs_info = normalize_crs_metadata(
-        {
-            "value": _epsg_value(horizontal.get("epsg")) if isinstance(horizontal, Mapping) else "",
-            "vertical_crs": _epsg_value(vertical.get("epsg")) if isinstance(vertical, Mapping) else "",
-        }
-    )
+    crs_info = _normalize_embedded_crs(horizontal, vertical)
     return matrix, crs_info
+
+
+def _normalize_embedded_crs(
+    horizontal: Mapping[str, Any] | None,
+    vertical: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Normalize embedded EPSG, OGC or authoritative WKT references."""
+
+    def reference(value: Mapping[str, Any] | None) -> str:
+        if not value:
+            return ""
+        if value.get("epsg") not in (None, ""):
+            return _epsg_value(value.get("epsg"))
+        for key in ("value", "crs", "urn", "uri", "url", "wkt"):
+            candidate = str(value.get(key, "") or "").strip()
+            if candidate:
+                return candidate
+        return ""
+
+    return normalize_crs_metadata({
+        "value": reference(horizontal),
+        "crs_name": str((horizontal or {}).get("name", "") or "").strip(),
+        "vertical_crs": reference(vertical),
+        "vertical_name": str((vertical or {}).get("name", "") or "").strip(),
+        "vertical_datum": str((vertical or {}).get("datum", "") or "").strip(),
+    })
 
 
 def _validate_precision_localization(value: Any, model_to_project: tuple[float, ...] | None) -> None:
@@ -2187,10 +2217,16 @@ def _georeferencing_signature(document: Mapping[str, Any]) -> Any:
 
 
 def _require_project_crs(crs_info: Mapping[str, Any] | None) -> dict[str, Any]:
-    normalized = normalize_crs_metadata(crs_info)
-    summary = summarize_crs_metadata(normalized)
-    if not normalized or not summary.horizontal:
-        raise GLBValidationError("Projekt-CRS fehlt oder ist ungültig.")
+    try:
+        normalized = normalize_crs_metadata(crs_info)
+        horizontal = get_crs_technical_value(normalized)
+        vertical = get_vertical_crs_technical_value(normalized)
+    except CrsValidationError as error:
+        raise GLBValidationError(f"Projekt-CRS ist nicht eindeutig: {error}") from error
+    if not normalized or not horizontal:
+        raise GLBValidationError("Das technische horizontale Projekt-CRS fehlt oder ist ungültig.")
+    if not vertical:
+        raise GLBValidationError("Das technische vertikale Projekt-CRS fehlt oder ist ungültig.")
     return normalized
 
 
@@ -2206,21 +2242,20 @@ def _assert_optional_crs_matches_project(
     metadata that additionally records a vertical datum name.
     """
 
-    declared = normalize_crs_metadata(declared_crs)
+    try:
+        declared = normalize_crs_metadata(declared_crs)
+    except CrsValidationError as error:
+        raise GLBValidationError(f"{error_message} {error}") from error
     if not declared:
         return
-    for keys in (("epsg", "value", "projection", "crs", "name"), ("vertical_epsg", "vertical_crs", "vertical_projection", "vertical_name", "vertical_datum")):
-        declared_values = _crs_values(declared, keys)
-        if declared_values and declared_values.isdisjoint(_crs_values(project_crs, keys)):
-            raise GLBValidationError(error_message)
-
-
-def _crs_values(crs_info: Mapping[str, Any], keys: tuple[str, ...]) -> set[str]:
-    return {
-        str(crs_info[key]).strip().casefold()
-        for key in keys
-        if str(crs_info.get(key, "")).strip()
-    }
+    declared_horizontal = get_crs_technical_value(declared)
+    declared_vertical = get_vertical_crs_technical_value(declared)
+    project_horizontal = get_crs_technical_value(project_crs)
+    project_vertical = get_vertical_crs_technical_value(project_crs)
+    if declared_horizontal and declared_horizontal != project_horizontal:
+        raise GLBValidationError(error_message)
+    if declared_vertical and declared_vertical != project_vertical:
+        raise GLBValidationError(error_message)
 
 
 def _build_model_manifest(
@@ -2233,15 +2268,16 @@ def _build_model_manifest(
     optimization: GLBOptimizationResult,
     toolchain_status: GLBToolchainStatus,
 ) -> dict[str, Any]:
-    return {
+    normalized_crs = normalize_crs_metadata(crs_info) or {}
+    manifest = {
         "schema_version": 1,
         "format": "glb",
         "coordinate_space": "project_local",
         "entrypoint": "scene.glb",
         "model_to_project": list(matrix),
         "bounds": {"min": list(bounds_min), "max": list(bounds_max)},
-        "crs": get_crs_display_value(crs_info),
-        "vertical_crs": get_vertical_crs_display_value(crs_info),
+        "crs": get_crs_technical_value(normalized_crs),
+        "vertical_crs": get_vertical_crs_technical_value(normalized_crs),
         "original_sha256": original_sha256,
         "toolchain": {
             "mode": toolchain_status.mode,
@@ -2263,6 +2299,35 @@ def _build_model_manifest(
             "warnings": list(optimization.warnings),
         },
     }
+    for key, value in (
+        ("crs_name", normalized_crs.get("crs_name") or normalized_crs.get("name")),
+        ("vertical_name", normalized_crs.get("vertical_name")),
+        ("vertical_datum", normalized_crs.get("vertical_datum")),
+    ):
+        text = str(value or "").strip()
+        if text:
+            manifest[key] = text
+    return manifest
+
+
+def _model_package_sha256(scene_sha256: str, manifest: Mapping[str, Any]) -> str:
+    """Hash the immutable GLB bytes identity and canonical manifest content."""
+
+    scene_hash = str(scene_sha256 or "").lower()
+    if re.fullmatch(r"[0-9a-f]{64}", scene_hash) is None:
+        raise GLBValidationError("scene.glb besitzt keinen gueltigen SHA-256-Hash.")
+    canonical_manifest = json.dumps(
+        manifest,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    digest = hashlib.sha256()
+    digest.update(bytes.fromhex(scene_hash))
+    digest.update(b"\0")
+    digest.update(canonical_manifest)
+    return digest.hexdigest()
 
 
 def _source_path(model_input: ModelUploadInput) -> Path:

@@ -51,6 +51,7 @@ def _manifest(version="1.7.13", installer_sha256=None, **overrides):
 
 
 def test_version_comparison_is_numeric():
+    assert is_remote_version_newer("2.1.6", "2.1.5")
     assert is_remote_version_newer("1.7.12", "1.7.9")
     assert not is_remote_version_newer("1.7.9", "1.7.12")
     assert not is_remote_version_newer("1.7.12", "1.7.12")

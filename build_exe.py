@@ -116,7 +116,24 @@ def sync_version_files():
         f'#define AppExeName "{APP_EXE_NAME}"\n'
         f'#define AppId "{APP_ID}"\n'
     )
-    latest_release_content = {
+    write_text_file(VERSION_INFO_FILE, version_info_content)
+    write_text_file(INSTALLER_VERSION_FILE, installer_version_content)
+
+
+def sync_output_manifest():
+    output_dir = "Output"
+    if not os.path.isdir(output_dir):
+        return
+
+    shutil.copyfile(LATEST_RELEASE_FILE, os.path.join(output_dir, LATEST_RELEASE_FILE))
+
+
+def write_release_manifest_after_installer_build():
+    installer_path = get_output_installer_path()
+    if not os.path.isfile(installer_path):
+        raise FileNotFoundError(f"Finaler Installer fehlt: {installer_path}")
+
+    release_manifest = {
         "version": APP_VERSION,
         "installer_name": f"Dronautix_Pointcloud_Uploader_Setup_{APP_VERSION}.exe",
         "repo_owner": GITHUB_UPDATE_OWNER,
@@ -128,33 +145,10 @@ def sync_version_files():
             f"releases/download/v{APP_VERSION}/Dronautix_Pointcloud_Uploader_Setup_{APP_VERSION}.exe"
         ),
         "published_at": datetime.now().isoformat(timespec="seconds"),
+        "installer_sha256": calculate_file_sha256(installer_path),
     }
-
-    write_text_file(VERSION_INFO_FILE, version_info_content)
-    write_text_file(INSTALLER_VERSION_FILE, installer_version_content)
-    write_json_file(LATEST_RELEASE_FILE, latest_release_content)
-
-
-def sync_output_manifest():
-    output_dir = "Output"
-    if not os.path.isdir(output_dir):
-        return
-
-    shutil.copyfile(LATEST_RELEASE_FILE, os.path.join(output_dir, LATEST_RELEASE_FILE))
-
-
-def update_release_manifest_with_installer_hash():
-    installer_path = get_output_installer_path()
-    if not os.path.isfile(installer_path):
-        print("[WARNUNG] Installer-Hash konnte nicht geschrieben werden, Setup fehlt")
-        return
-
-    with open(LATEST_RELEASE_FILE, "r", encoding="utf-8") as file:
-        release_manifest = json.load(file)
-
-    release_manifest["installer_sha256"] = calculate_file_sha256(installer_path)
     write_json_file(LATEST_RELEASE_FILE, release_manifest)
-    print("[OK] Installer SHA-256 in latest-release.json geschrieben")
+    print("[OK] latest-release.json nach finalem Installer-Build geschrieben")
 
 
 def cleanup_previous_build_artifacts():
@@ -266,7 +260,7 @@ try:
     if inno_setup:
         print("[OK] Inno Setup gefunden - baue Setup...")
         subprocess.run([inno_setup, INNO_SETUP_SCRIPT], check=True)
-        update_release_manifest_with_installer_hash()
+        write_release_manifest_after_installer_build()
         sync_output_manifest()
         print("[OK] Update-Manifest synchronisiert")
     else:

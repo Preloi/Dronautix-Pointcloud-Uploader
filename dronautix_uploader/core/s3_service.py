@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import mimetypes
 import os
 import re
@@ -109,6 +112,7 @@ def upload_files_to_s3(
     on_progress: ProgressCallback | None = None,
     ledger: UploadedKeyLedger | None = None,
     cancel_requested: CancelCallback | None = None,
+    checksum_sha256_keys: tuple[str, ...] | list[str] = (),
 ) -> UploadedKeyLedger:
     """Upload files and record a key only after upload_file completed."""
 
@@ -127,6 +131,7 @@ def upload_files_to_s3(
     )
 
     uploaded_total = 0
+    checksum_keys = set(checksum_sha256_keys)
 
     for idx, (local_path, s3_key) in enumerate(files_to_upload, 1):
         if _cancel_requested(cancel_requested):
@@ -141,7 +146,13 @@ def upload_files_to_s3(
             ),
         )
 
-        content_type = _content_type_for_path(local_path)
+        extra_args = {
+            "ContentType": _content_type_for_path(local_path),
+            "CacheControl": S3_CACHE_CONTROL,
+        }
+        if s3_key in checksum_keys:
+            extra_args["ChecksumAlgorithm"] = "SHA256"
+            extra_args["Metadata"] = {"sha256": _file_sha256(local_path, cancel_requested)}
 
         # boto3 liefert pro Callback-Aufruf das Chunk-Inkrement, nicht die
         # Gesamtsumme; ohne Akkumulation bleibt der Balken bei grossen Dateien
@@ -174,10 +185,7 @@ def upload_files_to_s3(
                 local_path,
                 bucket_name,
                 s3_key,
-                ExtraArgs={
-                    "ContentType": content_type,
-                    "CacheControl": S3_CACHE_CONTROL,
-                },
+                ExtraArgs=extra_args,
                 Callback=update_upload_progress,
             )
         except OperationCancelledError:
@@ -194,6 +202,52 @@ def upload_files_to_s3(
     _emit(on_progress, ProgressEvent(kind="progress", percent=1.0, phase="upload"))
     _emit(on_progress, ProgressEvent(kind="log", message="[UPLOAD] Alle Dateien hochgeladen", phase="upload"))
     return upload_ledger
+
+
+def verify_uploaded_model_files(
+    s3_client,
+    files_to_verify: list[UploadFile] | tuple[UploadFile, ...],
+    *,
+    bucket_name: str = BUCKET_NAME,
+    cancel_requested: CancelCallback | None = None,
+) -> None:
+    """Fail closed unless every uploaded immutable model file matches its S3 head."""
+
+    for local_path, s3_key in files_to_verify:
+        if _cancel_requested(cancel_requested):
+            raise OperationCancelledError("Upload wurde abgebrochen.")
+        expected_size = os.path.getsize(local_path)
+        expected_hash = _file_sha256(local_path, cancel_requested)
+        try:
+            head = s3_client.head_object(Bucket=bucket_name, Key=s3_key, ChecksumMode="ENABLED")
+        except Exception as error:
+            if _cancel_requested(cancel_requested):
+                raise OperationCancelledError("Upload wurde abgebrochen.") from error
+            raise RuntimeError(f"S3-Prüfung für Modell-Datei fehlgeschlagen: {s3_key}: {error}") from error
+        if int(head.get("ContentLength", -1)) != expected_size:
+            raise RuntimeError(f"S3-Prüfung für Modell-Datei hat eine falsche Größe: {s3_key}")
+        metadata = head.get("Metadata") or {}
+        if not hmac.compare_digest(str(metadata.get("sha256") or "").casefold(), expected_hash.casefold()):
+            raise RuntimeError(f"S3-Prüfung für Modell-Datei hat einen falschen SHA-256: {s3_key}")
+        remote_checksum = str(head.get("ChecksumSHA256") or "")
+        if not remote_checksum:
+            raise RuntimeError(f"S3-Prüfung für Modell-Datei liefert keinen S3-SHA-256: {s3_key}")
+        checksum_type = str(head.get("ChecksumType") or "").upper()
+        is_composite = checksum_type == "COMPOSITE" or remote_checksum.rsplit("-", 1)[-1].isdigit()
+        if not is_composite:
+            expected_checksum = base64.b64encode(bytes.fromhex(expected_hash)).decode("ascii")
+            if not hmac.compare_digest(remote_checksum, expected_checksum):
+                raise RuntimeError(f"S3-Prüfung für Modell-Datei hat einen abweichenden S3-SHA-256: {s3_key}")
+
+
+def _file_sha256(path: str, cancel_requested: CancelCallback | None) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            if _cancel_requested(cancel_requested):
+                raise OperationCancelledError("Upload wurde abgebrochen.")
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def collect_project_object_entries(
