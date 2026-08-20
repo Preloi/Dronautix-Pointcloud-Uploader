@@ -160,3 +160,19 @@ def test_validate_upload_dialog_state_omits_empty_crs_info(dialog_models):
     request = dialog_models.validate_upload_dialog_state(state)
 
     assert request.crs_info_by_source_path is None
+
+
+def test_validate_upload_dialog_state_preserves_optional_model_inputs(dialog_models):
+    from dronautix_uploader.core.contracts import ModelUploadInput
+
+    model_input = ModelUploadInput(source_path="Haus.glb")
+    request = dialog_models.validate_upload_dialog_state(
+        dialog_models.UploadDialogState(
+            customer="Kunde",
+            project="Projekt",
+            source_paths=("scan.copc.laz",),
+            model_inputs=(model_input,),
+        )
+    )
+
+    assert request.model_inputs == (model_input,)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from dronautix_uploader.core.contracts import ModelUploadInput
 from dronautix_uploader.core.upload_workflow_service import NewProjectUploadWorkflowRequest
 
 
@@ -17,6 +18,7 @@ class UploadDialogState:
     overwrite: bool = False
     horizontal_crs: str = ""
     vertical_crs: str = ""
+    model_inputs: tuple[ModelUploadInput, ...] = ()
 
 
 def validate_upload_dialog_state(state: UploadDialogState) -> NewProjectUploadWorkflowRequest:
@@ -49,6 +51,7 @@ def validate_upload_dialog_state(state: UploadDialogState) -> NewProjectUploadWo
         output_base_dir=output_base_dir,
         overwrite=state.overwrite,
         crs_info_by_source_path=crs_info_by_source_path,
+        model_inputs=tuple(state.model_inputs),
     )
 
 

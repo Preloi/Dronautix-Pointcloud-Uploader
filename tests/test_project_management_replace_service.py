@@ -441,3 +441,55 @@ def test_remove_multi_child_lists_and_deletes_only_the_exact_copc_object():
     assert s3_client.prefixes == [target_path]
     assert s3_client.deleted == [target_path]
     assert [cloud["name"] for cloud in repository.index_data["projects"][0]["pointclouds"]] == ["Keep"]
+
+
+def test_full_replacement_keeps_models_metadata_and_model_s3_objects(tmp_path):
+    project_root = "pointclouds/kunde/project/projekt"
+    viewer_root = "kunde/project/projekt"
+    models = [
+        {
+            "id": "building",
+            "viewer_path": f"{viewer_root}/models/building/versions/hash/model.json",
+            "s3_path": f"{project_root}/models/building/versions/hash/scene.glb",
+        }
+    ]
+    repository = FakeRepository(
+        {
+            "projects": [
+                {
+                    "id": "project",
+                    "format": "multi",
+                    "viewer_path": viewer_root,
+                    "s3_path": project_root,
+                    "models": copy.deepcopy(models),
+                    "pointclouds": [
+                        {
+                            "name": "Old",
+                            "format": "copc",
+                            "viewer_path": f"{viewer_root}/old/source.copc.laz",
+                            "s3_path": f"{project_root}/old/source.copc.laz",
+                        }
+                    ],
+                }
+            ],
+            S3_DISABLED_PROJECTS_KEY: [],
+        }
+    )
+    s3_client = FakeS3Client(
+        pages=[
+            {
+                "Contents": [
+                    {"Key": f"{project_root}/old/source.copc.laz", "Size": 10},
+                    {"Key": f"{project_root}/models/building/versions/hash/scene.glb", "Size": 10},
+                    {"Key": f"{project_root}/models/building/versions/hash/model.json", "Size": 10},
+                ]
+            }
+        ]
+    )
+    prepared = (make_prepared_cloud(tmp_path, name="New", slug="new", viewer_root=viewer_root, s3_root=project_root),)
+
+    result = make_service(repository, s3_client).replace_project_pointclouds("project", prepared)
+
+    assert result.status == "success"
+    assert repository.index_data["projects"][0]["models"] == models
+    assert s3_client.deleted == [f"{project_root}/old/source.copc.laz"]

@@ -5,7 +5,11 @@ a = Analysis(
     ['Dronautix_Pointcloud_Uploader_v2_final.py'],
     pathex=[],
     binaries=[],
-    datas=[('icon.ico', '.'), ('bundled_tools', 'bundled_tools')],
+    datas=[
+        ('icon.ico', '.'),
+        ('bundled_tools/PotreeConverter', 'bundled_tools/PotreeConverter'),
+        ('bundled_tools/GLBToolchain', 'bundled_tools/GLBToolchain'),
+    ],
     hiddenimports=['keyring', 'keyring.backends.Windows', 'PySide6.QtCore', 'PySide6.QtGui', 'PySide6.QtWidgets', 'boto3'],
     hookspath=[],
     hooksconfig={},

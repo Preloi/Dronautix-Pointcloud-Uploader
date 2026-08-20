@@ -172,6 +172,7 @@ def build_upload_workflow_request(request: UploadRequest) -> NewProjectUploadWor
             request.vertical_input,
         ),
         overwrite=request.overwrite,
+        model_inputs=request.model_inputs,
     )
 
 

@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import time
 
 import pytest
 
@@ -15,6 +16,65 @@ def _import_qt():
 
 def _app(QtWidgets):
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+
+def test_startup_cleanup_removes_only_dedicated_glb_stages_older_than_24_hours(tmp_path, monkeypatch):
+    from dronautix_uploader.qt_app import main_window
+
+    old_stage = tmp_path / ".glb-upload-old"
+    old_stage.mkdir()
+    dedicated_root = tmp_path / main_window.GLB_UPLOAD_STAGING_ROOT_NAME
+    dedicated_root.mkdir()
+    dedicated_old_stage = dedicated_root / ".glb-upload-old"
+    dedicated_old_stage.mkdir()
+    nested_parent = tmp_path / "dronautix_potree_old"
+    nested_parent.mkdir()
+    nested_old_stage = nested_parent / ".glb-upload-old"
+    nested_old_stage.mkdir()
+    fresh_stage = tmp_path / ".glb-upload-fresh"
+    fresh_stage.mkdir()
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "original.glb").write_bytes(b"original")
+    old_timestamp = time.time() - (25 * 60 * 60)
+    os.utime(old_stage, (old_timestamp, old_timestamp))
+    os.utime(dedicated_old_stage, (old_timestamp, old_timestamp))
+    os.utime(nested_old_stage, (old_timestamp, old_timestamp))
+    monkeypatch.setattr(main_window.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    warnings = main_window.cleanup_stale_upload_temp_dirs()
+
+    assert warnings == ()
+    assert old_stage.exists()
+    assert not dedicated_old_stage.exists()
+    assert nested_old_stage.exists()
+    assert fresh_stage.exists()
+    assert (source_dir / "original.glb").exists()
+
+
+def test_startup_cleanup_retries_locked_dedicated_glb_stages_and_reports_failure(tmp_path, monkeypatch):
+    from dronautix_uploader.qt_app import main_window
+
+    dedicated_root = tmp_path / main_window.GLB_UPLOAD_STAGING_ROOT_NAME
+    old_stage = dedicated_root / ".glb-upload-locked"
+    old_stage.mkdir(parents=True)
+    old_timestamp = time.time() - (25 * 60 * 60)
+    os.utime(old_stage, (old_timestamp, old_timestamp))
+    calls = []
+
+    def locked(path):
+        calls.append(path)
+        raise OSError("locked")
+
+    monkeypatch.setattr(main_window.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(main_window.shutil, "rmtree", locked)
+
+    warnings = main_window.cleanup_stale_upload_temp_dirs()
+
+    assert len(calls) == 2
+    assert old_stage.exists()
+    assert len(warnings) == 1
+    assert "nach erneutem Versuch" in warnings[0]
 
 
 def test_main_window_constructs_with_service_backed_fake_runtime_when_qt_available():
@@ -290,6 +350,159 @@ def test_upload_page_shows_independent_process_progress_when_qt_available():
         assert preparation.value() == 40
         assert upload.value() == 65
         assert index.value() == 100
+    finally:
+        page.deleteLater()
+
+
+def test_upload_page_accepts_optional_native_glbs_when_qt_available(tmp_path):
+    QtCore, _QtGui, QtWidgets = _import_qt()
+    _app(QtWidgets)
+
+    from dronautix_uploader.core.contracts import ProgressEvent
+    from dronautix_uploader.qt_app.pages import create_upload_page
+
+    glb_path = tmp_path / "Haus.glb"
+    glb_path.write_bytes(b"glTF")
+    page = create_upload_page(QtCore, QtWidgets, on_start=lambda: None)
+
+    try:
+        page.add_source_paths(("scan.copc.laz",))
+        page.findChild(QtWidgets.QLineEdit, "UploadCustomerInput").setText("Kunde")
+        page.findChild(QtWidgets.QLineEdit, "UploadProjectInput").setText("Projekt")
+        horizontal = [field for field in page.findChildren(QtWidgets.QLineEdit) if field.placeholderText() == "automatisch erkennen"][0]
+        vertical = [field for field in page.findChildren(QtWidgets.QLineEdit) if field.placeholderText() == "optional"][0]
+        horizontal.setText("EPSG:25832")
+        vertical.setText("EPSG:7837")
+
+        page.add_model_paths((str(glb_path), str(glb_path), str(tmp_path / "not-supported.obj")))
+        model_list = page.findChild(QtWidgets.QListWidget, "UploadModelList")
+        assert model_list.count() == 1
+        assert "Haus.glb" in model_list.item(0).text()
+        assert "Georeferenzierung aus GLB" in model_list.item(0).text()
+        assert "Optimierung:" in model_list.item(0).text()
+        assert page.findChild(QtWidgets.QLabel, "UploadModelCount").text() == "1 Modell"
+        assert page.findChild(QtWidgets.QLineEdit, "UploadModelEastInput") is None
+
+        model_input = page.model_inputs()[0]
+        assert model_input.source_path == str(glb_path)
+        assert model_input.name == ""
+        assert model_input.slug == ""
+        assert model_input.model_json_path == ""
+
+        page.handle_progress(
+            ProgressEvent(
+                kind="detail",
+                message="[MODELL] Haus: original, 2048 Bytes",
+                detail=json.dumps(
+                    {
+                        "model_path": str(glb_path),
+                        "optimization_status": "original",
+                        "output_size": 2048,
+                    }
+                ),
+                phase="optimization",
+            )
+        )
+        assert "Optimierung: original" in model_list.item(0).text()
+        assert "Ergebnisgröße: 2048 Bytes" in model_list.item(0).text()
+
+        remove_button = next(
+            button for button in page.findChildren(QtWidgets.QPushButton) if button.toolTip().startswith("Markierte Modelle")
+        )
+        model_list.setCurrentRow(0)
+        remove_button.click()
+        assert model_list.count() == 0
+    finally:
+        page.deleteLater()
+
+
+def test_upload_page_passes_only_an_explicit_model_json_sidecar_to_the_core(tmp_path, monkeypatch):
+    QtCore, _QtGui, QtWidgets = _import_qt()
+    _app(QtWidgets)
+
+    from dronautix_uploader.qt_app.pages import create_upload_page
+
+    glb_path = tmp_path / "Haus.glb"
+    glb_path.write_bytes(b"glTF")
+    sidecar_path = tmp_path / "model.json"
+    sidecar_path.write_text("{}", encoding="utf-8")
+    page = create_upload_page(QtCore, QtWidgets, on_start=lambda: None)
+
+    try:
+        page.add_source_paths(("scan.copc.laz",))
+        horizontal = [field for field in page.findChildren(QtWidgets.QLineEdit) if field.placeholderText() == "automatisch erkennen"][0]
+        vertical = [field for field in page.findChildren(QtWidgets.QLineEdit) if field.placeholderText() == "optional"][0]
+        horizontal.setText("EPSG:25832")
+        vertical.setText("EPSG:7837")
+        page.add_model_paths((str(glb_path),))
+        model_list = page.findChild(QtWidgets.QListWidget, "UploadModelList")
+        model_list.setCurrentRow(0)
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog,
+            "getOpenFileName",
+            lambda *_args, **_kwargs: (str(sidecar_path), "model.json (model.json)"),
+        )
+        page.findChild(QtWidgets.QPushButton, "UploadModelSidecarButton").click()
+
+        model_input = page.model_inputs()[0]
+        assert model_input.source_path == str(glb_path)
+        assert model_input.model_json_path == str(sidecar_path)
+        assert "Sidecar: model.json" in model_list.item(0).text()
+        assert page.findChild(QtWidgets.QPushButton, "UploadModelSidecarButton") is not None
+    finally:
+        page.deleteLater()
+
+
+def test_upload_page_rejects_ambiguous_model_json_drop_without_assigning_any_model(tmp_path):
+    QtCore, _QtGui, QtWidgets = _import_qt()
+    _app(QtWidgets)
+
+    from dronautix_uploader.qt_app.pages import create_upload_page
+
+    first = tmp_path / "A.glb"
+    second = tmp_path / "B.glb"
+    sidecar = tmp_path / "model.json"
+    first.write_bytes(b"glTF")
+    second.write_bytes(b"glTF")
+    sidecar.write_text("{}", encoding="utf-8")
+    page = create_upload_page(QtCore, QtWidgets, on_start=lambda: None)
+
+    try:
+        page.add_model_paths((str(first), str(second), str(sidecar)))
+
+        assert page.findChild(QtWidgets.QListWidget, "UploadModelList").count() == 0
+        assert page.model_inputs() == ()
+        assert "genau einem GLB" in page.findChild(QtWidgets.QLabel, "ErrorText").text()
+    finally:
+        page.deleteLater()
+
+
+def test_upload_page_requires_pointcloud_crs_and_hides_models_for_local_conversion_when_qt_available(tmp_path):
+    QtCore, _QtGui, QtWidgets = _import_qt()
+    _app(QtWidgets)
+
+    from dronautix_uploader.qt_app.pages import create_upload_page
+
+    glb_path = tmp_path / "Haus.glb"
+    glb_path.write_bytes(b"glTF")
+    page = create_upload_page(QtCore, QtWidgets, on_start=lambda: None)
+
+    try:
+        page.add_source_paths(("scan.copc.laz",))
+        horizontal = [field for field in page.findChildren(QtWidgets.QLineEdit) if field.placeholderText() == "automatisch erkennen"][0]
+        vertical = [field for field in page.findChildren(QtWidgets.QLineEdit) if field.placeholderText() == "optional"][0]
+        horizontal.setText("EPSG:25832")
+        page.add_model_paths((str(glb_path),))
+
+        with pytest.raises(ValueError, match="Höhenbezug"):
+            page.model_inputs()
+
+        vertical.setText("EPSG:7837")
+        assert page.model_inputs()[0].source_path == str(glb_path)
+
+        next(button for button in page.findChildren(QtWidgets.QPushButton) if button.text() == "Nur konvertieren").click()
+        assert page.findChild(QtWidgets.QFrame, "UploadModelsPanel").isHidden()
+        assert page.model_inputs() == ()
     finally:
         page.deleteLater()
 

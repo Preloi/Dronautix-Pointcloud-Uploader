@@ -1,0 +1,45 @@
+{
+	"name": "language-tags",
+	"version": "2.1.0",
+	"description": "Work with IANA language tags.",
+	"main": "lib/index.js",
+	"type": "module",
+	"homepage": "https://github.com/mattcg/language-tags",
+	"author": "Matthew Caruana Galizia <mattcg@gmail.com>",
+	"repository": {
+		"type": "git",
+		"url": "git://github.com/mattcg/language-tags.git"
+	},
+	"bugs": {
+		"url": "https://github.com/mattcg/language-tags/issues"
+	},
+	"license": "MIT",
+	"scripts": {
+		"pretest": "eslint ./lib ./test",
+		"test": "c8 mocha",
+		"tests-only": "c8 mocha"
+	},
+	"keywords": [
+		"iana",
+		"bcp47",
+		"subtags",
+		"rfc5646",
+		"m17n",
+		"multilingualization"
+	],
+	"dependencies": {
+		"language-subtag-registry": "^0.3.20"
+	},
+	"devDependencies": {
+		"coveralls": "^3.1.1",
+		"eslint": "^9.17.0",
+		"mocha": "^11.0.1",
+		"c8": "^10.1.3"
+	},
+	"files": [
+		"/lib"
+	],
+	"engines": {
+		"node": ">=22"
+	}
+}

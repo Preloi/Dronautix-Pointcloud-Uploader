@@ -172,6 +172,52 @@ def test_copy_project_objects_preserves_relative_paths_and_cache_control():
     assert fake_s3.copies[0]["MetadataDirective"] == "REPLACE"
 
 
+def test_copy_project_objects_replaces_glb_and_json_metadata_with_explicit_mime_types():
+    fake_s3 = FakeObjectS3Client()
+
+    copy_project_objects(
+        fake_s3,
+        ("old/models/scene.glb", "old/models/model.json"),
+        "old",
+        "new",
+        bucket_name="bucket",
+    )
+
+    assert [copy["ContentType"] for copy in fake_s3.copies] == [
+        "model/gltf-binary",
+        "application/json",
+    ]
+
+
+def test_managed_copy_replaces_model_metadata_with_explicit_mime_type():
+    class ManagedCopyClient(FakeObjectS3Client):
+        def copy(self, copy_source, bucket, key, ExtraArgs=None, Callback=None):
+            self.copies.append({"CopySource": copy_source, "Bucket": bucket, "Key": key, "ExtraArgs": ExtraArgs})
+            if Callback:
+                Callback(10)
+
+    fake_s3 = ManagedCopyClient()
+    copy_project_objects(
+        fake_s3,
+        ("old/models/scene.glb", "old/models/model.json", "old/models/texture.ktx2"),
+        "old",
+        "new",
+        bucket_name="bucket",
+        on_progress=lambda _event: None,
+        source_sizes={
+            "old/models/scene.glb": 10,
+            "old/models/model.json": 10,
+            "old/models/texture.ktx2": 10,
+        },
+    )
+
+    assert [copy["ExtraArgs"]["ContentType"] for copy in fake_s3.copies] == [
+        "model/gltf-binary",
+        "application/json",
+        "image/ktx2",
+    ]
+
+
 def test_build_safe_download_path_removes_traversal_segments(tmp_path):
     path = build_safe_download_path(str(tmp_path), "prefix", "prefix/../safe/cloud.js")
 

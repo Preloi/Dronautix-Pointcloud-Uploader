@@ -17,6 +17,19 @@ from .contracts import (
 
 UploadFile = tuple[str, str]
 
+_EXPLICIT_CONTENT_TYPES = {
+    ".glb": "model/gltf-binary",
+    ".ktx2": "image/ktx2",
+    ".json": "application/json",
+}
+
+
+def _content_type_for_path(path: str) -> str:
+    content_type = _EXPLICIT_CONTENT_TYPES.get(os.path.splitext(path)[1].casefold())
+    if content_type is None:
+        content_type, _ = mimetypes.guess_type(path)
+    return content_type or "application/octet-stream"
+
 
 class DownloadCancelledError(RuntimeError):
     """Raised when a project download is cancelled by the caller."""
@@ -128,9 +141,7 @@ def upload_files_to_s3(
             ),
         )
 
-        content_type, _ = mimetypes.guess_type(local_path)
-        if not content_type:
-            content_type = "application/octet-stream"
+        content_type = _content_type_for_path(local_path)
 
         # boto3 liefert pro Callback-Aufruf das Chunk-Inkrement, nicht die
         # Gesamtsumme; ohne Akkumulation bleibt der Balken bei grossen Dateien
@@ -311,11 +322,16 @@ def copy_project_objects(
                 _state["bytes"] += int(bytes_chunk or 0)
                 emit_copy_progress(_base + _state["bytes"], _index)
 
+            content_type = _content_type_for_path(destination_key)
             managed_copy(
                 {"Bucket": bucket_name, "Key": source_key},
                 bucket_name,
                 destination_key,
-                ExtraArgs={"CacheControl": S3_CACHE_CONTROL, "MetadataDirective": "REPLACE"},
+                ExtraArgs={
+                    "CacheControl": S3_CACHE_CONTROL,
+                    "ContentType": content_type,
+                    "MetadataDirective": "REPLACE",
+                },
                 Callback=report_copy_chunk,
             )
         else:
@@ -324,6 +340,7 @@ def copy_project_objects(
                 CopySource={"Bucket": bucket_name, "Key": source_key},
                 Key=destination_key,
                 CacheControl=S3_CACHE_CONTROL,
+                ContentType=_content_type_for_path(destination_key),
                 MetadataDirective="REPLACE",
             )
         copied_keys.append(destination_key)

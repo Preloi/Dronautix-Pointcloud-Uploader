@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 import dataclasses
 import glob
+import logging
 import os
 import shutil
 import tempfile
@@ -49,26 +50,71 @@ ProjectProvider = Callable[[], Iterable[ProjectPreview]]
 ProjectActionCallback = Callable[..., None]
 
 UPLOAD_TEMP_PREFIX = "dronautix_potree_"
+GLB_UPLOAD_STAGING_ROOT_NAME = "dronautix_glb_upload"
+GLB_UPLOAD_TEMP_PREFIX = ".glb-upload-"
+GLB_UPLOAD_STALE_AGE_SECONDS = 24 * 60 * 60
+
+LOGGER = logging.getLogger(__name__)
 
 
-def cleanup_stale_upload_temp_dirs(max_age_seconds: int = 1800) -> None:
-    """Remove abandoned conversion temp folders left by interrupted uploads.
-
-    Only folders older than ``max_age_seconds`` are removed so a concurrently
-    running upload in another instance is never touched.
-    """
+def cleanup_stale_upload_temp_dirs(
+    max_age_seconds: int = 1800,
+    glb_max_age_seconds: int = GLB_UPLOAD_STALE_AGE_SECONDS,
+) -> tuple[str, ...]:
+    """Remove stale app-owned temp folders without ever touching source assets."""
 
     now = time.time()
-    pattern = os.path.join(tempfile.gettempdir(), f"{UPLOAD_TEMP_PREFIX}*")
-    for path in glob.glob(pattern):
+    temp_root = tempfile.gettempdir()
+    warnings: list[str] = []
+    for path in glob.glob(os.path.join(temp_root, f"{UPLOAD_TEMP_PREFIX}*")):
         try:
-            if not os.path.isdir(path):
+            if not os.path.isdir(path) or not os.path.basename(path).startswith(UPLOAD_TEMP_PREFIX):
                 continue
             if now - os.path.getmtime(path) < max_age_seconds:
                 continue
-            shutil.rmtree(path, ignore_errors=True)
-        except OSError:
-            continue
+            if glob.glob(os.path.join(path, f"{GLB_UPLOAD_TEMP_PREFIX}*")):
+                continue
+            _remove_temp_dir_with_retry(path, warnings)
+        except OSError as error:
+            warning = f"Temporären Upload-Ordner nicht geprüft: {error}"
+            warnings.append(warning)
+            LOGGER.warning(warning)
+    # GLB originals may be selected from any temp directory. Only the
+    # dedicated app-owned root is safe to sweep on startup.
+    glb_patterns = (os.path.join(temp_root, GLB_UPLOAD_STAGING_ROOT_NAME, f"{GLB_UPLOAD_TEMP_PREFIX}*"),)
+    for pattern in glb_patterns:
+        for path in glob.glob(pattern):
+            try:
+                if not os.path.isdir(path) or not os.path.basename(path).startswith(GLB_UPLOAD_TEMP_PREFIX):
+                    continue
+                if now - os.path.getmtime(path) < glb_max_age_seconds:
+                    continue
+                _remove_temp_dir_with_retry(path, warnings)
+            except OSError as error:
+                warning = f"Temporären GLB-Ordner nicht geprüft: {error}"
+                warnings.append(warning)
+                LOGGER.warning(warning)
+    return tuple(warnings)
+
+
+def _remove_temp_dir_with_retry(path: str, warnings: list[str]) -> None:
+    name = os.path.basename(path)
+    if not name.startswith((UPLOAD_TEMP_PREFIX, GLB_UPLOAD_TEMP_PREFIX)):
+        warning = f"Unbekannten Ordner nicht als Upload-Temp gelöscht: {path}"
+        warnings.append(warning)
+        LOGGER.warning(warning)
+        return
+    for _attempt in range(2):
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            cleanup_error = error
+    warning = f"Temporären Ordner nach erneutem Versuch nicht gelöscht: {path} ({cleanup_error})"
+    warnings.append(warning)
+    LOGGER.warning(warning)
 
 
 def create_main_window(
@@ -391,10 +437,12 @@ def create_main_window(
                         overwrite=True,
                         horizontal_crs=form.horizontal_crs,
                         vertical_crs=form.vertical_crs,
+                        model_inputs=self._upload_page.model_inputs(),
                     )
                 )
             except (ValueError, FileExistsError) as error:
-                shutil.rmtree(temp_output_dir, ignore_errors=True)
+                cleanup_warnings: list[str] = []
+                _remove_temp_dir_with_retry(temp_output_dir, cleanup_warnings)
                 self._upload_page.show_error(str(error))
                 return
 
@@ -436,9 +484,15 @@ def create_main_window(
                 self._upload_cancel_event = None
                 self._upload_page.append_log("Räume temporäre Konvertierungsdateien auf...")
                 self._upload_page.set_status("Temporäre Dateien werden aufgeräumt...")
-                shutil.rmtree(temp_output_dir, ignore_errors=True)
-                self._upload_page.append_log("Fertig.")
-                self._upload_page.set_status("Fertig.")
+                cleanup_warnings: list[str] = []
+                _remove_temp_dir_with_retry(temp_output_dir, cleanup_warnings)
+                if cleanup_warnings:
+                    for warning in cleanup_warnings:
+                        self._upload_page.append_log(f"[WARNUNG] {warning}")
+                    self._upload_page.set_status("Upload beendet; temporäre Dateien benötigen Cleanup.")
+                else:
+                    self._upload_page.append_log("Temporäre Dateien entfernt.")
+                    self._upload_page.set_status("Fertig.")
                 self._upload_page.set_running(False)
                 self._release_progress_callback(progress_callback)
 

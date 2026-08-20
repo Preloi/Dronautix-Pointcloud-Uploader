@@ -30,6 +30,7 @@ from app_version import (
     APP_PUBLISHER,
     APP_VERSION,
 )
+from dronautix_uploader.core.glb_toolchain import validate_glb_toolchain_for_packaging
 
 VERSION_INFO_FILE = "version_info.txt"
 INSTALLER_VERSION_FILE = "installer_version.iss"
@@ -43,6 +44,15 @@ GITHUB_UPDATE_OWNER = "Preloi"
 GITHUB_UPDATE_REPO = "Dronautix-Pointcloud-Uploader"
 GITHUB_UPDATE_BRANCH = "master"
 ENTRYPOINT = "Dronautix_Pointcloud_Uploader_v2_final.py"
+BUNDLED_TOOL_DIRECTORIES = (
+    os.path.join("bundled_tools", "PotreeConverter"),
+    os.path.join("bundled_tools", "GLBToolchain"),
+)
+GLB_TOOLCHAIN_FILES = (
+    os.path.join("bundled_tools", "GLBToolchain", "toolchain-manifest.v1.json"),
+    os.path.join("bundled_tools", "GLBToolchain", "toolchain-integrity.v1.json"),
+    os.path.join("bundled_tools", "GLBToolchain", "viewer-capabilities.v1.json"),
+)
 
 
 def write_text_file(path, content):
@@ -195,6 +205,7 @@ required_files = [
     INNO_SETUP_SCRIPT,
     os.path.join("bundled_tools", "PotreeConverter", "PotreeConverter.exe"),
     os.path.join("bundled_tools", "PotreeConverter", "laszip.dll"),
+    *GLB_TOOLCHAIN_FILES,
 ]
 
 missing_files = []
@@ -209,6 +220,13 @@ if missing_files:
     sys.exit(1)
 
 print("[OK] Alle erforderlichen Dateien gefunden")
+glb_toolchain_issues = validate_glb_toolchain_for_packaging()
+if glb_toolchain_issues:
+    print("[FEHLER] Die gebündelte GLB-Toolchain ist nicht produktionsbereit:")
+    for issue in glb_toolchain_issues:
+        print(f"  - {issue}")
+    sys.exit(1)
+print("[OK] Gebündelte GLB-Toolchain ist versiegelt und lokal getestet")
 print()
 
 # PyInstaller Befehl
@@ -226,7 +244,10 @@ cmd = [
     "--icon=icon.ico",                        # Icon einbinden
     f"--version-file={VERSION_INFO_FILE}",    # Windows-Dateiversion
     f"--add-data=icon.ico{data_separator}.",
-    f"--add-data=bundled_tools{data_separator}bundled_tools",
+    *[
+        f"--add-data={source}{data_separator}{source}"
+        for source in BUNDLED_TOOL_DIRECTORIES
+    ],
     "--hidden-import=keyring",
     "--hidden-import=keyring.backends.Windows",
     "--hidden-import=PySide6.QtCore",

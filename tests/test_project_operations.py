@@ -367,6 +367,47 @@ def test_build_duplicate_project_metadata_preserves_multi_clouds_and_rewrites_pa
     assert duplicated["pointclouds"][1]["visible"] is False
 
 
+def test_build_duplicate_project_metadata_remaps_model_and_manifest_paths():
+    source_project = {
+        "format": "multi",
+        "viewer_path": "alt/oldid/altprojekt",
+        "s3_path": "pointclouds/alt/oldid/altprojekt",
+        "models": [
+            {
+                "id": "building",
+                "viewer_path": "alt/oldid/altprojekt/models/building/versions/hash/scene.glb",
+                "s3_path": "pointclouds/alt/oldid/altprojekt/models/building/versions/hash/scene.glb",
+                "manifest_path": "alt/oldid/altprojekt/models/building/versions/hash/model.json",
+                "assets": [
+                    {
+                        "viewer_path": "alt/oldid/altprojekt/models/building/versions/hash/texture.ktx2",
+                        "s3_path": "pointclouds/alt/oldid/altprojekt/models/building/versions/hash/texture.ktx2",
+                    }
+                ],
+            }
+        ],
+    }
+
+    duplicated = build_duplicate_project_metadata(
+        source_project=source_project,
+        timestamp="2026-06-21T13:00:00",
+        new_kunde="Neu",
+        new_projekt="Neuprojekt",
+        new_project_id="newid",
+        new_project_url="https://viewer/?id=newid",
+        new_viewer_root="neu/newid/neuprojekt",
+        new_s3_prefix="pointclouds/neu/newid/neuprojekt",
+    )
+
+    model = duplicated["models"][0]
+    assert model["viewer_path"] == "neu/newid/neuprojekt/models/building/versions/hash/scene.glb"
+    assert model["s3_path"] == "pointclouds/neu/newid/neuprojekt/models/building/versions/hash/scene.glb"
+    assert model["manifest_path"] == "neu/newid/neuprojekt/models/building/versions/hash/model.json"
+    assert model["assets"][0]["viewer_path"] == "neu/newid/neuprojekt/models/building/versions/hash/texture.ktx2"
+    assert model["assets"][0]["s3_path"] == "pointclouds/neu/newid/neuprojekt/models/building/versions/hash/texture.ktx2"
+    assert source_project["models"][0]["viewer_path"].startswith("alt/")
+
+
 def test_apply_project_rename_metadata_changes_names_without_paths():
     project = {
         "kunde": "Alt",
@@ -377,6 +418,12 @@ def test_apply_project_rename_metadata_changes_names_without_paths():
             {"name": "A", "viewer_path": "alt/id/altprojekt/a"},
             {"name": "B", "viewer_path": "alt/id/altprojekt/b"},
         ],
+        "models": [
+            {
+                "viewer_path": "alt/id/altprojekt/models/building/model.json",
+                "s3_path": "pointclouds/alt/id/altprojekt/models/building/model.json",
+            }
+        ],
     }
 
     renamed = apply_project_rename_metadata(project, "Neu", "Neuprojekt", ("Cloud A", "Cloud B"))
@@ -386,6 +433,7 @@ def test_apply_project_rename_metadata_changes_names_without_paths():
     assert renamed["viewer_path"] == "alt/id/altprojekt"
     assert renamed["s3_path"] == "pointclouds/alt/id/altprojekt"
     assert [cloud["name"] for cloud in renamed["pointclouds"]] == ["Cloud A", "Cloud B"]
+    assert renamed["models"] == project["models"]
     assert project["kunde"] == "Alt"
 
 
@@ -405,6 +453,14 @@ def test_duplicate_project_copies_s3_objects_and_inserts_active_multi_clone():
                 "s3_path": "pointclouds/alt/oldid/altprojekt/cloud_a",
             }
         ],
+        "models": [
+            {
+                "id": "building",
+                "viewer_path": "alt/oldid/altprojekt/models/building/versions/hash/model.json",
+                "s3_path": "pointclouds/alt/oldid/altprojekt/models/building/versions/hash/scene.glb",
+                "manifest_path": "alt/oldid/altprojekt/models/building/versions/hash/model.json",
+            }
+        ],
     }
     s3_client = FakeProjectS3Client(
         pages=[
@@ -412,6 +468,8 @@ def test_duplicate_project_copies_s3_objects_and_inserts_active_multi_clone():
                 "Contents": [
                     {"Key": "pointclouds/alt/oldid/altprojekt/cloud_a/cloud.js", "Size": 10},
                     {"Key": "pointclouds/alt/oldid/altprojekt/cloud_a/metadata.json", "Size": 10},
+                    {"Key": "pointclouds/alt/oldid/altprojekt/models/building/versions/hash/scene.glb", "Size": 10},
+                    {"Key": "pointclouds/alt/oldid/altprojekt/models/building/versions/hash/model.json", "Size": 10},
                 ]
             }
         ]
@@ -439,10 +497,20 @@ def test_duplicate_project_copies_s3_objects_and_inserts_active_multi_clone():
     assert result.uploaded_keys == (
         "pointclouds/neu/newid/neuprojekt/cloud_a/cloud.js",
         "pointclouds/neu/newid/neuprojekt/cloud_a/metadata.json",
+        "pointclouds/neu/newid/neuprojekt/models/building/versions/hash/scene.glb",
+        "pointclouds/neu/newid/neuprojekt/models/building/versions/hash/model.json",
     )
     assert [project["id"] for project in index_data["projects"]] == ["newid", "existing"]
     assert index_data[S3_DISABLED_PROJECTS_KEY] == [{"id": "oldid"}]
     assert index_data["projects"][0]["pointclouds"][0]["s3_path"] == "pointclouds/neu/newid/neuprojekt/cloud_a"
+    assert index_data["projects"][0]["models"] == [
+        {
+            "id": "building",
+            "viewer_path": "neu/newid/neuprojekt/models/building/versions/hash/model.json",
+            "s3_path": "pointclouds/neu/newid/neuprojekt/models/building/versions/hash/scene.glb",
+            "manifest_path": "neu/newid/neuprojekt/models/building/versions/hash/model.json",
+        }
+    ]
     assert saved == [["newid", "existing"]]
     assert deleted == []
 
@@ -522,7 +590,14 @@ def test_duplicate_project_rolls_back_copied_keys_when_index_save_fails():
 
 def test_delete_project_removes_from_disabled_list_and_upserts_deleted_entry():
     s3_client = FakeProjectS3Client(
-        pages=[{"Contents": [{"Key": "pointclouds/old/cloud.js", "Size": 10}]}]
+        pages=[
+            {
+                "Contents": [
+                    {"Key": "pointclouds/old/cloud.js", "Size": 10},
+                    {"Key": "pointclouds/old/models/building/versions/hash/scene.glb", "Size": 10},
+                ]
+            }
+        ]
     )
     index_data = {"projects": [{"id": "active"}], S3_DISABLED_PROJECTS_KEY: [{"id": "oldid"}]}
     deleted_data = {"deleted_projects": [{"id": "other", "s3_path": "pointclouds/other"}]}
@@ -546,7 +621,10 @@ def test_delete_project_removes_from_disabled_list_and_upserts_deleted_entry():
     )
 
     assert result.status == "success"
-    assert result.deleted_keys == ("pointclouds/old/cloud.js",)
+    assert result.deleted_keys == (
+        "pointclouds/old/cloud.js",
+        "pointclouds/old/models/building/versions/hash/scene.glb",
+    )
     assert index_data == {"projects": [{"id": "active"}], S3_DISABLED_PROJECTS_KEY: []}
     assert deleted_data["deleted_projects"][0]["id"] == "oldid"
     assert deleted_data["deleted_projects"][0]["deleted_at"] == "2026-06-21T13:00:00"
@@ -1325,3 +1403,116 @@ def test_remove_project_pointcloud_rejects_last_child_and_reports_cleanup_failur
     assert result.status == "partial"
     assert result.orphaned_keys == (f"{second['s3_path']}/cloud.js",)
     assert [cloud["name"] for cloud in index_data["projects"][0]["pointclouds"]] == ["Only"]
+
+
+def test_replacing_all_pointclouds_preserves_models_and_never_cleans_model_objects(tmp_path):
+    source = tmp_path / "replacement.copc.laz"
+    source.write_bytes(b"replacement")
+    project_root = "pointclouds/kunde/project/projekt"
+    viewer_root = "kunde/project/projekt"
+    models = [
+        {
+            "id": "building",
+            "viewer_path": f"{viewer_root}/models/building/versions/hash/model.json",
+            "s3_path": f"{project_root}/models/building/versions/hash/scene.glb",
+            "manifest_path": f"{viewer_root}/models/building/versions/hash/model.json",
+        }
+    ]
+    index_data = {
+        "projects": [
+            {
+                "id": "project",
+                "format": "multi",
+                "viewer_path": viewer_root,
+                "s3_path": project_root,
+                "models": copy.deepcopy(models),
+                "pointclouds": [
+                    {
+                        "name": "Old",
+                        "format": "copc",
+                        "viewer_path": f"{viewer_root}/old/source.copc.laz",
+                        "s3_path": f"{project_root}/old/source.copc.laz",
+                    }
+                ],
+            }
+        ]
+    }
+    prepared = prepare_cloud_uploads(
+        (PointcloudSource(str(source), name="Replacement", input_format="copc"),),
+        viewer_root,
+        project_root,
+    )
+    deleted_keys = []
+
+    result = replace_project_pointclouds(
+        s3_client=FakeS3Client(),
+        index_data=index_data,
+        project_id="project",
+        base_viewer_path=viewer_root,
+        s3_prefix=project_root,
+        prepared_clouds=prepared,
+        existing_keys=(
+            f"{project_root}/old/source.copc.laz",
+            f"{project_root}/models/building/versions/hash/scene.glb",
+            f"{project_root}/models/building/versions/hash/model.json",
+        ),
+        save_index=lambda _data: True,
+        delete_keys=lambda keys: deleted_keys.extend(keys),
+    )
+
+    assert result.status == "success"
+    assert index_data["projects"][0]["models"] == models
+    assert deleted_keys == [f"{project_root}/old/source.copc.laz"]
+
+
+def test_replacing_single_pointcloud_preserves_models_and_never_cleans_model_objects(tmp_path):
+    source = tmp_path / "replacement.copc.laz"
+    source.write_bytes(b"replacement")
+    project_root = "pointclouds/kunde/project/projekt"
+    viewer_root = "kunde/project/projekt"
+    models = [{"viewer_path": f"{viewer_root}/models/building/model.json"}]
+    index_data = {
+        "projects": [
+            {
+                "id": "project",
+                "format": "multi",
+                "viewer_path": viewer_root,
+                "s3_path": project_root,
+                "models": copy.deepcopy(models),
+                "pointclouds": [
+                    {
+                        "name": "Target",
+                        "format": "potree",
+                        "viewer_path": f"{viewer_root}/target",
+                        "s3_path": f"{project_root}/target",
+                    }
+                ],
+            }
+        ]
+    }
+    prepared = prepare_cloud_uploads(
+        (PointcloudSource(str(source), name="Replacement", input_format="copc"),),
+        viewer_root,
+        project_root,
+    )[0]
+    deleted_keys = []
+
+    result = replace_single_project_pointcloud(
+        s3_client=FakeS3Client(),
+        index_data=index_data,
+        project_id="project",
+        base_viewer_path=viewer_root,
+        s3_prefix=project_root,
+        prepared_cloud=prepared,
+        target_pointcloud_s3_path=f"{project_root}/target",
+        existing_target_keys=(
+            f"{project_root}/target/cloud.js",
+            f"{project_root}/models/building/versions/hash/scene.glb",
+        ),
+        save_index=lambda _data: True,
+        delete_keys=lambda keys: deleted_keys.extend(keys),
+    )
+
+    assert result.status == "success"
+    assert index_data["projects"][0]["models"] == models
+    assert deleted_keys == [f"{project_root}/target/cloud.js"]

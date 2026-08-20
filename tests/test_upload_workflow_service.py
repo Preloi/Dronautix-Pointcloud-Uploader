@@ -1,15 +1,19 @@
 import copy
 import json
 import os
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from dronautix_uploader.core.constants import DOMAIN_URL
-from dronautix_uploader.core.contracts import ProgressEvent
+from dronautix_uploader.core.contracts import ModelUploadInput, OperationCancelledError, ProgressEvent
 from dronautix_uploader.core.local_conversion_service import build_local_output_dir
 from dronautix_uploader.core.upload_workflow_service import (
+    GLB_UPLOAD_STAGING_ROOT_NAME,
     NewProjectUploadWorkflowRequest,
     UploadWorkflowService,
+    cleanup_prepared_glb_staging_dirs,
 )
 
 
@@ -72,6 +76,125 @@ def make_converter_runner(events=None, calls=None):
             on_progress(event)
 
     return fake_runner
+
+
+def test_glb_staging_cleanup_retries_and_never_removes_a_source_outside_its_staging_root(tmp_path, monkeypatch):
+    staging_root = tmp_path / "staging"
+    staging_root.mkdir()
+    stage_dir = staging_root / ".glb-upload-work"
+    stage_dir.mkdir()
+    (stage_dir / "scene.glb").write_bytes(b"staged")
+    source_dir = tmp_path / ".glb-upload-source"
+    source_dir.mkdir()
+    (source_dir / "original.glb").write_bytes(b"original")
+    events = []
+
+    from dronautix_uploader.core import upload_workflow_service
+
+    real_rmtree = upload_workflow_service.shutil.rmtree
+    calls = []
+
+    def locked_once(path):
+        calls.append(path)
+        if len(calls) == 1:
+            raise OSError("locked")
+        real_rmtree(path)
+
+    monkeypatch.setattr(upload_workflow_service.shutil, "rmtree", locked_once)
+    cleanup_prepared_glb_staging_dirs(
+        (SimpleNamespace(staging_dir=str(stage_dir)), SimpleNamespace(staging_dir=str(source_dir))),
+        staging_root=str(staging_root),
+        on_progress=events.append,
+    )
+
+    assert len(calls) == 2
+    assert not stage_dir.exists()
+    assert source_dir.exists()
+    assert any(event.kind == "log" and "Temporäre Dateien entfernt" in event.message for event in events)
+    assert any(event.kind == "warning" and "Unsicheren Temp-Pfad" in event.message for event in events)
+
+
+def test_glb_staging_uses_app_temp_root_instead_of_output_directory(tmp_path, monkeypatch):
+    from dronautix_uploader.core import upload_workflow_service
+
+    class CapturingGlbService:
+        staging_root = None
+
+        def prepare_many(self, model_inputs, **kwargs):
+            self.staging_root = kwargs["staging_root"]
+            return ()
+
+    app_temp_root = tmp_path / "temp"
+    output_dir = tmp_path / "user-output"
+    source = tmp_path / "source.copc.laz"
+    source.write_bytes(b"copc")
+    model = tmp_path / "model.glb"
+    model.write_bytes(b"original")
+    glb_service = CapturingGlbService()
+    monkeypatch.setattr(upload_workflow_service.tempfile, "gettempdir", lambda: str(app_temp_root))
+
+    result = UploadWorkflowService(
+        repository=FakeRepository(),
+        s3_client=FakeS3Client(),
+        glb_service=glb_service,
+    ).upload_new_project(
+        NewProjectUploadWorkflowRequest(
+            source_paths=(str(source),),
+            kunde="Kunde",
+            projekt="Projekt",
+            output_base_dir=str(output_dir),
+            model_inputs=(ModelUploadInput(source_path=str(model)),),
+        ),
+        converter_runner=make_converter_runner(),
+    )
+
+    assert result.status == "success"
+    assert os.path.dirname(glb_service.staging_root) == str(app_temp_root / GLB_UPLOAD_STAGING_ROOT_NAME)
+    assert os.path.basename(glb_service.staging_root).startswith(".glb-upload-run-")
+    assert not os.path.exists(glb_service.staging_root)
+    assert not output_dir.exists()
+    assert model.read_bytes() == b"original"
+
+
+def test_glb_cancellation_cleans_a_leaked_stage_and_preserves_user_original(tmp_path, monkeypatch):
+    from dronautix_uploader.core import upload_workflow_service
+
+    class CancellingGlbService:
+        stage_dir = None
+
+        def prepare_many(self, _model_inputs, **kwargs):
+            self.stage_dir = Path(kwargs["staging_root"]) / ".glb-upload-leaked"
+            self.stage_dir.mkdir()
+            (self.stage_dir / "partial.glb").write_bytes(b"partial")
+            raise OperationCancelledError()
+
+    app_temp_root = tmp_path / "temp"
+    source = tmp_path / "source.copc.laz"
+    source.write_bytes(b"copc")
+    model = tmp_path / "model.glb"
+    model.write_bytes(b"original")
+    glb_service = CancellingGlbService()
+    monkeypatch.setattr(upload_workflow_service.tempfile, "gettempdir", lambda: str(app_temp_root))
+
+    result = UploadWorkflowService(
+        repository=FakeRepository(),
+        s3_client=FakeS3Client(),
+        glb_service=glb_service,
+    ).upload_new_project(
+        NewProjectUploadWorkflowRequest(
+            source_paths=(str(source),),
+            kunde="Kunde",
+            projekt="Projekt",
+            model_inputs=(ModelUploadInput(source_path=str(model)),),
+        ),
+        converter_runner=make_converter_runner(),
+    )
+
+    assert result.status == "cancelled"
+    assert glb_service.stage_dir is not None
+    assert not glb_service.stage_dir.exists()
+    assert not list((app_temp_root / GLB_UPLOAD_STAGING_ROOT_NAME).glob(".glb-upload-run-*"))
+    assert model.read_bytes() == b"original"
 
 
 def test_upload_new_project_single_copc_uploads_without_conversion_and_writes_index(tmp_path):

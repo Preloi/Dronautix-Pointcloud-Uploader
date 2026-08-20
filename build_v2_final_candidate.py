@@ -10,6 +10,7 @@ import sys
 import hashlib
 
 from app_version import APP_EXE_NAME, APP_FILE_VERSION, APP_ID, APP_NAME, APP_PUBLISHER, APP_VERSION
+from dronautix_uploader.core.glb_toolchain import validate_glb_toolchain_for_packaging
 from tools.check_v2_final_packaging_contract import (
     CANDIDATE_DIST_DIR,
     CANDIDATE_OUTPUT_DIR,
@@ -29,6 +30,15 @@ DIST_DIR = CANDIDATE_DIST_DIR
 OUTPUT_DIR = CANDIDATE_OUTPUT_DIR
 ENTRYPOINT = V2_ENTRYPOINT
 PYINSTALLER_NAME = PRODUCTION_PYINSTALLER_NAME
+BUNDLED_TOOL_DIRECTORIES = (
+    os.path.join("bundled_tools", "PotreeConverter"),
+    os.path.join("bundled_tools", "GLBToolchain"),
+)
+GLB_TOOLCHAIN_FILES = (
+    os.path.join("bundled_tools", "GLBToolchain", "toolchain-manifest.v1.json"),
+    os.path.join("bundled_tools", "GLBToolchain", "toolchain-integrity.v1.json"),
+    os.path.join("bundled_tools", "GLBToolchain", "viewer-capabilities.v1.json"),
+)
 INNO_SETUP_CANDIDATES = [
     r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
     r"C:\Program Files\Inno Setup 6\ISCC.exe",
@@ -232,14 +242,20 @@ def validate_required_files() -> None:
         INNO_SETUP_SCRIPT,
         os.path.join("bundled_tools", "PotreeConverter", "PotreeConverter.exe"),
         os.path.join("bundled_tools", "PotreeConverter", "laszip.dll"),
+        *GLB_TOOLCHAIN_FILES,
     )
     missing_files = [file for file in required_files if not os.path.exists(file)]
-    if not missing_files:
-        return
-    print("[FEHLER] Folgende Dateien fehlen:")
-    for file in missing_files:
-        print(f"  - {file}")
-    raise SystemExit(1)
+    if missing_files:
+        print("[FEHLER] Folgende Dateien fehlen:")
+        for file in missing_files:
+            print(f"  - {file}")
+        raise SystemExit(1)
+    glb_toolchain_issues = validate_glb_toolchain_for_packaging()
+    if glb_toolchain_issues:
+        print("[FEHLER] Die gebündelte GLB-Toolchain ist nicht produktionsbereit:")
+        for issue in glb_toolchain_issues:
+            print(f"  - {issue}")
+        raise SystemExit(1)
 
 
 def validate_build_dependencies() -> bool:
@@ -261,7 +277,6 @@ def validate_build_dependencies() -> bool:
 def build_command() -> list[str]:
     data_separator = ";" if sys.platform == "win32" else ":"
     icon_path = os.path.abspath("icon.ico")
-    bundled_tools_path = os.path.abspath("bundled_tools")
     version_info_path = os.path.abspath(VERSION_INFO_FILE)
     return [
         sys.executable,
@@ -276,7 +291,10 @@ def build_command() -> list[str]:
         f"--workpath={BUILD_DIR}",
         f"--specpath={BUILD_DIR}",
         f"--add-data={icon_path}{data_separator}.",
-        f"--add-data={bundled_tools_path}{data_separator}bundled_tools",
+        *[
+            f"--add-data={os.path.abspath(source)}{data_separator}{source}"
+            for source in BUNDLED_TOOL_DIRECTORIES
+        ],
         "--hidden-import=PySide6.QtCore",
         "--hidden-import=PySide6.QtGui",
         "--hidden-import=PySide6.QtWidgets",

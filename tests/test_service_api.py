@@ -67,8 +67,8 @@ class FakeS3Client:
         if Callback:
             Callback(10)
 
-    def copy_object(self, Bucket, CopySource, Key, CacheControl=None, MetadataDirective=None):
-        self.copies.append((Bucket, CopySource, Key, CacheControl, MetadataDirective))
+    def copy_object(self, Bucket, CopySource, Key, CacheControl=None, MetadataDirective=None, ContentType=None):
+        self.copies.append((Bucket, CopySource, Key, CacheControl, MetadataDirective, ContentType))
 
 
 class FakeRepository:

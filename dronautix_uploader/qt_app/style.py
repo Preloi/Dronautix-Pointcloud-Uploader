@@ -238,6 +238,7 @@ QTableCornerButton::section {
 
 /* ---------- Panels / cards ---------- */
 QFrame#DetailPanel,
+QFrame#UploadModelsPanel,
 QFrame#ActivityStatCard,
 QFrame#WizardStepPanel,
 QFrame#LogPanel {
@@ -300,7 +301,8 @@ QFrame#UploadDropZone {
 }
 
 QListWidget#PointcloudList,
-QListWidget#UploadSourceList {
+QListWidget#UploadSourceList,
+QListWidget#UploadModelList {
     background: #1f3150;
     border: 1px solid #2c4163;
     border-radius: 6px;
@@ -315,6 +317,11 @@ QListWidget#PointcloudList::item {
 }
 
 QListWidget#UploadSourceList::item {
+    min-height: 34px;
+    padding: 5px 6px;
+}
+
+QListWidget#UploadModelList::item {
     min-height: 34px;
     padding: 5px 6px;
 }

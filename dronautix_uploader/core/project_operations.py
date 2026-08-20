@@ -11,6 +11,7 @@ from .contracts import (
     CancelCallback,
     OperationCancelledError,
     PointcloudSource,
+    PreparedModelUpload,
     ProgressCallback,
     ProgressEvent,
     ProjectOperationResult,
@@ -231,14 +232,16 @@ def build_new_project_upload(
     project_url: str,
     project_viewer_root: str,
     project_s3_prefix: str,
+    models: tuple[PreparedModelUpload, ...] | list[PreparedModelUpload] = (),
 ) -> PreparedProjectUpload:
     """Build metadata and upload files for a new single- or multi-cloud project."""
 
     source_tuple = tuple(sources)
+    model_tuple = tuple(models)
     if not source_tuple:
         raise ValueError("Bitte mindestens eine Punktwolke auswählen.")
 
-    if len(source_tuple) == 1:
+    if len(source_tuple) == 1 and not model_tuple:
         prepared_cloud = prepare_single_project_upload(
             source_tuple[0],
             project_viewer_root,
@@ -270,13 +273,35 @@ def build_new_project_upload(
         s3_prefix=project_s3_prefix,
         pointcloud_entries=pointcloud_entries,
     )
+    if model_tuple:
+        model_entries = []
+        model_files: list[UploadFile] = []
+        model_ids: set[str] = set()
+        for prepared_model in model_tuple:
+            entry = prepared_model.index_entry
+            if entry is None:
+                raise ValueError("Vorbereitetes GLB-Modell hat keinen Zielpfad.")
+            if entry.id in model_ids:
+                raise ValueError(f"Doppelte Modell-ID: {entry.id}")
+            model_ids.add(entry.id)
+            model_entries.append(entry.as_dict())
+            model_version_prefix = entry.s3_path.rstrip("/")
+            model_files.extend(
+                (
+                    (prepared_model.scene_path, f"{model_version_prefix}/scene.glb"),
+                    (prepared_model.manifest_path, f"{model_version_prefix}/model.json"),
+                )
+            )
+        project_metadata["models"] = model_entries
+    else:
+        model_files = []
     return PreparedProjectUpload(
         project_metadata=project_metadata,
         files_to_upload=tuple(
             file_to_upload
             for cloud in prepared_clouds
             for file_to_upload in cloud.files_to_upload
-        ),
+        ) + tuple(model_files),
     )
 
 
@@ -322,6 +347,23 @@ def compute_orphaned_keys(existing_keys, replacement_keys) -> tuple[str, ...]:
 
 def _normalize_s3_path(value: str) -> str:
     return str(value or "").strip().replace("\\", "/").strip("/")
+
+
+def exclude_model_object_keys(
+    object_keys: tuple[str, ...] | list[str],
+    project_s3_prefix: str,
+) -> tuple[str, ...]:
+    """Keep project-model objects out of pointcloud-only cleanup operations."""
+
+    normalized_root = _normalize_s3_path(project_s3_prefix)
+    if not normalized_root:
+        return tuple(object_keys)
+    models_prefix = f"{normalized_root}/models/"
+    return tuple(
+        key
+        for key in object_keys
+        if not _normalize_s3_path(key).startswith(models_prefix)
+    )
 
 
 def _pointcloud_matches_s3_path(pointcloud: dict[str, Any], target_s3_path: str) -> bool:
@@ -741,7 +783,10 @@ def replace_project_pointclouds(
         _restore_index(index_data, snapshot)
         raise
 
-    orphaned_keys = compute_orphaned_keys(existing_keys, replacement_keys)
+    orphaned_keys = compute_orphaned_keys(
+        exclude_model_object_keys(existing_keys, s3_prefix),
+        replacement_keys,
+    )
     if orphaned_keys:
         try:
             delete_keys(orphaned_keys)
@@ -801,6 +846,22 @@ def replace_single_project_pointcloud(
             if not isinstance(pointclouds, list):
                 if not _project_matches_s3_path(original_project, target_pointcloud_s3_path):
                     raise ValueError(f"Punktwolke mit S3-Pfad '{target_pointcloud_s3_path}' wurde nicht gefunden.")
+                if isinstance(original_project.get("models"), list):
+                    project.clear()
+                    project.update(
+                        build_multi_project_metadata(
+                            project=original_project,
+                            base_viewer_path=base_viewer_path,
+                            s3_prefix=s3_prefix,
+                            pointcloud_entries=[prepared_cloud.index_entry],
+                        )
+                    )
+                    append_project_history(
+                        project,
+                        timestamp,
+                        f"Punktwolke '{original_project.get('projekt', 'Punktwolke')}' wurde ausgetauscht.",
+                    )
+                    return
                 disabled_at = original_project.get("disabled_at")
                 project.clear()
                 project.update(
@@ -872,7 +933,10 @@ def replace_single_project_pointcloud(
         _restore_index(index_data, snapshot)
         raise
 
-    orphaned_keys = compute_orphaned_keys(existing_target_keys, replacement_keys)
+    orphaned_keys = compute_orphaned_keys(
+        exclude_model_object_keys(existing_target_keys, s3_prefix),
+        replacement_keys,
+    )
     if orphaned_keys:
         try:
             delete_keys(orphaned_keys)
@@ -967,6 +1031,46 @@ def remap_project_path(value: str, old_prefix: str, new_prefix: str) -> str:
     return text
 
 
+def _remap_model_project_paths(
+    value: Any,
+    old_viewer_root: str,
+    new_viewer_root: str,
+    old_s3_prefix: str,
+    new_s3_prefix: str,
+) -> Any:
+    """Copy model metadata while rebasing every persisted project path."""
+
+    if isinstance(value, dict):
+        return {
+            key: _remap_model_project_paths(
+                item,
+                old_viewer_root,
+                new_viewer_root,
+                old_s3_prefix,
+                new_s3_prefix,
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _remap_model_project_paths(
+                item,
+                old_viewer_root,
+                new_viewer_root,
+                old_s3_prefix,
+                new_s3_prefix,
+            )
+            for item in value
+        ]
+    if isinstance(value, str):
+        return remap_project_path(
+            remap_project_path(value, old_viewer_root, new_viewer_root),
+            old_s3_prefix,
+            new_s3_prefix,
+        )
+    return copy.deepcopy(value)
+
+
 def build_duplicate_project_metadata(
     *,
     source_project: dict[str, Any],
@@ -1032,6 +1136,16 @@ def build_duplicate_project_metadata(
             remapped_pointclouds.append(updated_cloud)
         duplicated["pointclouds"] = remapped_pointclouds
         duplicated["pointcloud_count"] = len([cloud for cloud in remapped_pointclouds if isinstance(cloud, dict)])
+
+    models = duplicated.get("models")
+    if isinstance(models, list):
+        duplicated["models"] = _remap_model_project_paths(
+            models,
+            old_viewer_root,
+            new_viewer_root,
+            old_s3_prefix,
+            new_s3_prefix,
+        )
 
     return duplicated
 
@@ -1278,6 +1392,7 @@ __all__ = [
     "build_single_project_metadata",
     "collect_upload_file_keys",
     "compute_orphaned_keys",
+    "exclude_model_object_keys",
     "filter_pointcloud_object_keys",
     "apply_project_rename_metadata",
     "build_deleted_project_entry",

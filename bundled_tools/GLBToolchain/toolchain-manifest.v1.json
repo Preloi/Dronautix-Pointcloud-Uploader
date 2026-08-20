@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "toolchain_version": "1.0.0-win32-x64",
+  "bundle_state": "sealed",
+  "platform": {
+    "os": "win32",
+    "arch": "x64"
+  },
+  "integrity_file": "toolchain-integrity.v1.json",
+  "viewer_contract": {
+    "repository": "Preloi/Dronautix-Pointcloud-Viewer-WebGL2",
+    "commit": "b4f7674720746253dbeb6986bfb94c7459502ac3",
+    "source_path": "src/viewer/glb/GLBAssetLoader.js",
+    "source_sha256": "a95a0493ff0bfa28608021a05f6d08ac751aa96f9eb13a537ed0f2f37033d20e"
+  },
+  "tools": [
+    {
+      "id": "node",
+      "version": "22.17.0",
+      "relative_path": "runtime/node.exe",
+      "sha256": "39d45b5933f339d3ebdebd76474893dab5d7da1038920f65cf5bbcf0f20f3636",
+      "source_url": "https://nodejs.org/dist/v22.17.0/win-x64/node.exe"
+    },
+    {
+      "id": "gltf-transform",
+      "version": "4.4.2",
+      "relative_path": "node_modules/@gltf-transform/cli/bin/cli.js",
+      "sha256": "27669e9019431082994bd676fbc03963ebc8ff7da734ee09f56604040cd61ade",
+      "source_url": "https://registry.npmjs.org/@gltf-transform/cli/-/cli-4.4.2.tgz"
+    },
+    {
+      "id": "meshoptimizer",
+      "version": "1.0.1",
+      "relative_path": "node_modules/meshoptimizer/meshopt_encoder.js",
+      "sha256": "e79ba4a73a758f315ab153dc50c389c7b0bea2b5c1fdcfcaa62ad6d0c27cb25c",
+      "source_url": "https://registry.npmjs.org/meshoptimizer/-/meshoptimizer-1.0.1.tgz"
+    },
+    {
+      "id": "draco",
+      "version": "1.5.7",
+      "relative_path": "node_modules/draco3dgltf/draco_encoder_gltf_nodejs.js",
+      "sha256": "8434adecd1446459601763e499be3697546056bca90b286a538ae0483a00845a",
+      "source_url": "https://registry.npmjs.org/draco3dgltf/-/draco3dgltf-1.5.7.tgz"
+    },
+    {
+      "id": "sharp",
+      "version": "0.34.5",
+      "relative_path": "node_modules/sharp/lib/index.js",
+      "sha256": "5e30578a16290fa0855c32fe3d544ce4f26c147de6bad69cffaf7bc416a2919a",
+      "source_url": "https://registry.npmjs.org/sharp/-/sharp-0.34.5.tgz"
+    },
+    {
+      "id": "ktx2_basisu",
+      "version": "4.4.2",
+      "relative_path": "ktx/bin/ktx.exe",
+      "sha256": "9718ed380605db33e18a74621978434cedaf119fa4fe25e142a30cabe02c34ef",
+      "source_url": "https://github.com/KhronosGroup/KTX-Software/releases/download/v4.4.2/KTX-Software-4.4.2-Windows-x64.exe",
+      "source_sha256": "1f323b0fec19794f5e6c0425a61d4b1da396872a10be862d105f4f4b2d2957fe"
+    },
+    {
+      "id": "gltf-validator",
+      "version": "2.0.0-dev.3.10",
+      "relative_path": "node_modules/gltf-validator/index.js",
+      "sha256": "78deff9ea85743e86461c2d14fae76e7fc3ca0432e652f62948066b55fa16f0d",
+      "source_url": "https://registry.npmjs.org/gltf-validator/-/gltf-validator-2.0.0-dev.3.10.tgz"
+    }
+  ],
+  "runners": [
+    {
+      "id": "optimizer",
+      "version": "1.0.0",
+      "relative_path": "runners/optimize-glb.mjs",
+      "sha256": "2a013624ef758ba367a19fbcace5fca6db2529115d1fd7ab3d4700d5db072857"
+    },
+    {
+      "id": "validator",
+      "version": "1.0.0",
+      "relative_path": "runners/validate-glb.mjs",
+      "sha256": "22a9ef4102a92cec7e2111c64d806dc1c5eb92bdd58a872597ca8a5773b71475"
+    },
+    {
+      "id": "decoder",
+      "version": "1.0.0",
+      "relative_path": "runners/decode-glb.mjs",
+      "sha256": "0b9397c30062fbcd7d7e40fce19b7faa72ce0724d0cda837065647911a142ff0"
+    }
+  ]
+}

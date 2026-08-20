@@ -70,6 +70,78 @@ class PointcloudSource:
 
 
 @dataclass(frozen=True)
+class ModelUploadInput:
+    """One selected, natively georeferenced GLB model."""
+
+    source_path: str
+    name: str = ""
+    slug: str = ""
+    model_json_path: str = ""
+
+
+@dataclass(frozen=True)
+class ModelIndexEntry:
+    """The additive ``models[]`` entry written to ``projects_index.json``."""
+
+    id: str
+    name: str
+    viewer_path: str
+    s3_path: str
+    crs: str
+    vertical_crs: str
+    format: Literal["glb"] = "glb"
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "format": self.format,
+            "viewer_path": self.viewer_path,
+            "s3_path": self.s3_path,
+            "crs": self.crs,
+            "vertical_crs": self.vertical_crs,
+        }
+
+
+@dataclass(frozen=True)
+class GLBOptimizationResult:
+    """Outcome of validation and the selected GLB optimization candidate."""
+
+    selected_candidate: str = "original"
+    source_size: int = 0
+    output_size: int = 0
+    original_sha256: str = ""
+    output_sha256: str = ""
+    primitive_count: int = 0
+    triangle_count: int = 0
+    texture_count: int = 0
+    used_fallback: bool = True
+    fallback_reason: str = ""
+    toolchain_versions: dict[str, str] = field(default_factory=dict)
+    control_points: tuple[tuple[float, float, float], ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PreparedModelUpload:
+    """Staged, validated GLB plus its immutable model manifest."""
+
+    model_input: ModelUploadInput
+    name: str
+    slug: str
+    staging_dir: str
+    scene_path: str
+    manifest_path: str
+    original_sha256: str
+    model_to_project: tuple[float, ...]
+    bounds_min: tuple[float, float, float]
+    bounds_max: tuple[float, float, float]
+    crs_info: dict[str, Any]
+    optimization: GLBOptimizationResult
+    index_entry: ModelIndexEntry | None = None
+
+
+@dataclass(frozen=True)
 class UploadRequest:
     sources: tuple[PointcloudSource, ...]
     kunde: str
@@ -81,6 +153,7 @@ class UploadRequest:
     crs_input: str = ""
     vertical_input: str = ""
     overwrite: bool = False
+    model_inputs: tuple[ModelUploadInput, ...] = ()
 
 
 @dataclass(frozen=True)

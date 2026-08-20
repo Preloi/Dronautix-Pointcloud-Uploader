@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 import inspect
+import json
+import os
 
 from .activity_model import (
     ACTION_ALL,
@@ -29,6 +31,11 @@ from .dashboard_settings_model import (
 from dronautix_uploader.core.crs_detection import detect_pointcloud_crs, normalize_crs_value
 from dronautix_uploader.core.crs_service import get_crs_display_value, get_vertical_crs_display_value
 
+from .glb_upload_model import (
+    append_unique_glb_paths,
+    explicit_glb_model_json_pair,
+    format_file_size,
+)
 from .path_drop import mime_data_paths
 from .project_management import (
     ProjectPreview,
@@ -252,7 +259,15 @@ def create_upload_page(
 ):
     """Single-screen upload + local conversion form (no modal, no stepper)."""
 
-    state = {"mode": UPLOAD_MODE_UPLOAD, "running": False, "sources": [], "detected_crs": {}}
+    state = {
+        "mode": UPLOAD_MODE_UPLOAD,
+        "running": False,
+        "sources": [],
+        "detected_crs": {},
+        "models": [],
+        "model_sidecars": {},
+        "model_results": {},
+    }
 
     page = QtWidgets.QWidget()
     page.setObjectName("Page")
@@ -341,6 +356,7 @@ def create_upload_page(
             state["sources"] = seen
         detect_sources_crs()
         render_sources()
+        render_models()
 
     source_handlers = {}
     source_list = _create_source_drop_list(
@@ -373,6 +389,84 @@ def create_upload_page(
     sources_buttons.addWidget(sources_count)
     sources_layout.addLayout(sources_buttons)
     root.addWidget(sources_panel, 1)
+
+    # --- Optional GLB models ----------------------------------------------
+    models_panel = QtWidgets.QFrame()
+    models_panel.setObjectName("UploadModelsPanel")
+    models_layout = QtWidgets.QVBoxLayout(models_panel)
+    models_layout.setContentsMargins(20, 16, 20, 16)
+    models_layout.setSpacing(10)
+    models_header = QtWidgets.QHBoxLayout()
+    models_title = QtWidgets.QLabel("3D-Modelle (optional)")
+    models_title.setObjectName("PanelTitle")
+    models_hint = QtWidgets.QLabel("Nur GLB · nativ X=Ost, Y=Nord, Z=Höhe (m)")
+    models_hint.setObjectName("MutedText")
+    models_header.addWidget(models_title)
+    models_header.addStretch(1)
+    models_header.addWidget(models_hint)
+    models_layout.addLayout(models_header)
+
+    model_handlers = {}
+
+    def model_key(path: str) -> str:
+        return os.path.normcase(os.path.abspath(str(path)))
+
+    def add_models(paths):
+        if state["running"]:
+            return
+        try:
+            sidecar_pair = explicit_glb_model_json_pair(paths)
+        except ValueError as error:
+            show_error(str(error))
+            return
+        if sidecar_pair is not None:
+            model_path, sidecar_path = sidecar_pair
+            state["models"] = list(append_unique_glb_paths(state["models"], (model_path,)))
+            selected_model_path = next(path for path in state["models"] if model_key(path) == model_key(model_path))
+            state["model_sidecars"][model_key(selected_model_path)] = sidecar_path
+            render_models()
+            return
+        unsupported = [
+            str(path)
+            for path in paths
+            if str(path or "").strip() and not str(path).strip().lower().endswith(".glb")
+        ]
+        state["models"] = list(append_unique_glb_paths(state["models"], paths))
+        if unsupported:
+            show_error("3D-Modelle müssen das Format .glb haben.")
+        render_models()
+
+    model_list = _create_source_drop_list(
+        QtCore,
+        QtWidgets,
+        add_models,
+        on_delete=lambda: model_handlers.get("remove", lambda: None)(),
+    )
+    model_list.setObjectName("UploadModelList")
+    model_list.setMinimumHeight(104)
+    model_list.setToolTip("GLB-Dateien hierher ziehen. Markieren und 'Entf' entfernt Modelle.")
+    models_layout.addWidget(model_list)
+
+    models_buttons = QtWidgets.QHBoxLayout()
+    model_files_button = QtWidgets.QPushButton("Dateien")
+    model_files_button.setObjectName("ActionButton")
+    model_files_button.setToolTip("GLB-Modelle auswählen")
+    model_sidecar_button = QtWidgets.QPushButton("Sidecar")
+    model_sidecar_button.setObjectName("UploadModelSidecarButton")
+    model_sidecar_button.setToolTip("Für genau ein markiertes GLB ein explizites model.json zuordnen")
+    model_remove_button = QtWidgets.QPushButton("Entfernen")
+    model_remove_button.setObjectName("ActionButton")
+    model_remove_button.setToolTip("Markierte Modelle entfernen (Entf)")
+    model_count = QtWidgets.QLabel("Keine Modelle")
+    model_count.setObjectName("UploadModelCount")
+    models_buttons.addWidget(model_files_button)
+    models_buttons.addWidget(model_sidecar_button)
+    models_buttons.addWidget(model_remove_button)
+    models_buttons.addStretch(1)
+    models_buttons.addWidget(model_count)
+    models_layout.addLayout(models_buttons)
+
+    root.addWidget(models_panel)
 
     # --- Advanced (collapsible) --------------------------------------------
     advanced_toggle = QtWidgets.QToolButton()
@@ -456,6 +550,7 @@ def create_upload_page(
     phase_specs = (
         ("preparation", "Vorbereitung", "UploadPreparationProgress"),
         ("conversion", "Konvertierung", "UploadConversionProgress"),
+        ("optimization", "Modelle optimieren", "UploadModelOptimizationProgress"),
         ("upload", "Upload", "UploadTransferProgress"),
         ("index", "Projekt speichern", "UploadIndexProgress"),
     )
@@ -561,6 +656,105 @@ def create_upload_page(
                 result[path] = info
         return result
 
+    def project_crs_info():
+        for path in state["sources"]:
+            info = crs_info_for_path(path)
+            if info and (info.get("value") or info.get("projection")):
+                return info
+        return {}
+
+    def model_placement_status() -> str:
+        return "Georeferenzierung aus GLB"
+
+    def render_models():
+        model_list.clear()
+        for path in state["models"]:
+            name = path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] or path
+            status = model_placement_status()
+            result = state["model_results"].get(path, {})
+            optimization_status = str(result.get("optimization_status") or "bereit")
+            output_size = result.get("output_size")
+            result_size = f"{int(output_size)} Bytes" if output_size is not None else "wird ermittelt"
+            sidecar_path = state["model_sidecars"].get(model_key(path), "")
+            sidecar = "model.json" if sidecar_path else "keiner"
+            item = QtWidgets.QListWidgetItem(
+                f"{name}   ·   {format_file_size(path)}   ·   Platzierung: {status}   ·   "
+                f"Sidecar: {sidecar}   ·   Optimierung: {optimization_status}   ·   Ergebnisgröße: {result_size}"
+            )
+            item.setData(QtCore.Qt.UserRole, path)
+            item.setToolTip(path)
+            model_list.addItem(item)
+        count = len(state["models"])
+        model_count.setText("Keine Modelle" if count == 0 else ("1 Modell" if count == 1 else f"{count} Modelle"))
+
+    def remove_selected_models():
+        if state["running"]:
+            return
+        selected = {item.data(QtCore.Qt.UserRole) for item in model_list.selectedItems()}
+        if not selected:
+            return
+        state["models"] = [path for path in state["models"] if path not in selected]
+        for path in selected:
+            state["model_results"].pop(path, None)
+            state["model_sidecars"].pop(model_key(path), None)
+        render_models()
+
+    model_handlers["remove"] = remove_selected_models
+
+    def browse_model_files():
+        paths, _filter = QtWidgets.QFileDialog.getOpenFileNames(
+            page,
+            "GLB-Modelle auswählen",
+            "",
+            "GLB-Modelle (*.glb);;Alle Dateien (*)",
+        )
+        add_models(paths)
+
+    def browse_model_sidecar():
+        selected = model_list.selectedItems()
+        if len(selected) != 1:
+            show_error("Bitte genau ein GLB markieren, bevor ein model.json-Sidecar zugeordnet wird.")
+            return
+        model_path = str(selected[0].data(QtCore.Qt.UserRole) or "")
+        sidecar_path, _filter = QtWidgets.QFileDialog.getOpenFileName(
+            page,
+            "model.json für das markierte GLB auswählen",
+            "",
+            "model.json (model.json);;JSON-Dateien (*.json);;Alle Dateien (*)",
+        )
+        if not sidecar_path:
+            return
+        try:
+            _model_path, verified_sidecar_path = explicit_glb_model_json_pair((model_path, sidecar_path)) or ("", "")
+        except ValueError as error:
+            show_error(str(error))
+            return
+        if not verified_sidecar_path:
+            show_error("Nur eine Datei mit dem Namen model.json kann als Sidecar zugeordnet werden.")
+            return
+        state["model_sidecars"][model_key(model_path)] = verified_sidecar_path
+        render_models()
+
+    def build_model_inputs():
+        """Build native-GLB inputs; coordinates and CRS stay entirely in the data."""
+
+        if state["mode"] != UPLOAD_MODE_UPLOAD:
+            return ()
+        from dronautix_uploader.core.contracts import ModelUploadInput
+
+        if not state["models"]:
+            return ()
+
+        project_crs = project_crs_info()
+        horizontal = str(project_crs.get("value") or project_crs.get("projection") or "")
+        vertical = str(project_crs.get("vertical_crs") or project_crs.get("vertical_epsg") or "")
+        if not horizontal or not vertical:
+            raise ValueError("Projekt-CRS und Höhenbezug der Punktwolke sind für 3D-Modelle erforderlich.")
+        return tuple(
+            ModelUploadInput(source_path=path, model_json_path=state["model_sidecars"].get(model_key(path), ""))
+            for path in state["models"]
+        )
+
     def render_sources():
         source_list.clear()
         for path in state["sources"]:
@@ -583,6 +777,7 @@ def create_upload_page(
             return
         state["sources"] = [path for path in state["sources"] if path not in selected]
         render_sources()
+        render_models()
 
     source_handlers["remove"] = remove_selected_sources
 
@@ -630,7 +825,9 @@ def create_upload_page(
         )
         if is_convert and len(state["sources"]) > 1:
             state["sources"] = state["sources"][-1:]
+        models_panel.setVisible(not is_convert)
         render_sources()
+        render_models()
 
     def read_form() -> UploadFormInputs:
         return UploadFormInputs(
@@ -664,6 +861,10 @@ def create_upload_page(
             files_button,
             folder_button,
             remove_button,
+            model_list,
+            model_files_button,
+            model_sidecar_button,
+            model_remove_button,
             output_input,
             horizontal_crs_input,
             vertical_crs_input,
@@ -684,6 +885,8 @@ def create_upload_page(
             required_phases = {"conversion"} if not is_upload else {"preparation", "upload", "index"}
             if is_upload and needs_conversion:
                 required_phases.add("conversion")
+            if is_upload and state["models"]:
+                required_phases.add("optimization")
             for phase, widgets in phase_rows.items():
                 visible = is_upload or phase == "conversion"
                 for widget in widgets:
@@ -744,6 +947,17 @@ def create_upload_page(
         step = getattr(event, "step", None)
         total = getattr(event, "total_steps", None)
         phase = str(getattr(event, "phase", "") or "")
+        detail = str(getattr(event, "detail", "") or "")
+        if phase == "optimization" and detail.startswith("{"):
+            try:
+                model_result = json.loads(detail)
+            except json.JSONDecodeError:
+                model_result = None
+            if isinstance(model_result, dict):
+                model_path = str(model_result.get("model_path") or "")
+                if model_path in state["models"]:
+                    state["model_results"][model_path] = model_result
+                    render_models()
         if phase in phase_bars:
             phase_bar = phase_bars[phase]
             phase_status = phase_statuses[phase]
@@ -785,8 +999,12 @@ def create_upload_page(
     files_button.clicked.connect(browse_files)
     folder_button.clicked.connect(browse_folder)
     remove_button.clicked.connect(remove_selected_sources)
+    model_files_button.clicked.connect(browse_model_files)
+    model_sidecar_button.clicked.connect(browse_model_sidecar)
+    model_remove_button.clicked.connect(remove_selected_models)
     output_browse.clicked.connect(browse_output)
-    horizontal_crs_input.textChanged.connect(lambda _text: render_sources())
+    horizontal_crs_input.textChanged.connect(lambda _text: (render_sources(), render_models()))
+    vertical_crs_input.textChanged.connect(lambda _text: (render_sources(), render_models()))
     mode_upload_button.clicked.connect(lambda checked=False: apply_mode(UPLOAD_MODE_UPLOAD))
     mode_convert_button.clicked.connect(lambda checked=False: apply_mode(UPLOAD_MODE_CONVERT))
     start_button.clicked.connect(lambda checked=False: on_start() if on_start else None)
@@ -795,6 +1013,7 @@ def create_upload_page(
     prefill_advanced_defaults()
     set_output_row_visible(False)
     render_sources()
+    render_models()
 
     page.read_form = read_form
     page.set_running = set_running
@@ -804,6 +1023,9 @@ def create_upload_page(
     page.show_error = show_error
     page.prefill_advanced_defaults = prefill_advanced_defaults
     page.crs_info_by_source_path = crs_info_by_source_path
+    page.model_inputs = build_model_inputs
+    page.add_model_paths = add_models
+    page.add_source_paths = add_sources
     page.focus_default = lambda: customer_input.setFocus()
     return page
 
