@@ -1071,12 +1071,13 @@ def replace_single_project_model(
         raise
 
     old_prefix = f"{target_path}/"
-    old_keys = tuple(
+    old_candidates = tuple(
         key
         for key in existing_target_keys
         if _normalize_s3_path(key).startswith(old_prefix)
         and _normalize_s3_path(key) not in {uploaded_key for uploaded_key in ledger.as_tuple()}
     )
+    old_keys = _rollback_keys_preserving_indexed_models(old_candidates, index_data)
     if old_keys:
         try:
             delete_keys(old_keys)

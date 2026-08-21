@@ -1282,6 +1282,43 @@ def test_replace_single_project_model_rolls_back_new_package_when_index_save_fai
     assert deleted == [f"{new_prefix}/scene.glb", f"{new_prefix}/model.json"]
 
 
+def test_replace_single_project_model_keeps_old_package_referenced_by_another_project(tmp_path):
+    old_prefix = "pointclouds/kunde/shared/models/fassade/versions/old"
+    shared_model = {
+        "id": "fassade",
+        "name": "Fassade",
+        "format": "glb",
+        "viewer_path": "kunde/shared/models/fassade/versions/old/model.json",
+        "s3_path": old_prefix,
+        "crs": "EPSG:25833",
+        "vertical_crs": "EPSG:7837",
+    }
+    prepared = _prepared_model_upload(tmp_path, model_id="fassade", version="c" * 64)
+    index_data = {
+        "projects": [
+            {"id": "replace-here", "models": [copy.deepcopy(shared_model)]},
+            {"id": "keep-here", "models": [copy.deepcopy(shared_model)]},
+        ]
+    }
+    deleted = []
+
+    result = replace_single_project_model(
+        s3_client=FakeProjectS3Client(),
+        index_data=index_data,
+        project_id="replace-here",
+        prepared_model=prepared,
+        target_model_s3_path=old_prefix,
+        existing_target_keys=(f"{old_prefix}/scene.glb", f"{old_prefix}/model.json"),
+        save_index=lambda _data: True,
+        delete_keys=lambda keys: deleted.extend(keys),
+    )
+
+    assert result.status == "success"
+    assert index_data["projects"][0]["models"][0]["s3_path"] == prepared.index_entry.s3_path
+    assert index_data["projects"][1]["models"] == [shared_model]
+    assert deleted == []
+
+
 def _prepared_model_upload(tmp_path, *, model_id: str, version: str) -> PreparedModelUpload:
     staging = tmp_path / f"staging-{version[:4]}"
     staging.mkdir()
