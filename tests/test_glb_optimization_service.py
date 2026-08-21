@@ -312,6 +312,7 @@ def test_decodes_quantized_position_with_normalized_minmax_sparse_stride_and_nod
 def test_quantized_position_supports_sparse_stride_and_rejects_over_one_millimetre_change(tmp_path):
     source = tmp_path / "quantized.glb"
     source_document, source_binary = quantized_sparse_position_document()
+    source_document["asset"]["extras"]["padding"] = "x" * 1000
     write_glb(source, source_document, binary=source_binary)
 
     class MovedQuantizedCandidate:
@@ -538,6 +539,96 @@ def test_full_triangle_signature_allows_triangle_reordering(tmp_path):
     service._toolchain_status = enabled_status()
     prepared = service.prepare(model_input(source), project_crs_info=PROJECT_CRS, staging_root=tmp_path / "stage")
     assert prepared.optimization.selected_candidate == "reordered"
+    cleanup_prepared_model_uploads((prepared,))
+
+
+def test_candidate_selection_checks_smallest_first_and_reuses_its_inspection(tmp_path, monkeypatch):
+    source = tmp_path / "source.glb"
+    source_document = native_document()
+    source_document["asset"]["extras"]["padding"] = "x" * 4000
+    write_glb(source, source_document)
+
+    class UnsortedCandidates:
+        def optimize_candidates(self, source_path, output_dir, cancel_requested=None):
+            larger = output_dir / "larger.glb"
+            larger_document = native_document()
+            larger_document["asset"]["extras"]["padding"] = "x" * 2000
+            write_glb(larger, larger_document)
+            smallest = output_dir / "smallest.glb"
+            write_glb(smallest, native_document())
+            return (("larger", larger), ("smallest", smallest))
+
+    service = GLBOptimizationService(toolchain=UnsortedCandidates())
+    service._toolchain_status = enabled_status()
+    inspected = []
+    original_inspect = service._inspect_glb
+
+    def record_inspection(path, *args, **kwargs):
+        inspected.append(Path(path).name)
+        return original_inspect(path, *args, **kwargs)
+
+    monkeypatch.setattr(service, "_inspect_glb", record_inspection)
+    prepared = service.prepare(model_input(source), project_crs_info=PROJECT_CRS, staging_root=tmp_path / "stage")
+
+    assert prepared.optimization.selected_candidate == "smallest"
+    assert "smallest.glb" in inspected
+    assert "larger.glb" not in inspected
+    assert "scene.glb" not in inspected
+    cleanup_prepared_model_uploads((prepared,))
+
+
+def test_original_semantic_signature_is_computed_once_for_multiple_rejected_candidates(tmp_path, monkeypatch):
+    source = tmp_path / "source.glb"
+    source_document = native_document()
+    source_document["asset"]["extras"]["padding"] = "x" * 4000
+    write_glb(source, source_document)
+
+    class InvalidCandidates:
+        def optimize_candidates(self, source_path, output_dir, cancel_requested=None):
+            result = []
+            for name in ("changed-a", "changed-b"):
+                candidate = output_dir / f"{name}.glb"
+                document = native_document(materials=[{"name": name}])
+                write_glb(candidate, document)
+                result.append((name, candidate))
+            return tuple(result)
+
+    calls = []
+    original_signature = optimization_module._preservation_signature
+
+    def record_signature(inspection):
+        calls.append(Path(inspection.path).name)
+        return original_signature(inspection)
+
+    monkeypatch.setattr(optimization_module, "_preservation_signature", record_signature)
+    service = GLBOptimizationService(toolchain=InvalidCandidates())
+    service._toolchain_status = enabled_status()
+    prepared = service.prepare(model_input(source), project_crs_info=PROJECT_CRS, staging_root=tmp_path / "stage")
+
+    assert prepared.optimization.selected_candidate == "original"
+    assert calls.count("original.glb") == 1
+    cleanup_prepared_model_uploads((prepared,))
+
+
+def test_textureless_model_skips_ktx2_candidate_validation(tmp_path):
+    source = tmp_path / "source.glb"
+    source_document = native_document()
+    source_document["asset"]["extras"]["padding"] = "x" * 4000
+    write_glb(source, source_document)
+
+    class TexturelessCandidates:
+        def optimize_candidates(self, source_path, output_dir, cancel_requested=None):
+            ktx2 = output_dir / "ktx2.glb"
+            conservative = output_dir / "conservative.glb"
+            write_glb(ktx2, native_document())
+            write_glb(conservative, native_document(extras={"padding": "x" * 100}))
+            return (("ktx2", ktx2), ("conservative", conservative))
+
+    service = GLBOptimizationService(toolchain=TexturelessCandidates())
+    service._toolchain_status = enabled_status()
+    prepared = service.prepare(model_input(source), project_crs_info=PROJECT_CRS, staging_root=tmp_path / "stage")
+
+    assert prepared.optimization.selected_candidate == "conservative"
     cleanup_prepared_model_uploads((prepared,))
 
 

@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from dronautix_uploader.qt_app.project_management import PointcloudPreview, ProjectPreview
+from dronautix_uploader.qt_app.project_management import ModelPreview, PointcloudPreview, ProjectPreview
 from dronautix_uploader.qt_app.project_management_actions import (
     ACTION_DELETE,
     ACTION_DISABLE_LINK,
@@ -12,9 +12,14 @@ from dronautix_uploader.qt_app.project_management_actions import (
     ACTION_RENAME,
     ACTION_REPLACE_ALL_POINTCLOUDS,
     ACTION_REPLACE_SINGLE_POINTCLOUD,
+    ACTION_REPLACE_SINGLE_MODEL,
+    ACTION_ADD_MODELS,
+    ACTION_REMOVE_MODEL,
     ACTION_ADD_POINTCLOUDS,
     ACTION_REMOVE_POINTCLOUD,
+    ACTION_REPAIR_CRS_METADATA,
     POINTCLOUD_REPLACEMENT_SECTION,
+    MODEL_MANAGEMENT_SECTION,
     PROJECT_MANAGEMENT_ACTIONS,
     PROJECT_MANAGEMENT_SECTION,
     CANCELLED_STATUS,
@@ -46,11 +51,15 @@ def test_project_management_action_ids_labels_and_sections_are_stable():
         ACTION_DOWNLOAD,
         ACTION_DISABLE_LINK,
         ACTION_ENABLE_LINK,
+        ACTION_REPAIR_CRS_METADATA,
         ACTION_DELETE,
         ACTION_REPLACE_ALL_POINTCLOUDS,
         ACTION_REPLACE_SINGLE_POINTCLOUD,
         ACTION_ADD_POINTCLOUDS,
         ACTION_REMOVE_POINTCLOUD,
+        ACTION_ADD_MODELS,
+        ACTION_REPLACE_SINGLE_MODEL,
+        ACTION_REMOVE_MODEL,
     )
     assert actions[ACTION_OPEN_LINK].label == "Im Browser öffnen"
     assert actions[ACTION_COPY_LINK].label == "Link kopieren"
@@ -60,14 +69,20 @@ def test_project_management_action_ids_labels_and_sections_are_stable():
     assert actions[ACTION_DISABLE_LINK].label == "Link deaktivieren"
     assert actions[ACTION_ENABLE_LINK].label == "Link aktivieren"
     assert actions[ACTION_DELETE].label == "Projekt löschen"
+    assert actions[ACTION_REPAIR_CRS_METADATA].label == "CRS-Metadaten prüfen/reparieren"
     assert actions[ACTION_REPLACE_ALL_POINTCLOUDS].label == "Alle Punktwolken austauschen"
     assert actions[ACTION_REPLACE_SINGLE_POINTCLOUD].label == "Ausgewählte Punktwolke austauschen"
+    assert actions[ACTION_REPLACE_SINGLE_MODEL].label == "Gewähltes 3D-Modell ersetzen"
+    assert actions[ACTION_ADD_MODELS].label == "3D-Modell hinzufügen"
+    assert actions[ACTION_REMOVE_MODEL].label == "Gewähltes 3D-Modell entfernen"
     assert actions[ACTION_RENAME].section == PROJECT_MANAGEMENT_SECTION
     assert actions[ACTION_REPLACE_SINGLE_POINTCLOUD].section == POINTCLOUD_REPLACEMENT_SECTION
+    assert actions[ACTION_REPLACE_SINGLE_MODEL].section == MODEL_MANAGEMENT_SECTION
     assert actions[ACTION_ADD_POINTCLOUDS].label.startswith("Punktwolke")
     assert actions[ACTION_REMOVE_POINTCLOUD].label.startswith("Ausgew")
     assert PROJECT_MANAGEMENT_SECTION == "Projektverwaltung"
     assert POINTCLOUD_REPLACEMENT_SECTION == "Punktwolkendaten austauschen"
+    assert MODEL_MANAGEMENT_SECTION == "3D-Modelle verwalten"
 
 
 def test_actions_are_unavailable_without_selected_project():
@@ -87,8 +102,10 @@ def test_project_actions_and_replace_all_are_available_for_single_project():
         ACTION_DUPLICATE,
         ACTION_DOWNLOAD,
         ACTION_DISABLE_LINK,
+        ACTION_REPAIR_CRS_METADATA,
         ACTION_DELETE,
         ACTION_REPLACE_ALL_POINTCLOUDS,
+        ACTION_ADD_MODELS,
     }
     assert is_action_available(ACTION_REPLACE_ALL_POINTCLOUDS, project)
     assert not is_action_available(ACTION_REPLACE_SINGLE_POINTCLOUD, project)
@@ -107,10 +124,28 @@ def test_single_replace_requires_concrete_pointcloud_context_for_multi_project()
         ACTION_DUPLICATE,
         ACTION_DOWNLOAD,
         ACTION_DISABLE_LINK,
+        ACTION_REPAIR_CRS_METADATA,
         ACTION_DELETE,
         ACTION_REPLACE_ALL_POINTCLOUDS,
         ACTION_REPLACE_SINGLE_POINTCLOUD,
+        ACTION_ADD_MODELS,
     }
+
+
+def test_glb_replace_requires_concrete_model_context():
+    model = ModelPreview(
+        model_id="fassade",
+        name="Fassade",
+        s3_path="pointclouds/kunde/project/models/fassade/versions/old",
+    )
+    project = _project(_pointcloud("Scan"), models=(model,))
+
+    assert not is_action_available(ACTION_REPLACE_SINGLE_MODEL, project)
+    assert not is_action_available(ACTION_REPLACE_SINGLE_MODEL, project, project.pointclouds[0])
+    assert is_action_available(ACTION_REPLACE_SINGLE_MODEL, project, model)
+    assert not is_action_available(ACTION_REMOVE_MODEL, project)
+    assert is_action_available(ACTION_REMOVE_MODEL, project, model)
+    assert is_action_available(ACTION_ADD_MODELS, project)
 
 
 def test_add_and_remove_require_an_explicit_pointcloud_list_and_removal_needs_a_nonfinal_child_with_s3_path():
@@ -275,7 +310,11 @@ def test_link_state_actions_follow_current_project_status():
     assert is_action_available(ACTION_ENABLE_LINK, disabled_project)
 
 
-def _project(*pointclouds: PointcloudPreview, explicit: bool = False) -> ProjectPreview:
+def _project(
+    *pointclouds: PointcloudPreview,
+    explicit: bool = False,
+    models: tuple[ModelPreview, ...] = (),
+) -> ProjectPreview:
     return ProjectPreview(
         project_id="project-1",
         project="Projekt 1",
@@ -285,6 +324,7 @@ def _project(*pointclouds: PointcloudPreview, explicit: bool = False) -> Project
         link="viewer/projekte/project-1",
         disabled=False,
         pointclouds=pointclouds,
+        models=models,
         s3_path="projects/project-1",
         has_explicit_pointclouds=explicit,
     )

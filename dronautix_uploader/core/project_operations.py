@@ -973,6 +973,328 @@ def replace_single_project_pointcloud(
     )
 
 
+def replace_single_project_model(
+    *,
+    s3_client,
+    index_data: dict[str, Any],
+    project_id: str,
+    prepared_model: PreparedModelUpload,
+    target_model_s3_path: str,
+    existing_target_keys: tuple[str, ...] | list[str],
+    save_index: Callable[[dict[str, Any]], bool],
+    delete_keys: Callable[[tuple[str, ...]], None],
+    on_progress: ProgressCallback | None = None,
+    bucket_name: str = BUCKET_NAME,
+    timestamp: str = "",
+) -> ProjectOperationResult:
+    """Replace one immutable GLB package, then switch its models[] entry."""
+
+    snapshot = copy.deepcopy(index_data)
+    original_project = _project_from_snapshot(snapshot, project_id)
+    models = original_project.get("models")
+    if not isinstance(models, list):
+        raise ValueError("Projekt enthält keine austauschbaren GLB-Modelle.")
+    target_path = _normalize_s3_path(target_model_s3_path)
+    matches = [
+        model
+        for model in models
+        if isinstance(model, dict) and _normalize_s3_path(str(model.get("s3_path", ""))) == target_path
+    ]
+    if len(matches) != 1:
+        raise ValueError("Das ausgewählte GLB konnte nicht eindeutig gefunden werden.")
+    target_model = matches[0]
+    replacement = prepared_model.index_entry
+    if replacement is None:
+        raise ValueError("Das vorbereitete Ersatz-GLB hat keinen Zielpfad.")
+    if replacement.id != str(target_model.get("id", "")).strip():
+        raise ValueError("Die Modell-ID des Ersatz-GLB stimmt nicht mit dem ausgewählten Modell überein.")
+
+    replacement_entry = replacement.as_dict()
+    if "visible" in target_model:
+        replacement_entry["visible"] = target_model["visible"]
+    replacement_prefix = _normalize_s3_path(replacement.s3_path)
+    if replacement_prefix == target_path:
+        return ProjectOperationResult(
+            status="success",
+            project_id=project_id,
+            message="Das ausgewählte GLB ist bereits in diesem Datenstand vorhanden.",
+        )
+
+    files_to_upload = (
+        (prepared_model.scene_path, f"{replacement_prefix}/scene.glb"),
+        (prepared_model.manifest_path, f"{replacement_prefix}/model.json"),
+    )
+    ledger = UploadedKeyLedger()
+    try:
+        upload_files_to_s3(
+            s3_client,
+            files_to_upload,
+            bucket_name=bucket_name,
+            on_progress=on_progress,
+            ledger=ledger,
+            checksum_sha256_keys=tuple(key for _path, key in files_to_upload),
+        )
+        verify_uploaded_model_files(s3_client, files_to_upload, bucket_name=bucket_name)
+
+        def update_project(project: dict[str, Any]) -> None:
+            current_models = project.get("models")
+            if not isinstance(current_models, list):
+                raise ValueError("Projekt enthält keine austauschbaren GLB-Modelle.")
+            replaced = False
+            updated_models = []
+            for model in current_models:
+                if isinstance(model, dict) and _normalize_s3_path(str(model.get("s3_path", ""))) == target_path:
+                    if replaced:
+                        raise ValueError("Das ausgewählte GLB ist im Projekt mehrfach vorhanden.")
+                    updated_models.append(copy.deepcopy(replacement_entry))
+                    replaced = True
+                else:
+                    updated_models.append(copy.deepcopy(model))
+            if not replaced:
+                raise ValueError("Das ausgewählte GLB wurde im Projekt nicht gefunden.")
+            project["models"] = updated_models
+            append_project_history(
+                project,
+                timestamp,
+                f"3D-Modell '{target_model.get('name', replacement.name)}' wurde ausgetauscht.",
+            )
+
+        if not update_project_in_index(index_data, project_id, update_project):
+            raise RuntimeError("Projekt konnte im Index nicht gefunden werden.")
+        if not save_index(index_data):
+            raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
+    except Exception:
+        rollback_keys = _rollback_keys_preserving_indexed_models(ledger.as_tuple(), snapshot)
+        if rollback_keys:
+            delete_keys(rollback_keys)
+        _restore_index(index_data, snapshot)
+        raise
+
+    old_prefix = f"{target_path}/"
+    old_keys = tuple(
+        key
+        for key in existing_target_keys
+        if _normalize_s3_path(key).startswith(old_prefix)
+        and _normalize_s3_path(key) not in {uploaded_key for uploaded_key in ledger.as_tuple()}
+    )
+    if old_keys:
+        try:
+            delete_keys(old_keys)
+        except Exception as error:
+            return ProjectOperationResult(
+                status="partial",
+                project_id=project_id,
+                uploaded_keys=ledger.as_tuple(),
+                orphaned_keys=old_keys,
+                warnings=(f"Alte GLB-Dateien konnten nicht vollständig gelöscht werden: {error}",),
+                message="GLB wurde ausgetauscht; alte Dateien benötigen Cleanup.",
+            )
+
+    return ProjectOperationResult(
+        status="success",
+        project_id=project_id,
+        uploaded_keys=ledger.as_tuple(),
+        deleted_keys=old_keys,
+        message="GLB wurde ausgetauscht.",
+    )
+
+
+def add_project_models(
+    *,
+    s3_client,
+    index_data: dict[str, Any],
+    project_id: str,
+    project_viewer_root: str,
+    project_s3_prefix: str,
+    prepared_models: tuple[PreparedModelUpload, ...] | list[PreparedModelUpload],
+    save_index: Callable[[dict[str, Any]], bool],
+    delete_keys: Callable[[tuple[str, ...]], None],
+    on_progress: ProgressCallback | None = None,
+    bucket_name: str = BUCKET_NAME,
+    timestamp: str = "",
+) -> ProjectOperationResult:
+    """Upload new immutable GLB packages, then append their models[] entries."""
+
+    additions = tuple(prepared_models)
+    if not additions:
+        raise ValueError("Mindestens ein vorbereitetes GLB-Modell ist erforderlich.")
+    snapshot = copy.deepcopy(index_data)
+    original_project = _project_from_snapshot(snapshot, project_id)
+    existing_models = original_project.get("models", [])
+    if not isinstance(existing_models, list):
+        raise ValueError("Projekt enthält ungültige models[]-Metadaten.")
+    model_ids = {
+        str(model.get("id", "")).strip()
+        for model in existing_models
+        if isinstance(model, dict) and str(model.get("id", "")).strip()
+    }
+    model_entries: list[dict[str, Any]] = []
+    files_to_upload: list[UploadFile] = []
+    from .glb_optimization_service import build_model_index_entry
+
+    for prepared_model in additions:
+        entry = prepared_model.index_entry
+        expected_entry = build_model_index_entry(
+            prepared_model,
+            project_viewer_root=project_viewer_root,
+            project_s3_prefix=project_s3_prefix,
+        )
+        if entry is None or entry != expected_entry:
+            raise ValueError("GLB-Upload abgebrochen: Modellpfad und data_version stimmen nicht überein.")
+        if not entry.id or entry.id in model_ids:
+            raise ValueError(f"Doppelte Modell-ID: {entry.id}")
+        model_ids.add(entry.id)
+        model_entries.append(entry.as_dict())
+        prefix = entry.s3_path.rstrip("/")
+        files_to_upload.extend(
+            (
+                (prepared_model.scene_path, f"{prefix}/scene.glb"),
+                (prepared_model.manifest_path, f"{prefix}/model.json"),
+            )
+        )
+
+    upload_plan = PreparedProjectUpload(
+        project_metadata={
+            "viewer_path": project_viewer_root,
+            "s3_path": project_s3_prefix,
+            "models": model_entries,
+        },
+        files_to_upload=tuple(files_to_upload),
+    )
+    _validate_prepared_project_model_paths(upload_plan)
+    model_files = _model_files_to_verify(upload_plan)
+    ledger = UploadedKeyLedger()
+    try:
+        upload_files_to_s3(
+            s3_client,
+            model_files,
+            bucket_name=bucket_name,
+            on_progress=on_progress,
+            ledger=ledger,
+            checksum_sha256_keys=tuple(key for _path, key in model_files),
+        )
+        verify_uploaded_model_files(s3_client, model_files, bucket_name=bucket_name)
+
+        def update_project(project: dict[str, Any]) -> None:
+            current_models = project.get("models", [])
+            if not isinstance(current_models, list):
+                raise ValueError("Projekt enthält ungültige models[]-Metadaten.")
+            current_ids = {
+                str(model.get("id", "")).strip()
+                for model in current_models
+                if isinstance(model, dict) and str(model.get("id", "")).strip()
+            }
+            if current_ids.intersection(entry["id"] for entry in model_entries):
+                raise ValueError("Mindestens eine Modell-ID ist im Projekt bereits vorhanden.")
+            project["models"] = [*copy.deepcopy(current_models), *copy.deepcopy(model_entries)]
+            names = [entry["name"] for entry in model_entries]
+            message = (
+                f"3D-Modell '{names[0]}' wurde hinzugefügt."
+                if len(names) == 1
+                else f"{len(names)} 3D-Modelle wurden hinzugefügt: {', '.join(names)}."
+            )
+            append_project_history(project, timestamp, message)
+
+        if not update_project_in_index(index_data, project_id, update_project):
+            raise RuntimeError("Projekt konnte im Index nicht gefunden werden.")
+        if not save_index(index_data):
+            raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
+    except Exception:
+        rollback_keys = _rollback_keys_preserving_indexed_models(ledger.as_tuple(), snapshot)
+        if rollback_keys:
+            delete_keys(rollback_keys)
+        _restore_index(index_data, snapshot)
+        raise
+
+    return ProjectOperationResult(
+        status="success",
+        project_id=project_id,
+        uploaded_keys=ledger.as_tuple(),
+        message="3D-Modell wurde hinzugefügt." if len(model_entries) == 1 else "3D-Modelle wurden hinzugefügt.",
+    )
+
+
+def remove_project_model(
+    *,
+    index_data: dict[str, Any],
+    project_id: str,
+    target_model_s3_path: str,
+    existing_target_keys: tuple[str, ...] | list[str],
+    save_index: Callable[[dict[str, Any]], bool],
+    delete_keys: Callable[[tuple[str, ...]], None],
+    timestamp: str = "",
+) -> ProjectOperationResult:
+    """Remove one models[] entry before deleting its unreferenced immutable package."""
+
+    snapshot = copy.deepcopy(index_data)
+    original_project = _project_from_snapshot(snapshot, project_id)
+    models = original_project.get("models")
+    if not isinstance(models, list):
+        raise ValueError("Projekt enthält keine entfernbaren GLB-Modelle.")
+    target_path = _normalize_s3_path(target_model_s3_path)
+    matches = [
+        model
+        for model in models
+        if isinstance(model, dict) and _normalize_s3_path(str(model.get("s3_path", ""))) == target_path
+    ]
+    if len(matches) != 1:
+        raise ValueError("Das ausgewählte GLB konnte nicht eindeutig gefunden werden.")
+    target_model = matches[0]
+    target_name = str(target_model.get("name", "3D-Modell")).strip() or "3D-Modell"
+
+    try:
+        def update_project(project: dict[str, Any]) -> None:
+            current_models = project.get("models")
+            if not isinstance(current_models, list):
+                raise ValueError("Projekt enthält keine entfernbaren GLB-Modelle.")
+            remaining = [
+                copy.deepcopy(model)
+                for model in current_models
+                if not (
+                    isinstance(model, dict)
+                    and _normalize_s3_path(str(model.get("s3_path", ""))) == target_path
+                )
+            ]
+            if len(remaining) != len(current_models) - 1:
+                raise ValueError("Das ausgewählte GLB wurde nicht eindeutig im Projekt gefunden.")
+            project["models"] = remaining
+            append_project_history(project, timestamp, f"3D-Modell '{target_name}' wurde entfernt.")
+
+        if not update_project_in_index(index_data, project_id, update_project):
+            raise RuntimeError("Projekt konnte im Index nicht gefunden werden.")
+        if not save_index(index_data):
+            raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
+    except Exception:
+        _restore_index(index_data, snapshot)
+        raise
+
+    target_prefix = f"{target_path}/"
+    candidate_keys = tuple(
+        key
+        for key in existing_target_keys
+        if _normalize_s3_path(key) == target_path or _normalize_s3_path(key).startswith(target_prefix)
+    )
+    target_keys = _rollback_keys_preserving_indexed_models(candidate_keys, index_data)
+    if target_keys:
+        try:
+            delete_keys(target_keys)
+        except Exception as error:
+            return ProjectOperationResult(
+                status="partial",
+                project_id=project_id,
+                orphaned_keys=target_keys,
+                warnings=(f"GLB-Dateien konnten nicht vollständig gelöscht werden: {error}",),
+                message="Modell wurde aus dem Projekt entfernt; S3-Dateien benötigen Cleanup.",
+            )
+
+    return ProjectOperationResult(
+        status="success",
+        project_id=project_id,
+        deleted_keys=target_keys,
+        message="3D-Modell wurde entfernt.",
+    )
+
+
 def upload_new_project(
     *,
     s3_client,
@@ -1122,7 +1444,10 @@ def _rollback_keys_preserving_indexed_models(
         for project in index_snapshot.get(section, ()):
             if not isinstance(project, dict):
                 continue
-            for model in project.get("models", ()):
+            models = project.get("models", ())
+            if not isinstance(models, list):
+                continue
+            for model in models:
                 if isinstance(model, dict):
                     prefix = _normalize_s3_path(str(model.get("s3_path", "")))
                     if prefix:
@@ -1522,6 +1847,9 @@ __all__ = [
     "remap_project_path",
     "replace_project_pointclouds",
     "replace_single_project_pointcloud",
+    "replace_single_project_model",
+    "add_project_models",
+    "remove_project_model",
     "remove_project_pointcloud",
     "resolve_unique_multi_project_child",
     "upload_new_project",

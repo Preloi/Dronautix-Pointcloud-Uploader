@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import json
+import math
 import os
 from pathlib import Path
 import shutil
+import struct
 import tempfile
 from typing import Any, Callable
 from uuid import uuid4
@@ -37,6 +40,7 @@ from .s3_service import delete_s3_objects
 
 GLB_UPLOAD_STAGING_ROOT_NAME = "dronautix_glb_upload"
 GLB_UPLOAD_RUN_TEMP_PREFIX = ".glb-upload-run-"
+MODEL_POINTCLOUD_BOUNDS_TOLERANCE_METERS = 1.0
 
 
 @dataclass(frozen=True)
@@ -152,6 +156,7 @@ class UploadWorkflowService:
         on_progress: ProgressCallback | None = None,
         converter_runner: ConverterRunner | None = None,
         cancel_requested: CancelCallback | None = None,
+        confirm_spatial_warning: Callable[[str], bool] | None = None,
     ):
         if not request.kunde.strip():
             raise ValueError("Kunde ist fuer den Upload erforderlich.")
@@ -198,6 +203,14 @@ class UploadWorkflowService:
                     on_progress=guarded_progress,
                     cancel_requested=cancel_requested,
                 )
+                spatial_warning = build_model_pointcloud_spatial_warning(prepared_sources, prepared_models)
+                if spatial_warning:
+                    _emit(on_progress, ProgressEvent(kind="warning", message=spatial_warning, phase="validation"))
+                    if confirm_spatial_warning is None or not confirm_spatial_warning(spatial_warning):
+                        return UploadResult(
+                            status="cancelled",
+                            message="Upload nicht gestartet: 3D-Modelle liegen außerhalb der Punktwolke.",
+                        )
             prepared_upload = build_new_project_upload(
                 sources=prepared_sources,
                 timestamp=self.timestamp_factory(),
@@ -276,11 +289,128 @@ def _normalize_path_key(path: str) -> str:
     return os.path.abspath(str(path or "")).casefold()
 
 
+def build_model_pointcloud_spatial_warning(prepared_sources, prepared_models) -> str:
+    """Describe models whose project bounds do not touch any pointcloud bounds."""
+
+    pointcloud_bounds = tuple(
+        bounds
+        for source in prepared_sources
+        if (bounds := _read_pointcloud_bounds(Path(source.source_path))) is not None
+    )
+    return build_model_pointcloud_spatial_warning_for_bounds(pointcloud_bounds, prepared_models)
+
+
+def build_model_pointcloud_spatial_warning_for_bounds(pointcloud_bounds, prepared_models) -> str:
+    """Describe models whose project bounds do not touch any supplied cloud bounds."""
+
+    pointcloud_bounds = tuple(bounds for bounds in pointcloud_bounds if _validated_bounds(bounds) is not None)
+    if not pointcloud_bounds:
+        return ""
+
+    distant_models: list[tuple[str, float]] = []
+    for model in prepared_models:
+        model_bounds = _validated_bounds((model.bounds_min, model.bounds_max))
+        if model_bounds is None:
+            continue
+        distance = min(_horizontal_bounds_distance(model_bounds, bounds) for bounds in pointcloud_bounds)
+        if distance > MODEL_POINTCLOUD_BOUNDS_TOLERANCE_METERS:
+            distant_models.append((str(model.name or model.slug or "3D-Modell"), distance))
+    if not distant_models:
+        return ""
+
+    details = "\n".join(f"• {name}: nächster Abstand ca. {_format_distance(distance)}" for name, distance in distant_models)
+    return (
+        "Die folgenden 3D-Modelle liegen vollständig außerhalb aller ausgewählten Punktwolken:\n"
+        f"{details}\n\n"
+        "Prüfe, ob die passenden Punktwolken und GLBs ausgewählt wurden."
+    )
+
+
+def _read_pointcloud_bounds(path: Path):
+    if path.is_dir():
+        for filename in ("metadata.json", "cloud.js"):
+            candidate = path / filename
+            if not candidate.is_file():
+                continue
+            try:
+                text = candidate.read_text(encoding="utf-8").strip()
+                if filename == "cloud.js" and text.startswith("cloud.js"):
+                    text = text[len("cloud.js") :].strip().lstrip("=").strip().rstrip(";").strip()
+                document = json.loads(text)
+                bounds = _bounds_from_potree_document(document)
+                if bounds is not None:
+                    return bounds
+            except (OSError, ValueError, TypeError):
+                continue
+        return None
+    try:
+        with path.open("rb") as stream:
+            header = stream.read(227)
+    except OSError:
+        return None
+    if len(header) < 227 or header[:4] != b"LASF":
+        return None
+    max_x, min_x, max_y, min_y, max_z, min_z = struct.unpack_from("<6d", header, 179)
+    return _validated_bounds(((min_x, min_y, min_z), (max_x, max_y, max_z)))
+
+
+def _bounds_from_potree_document(document):
+    if not isinstance(document, dict):
+        return None
+    for key in ("tightBoundingBox", "boundingBox"):
+        value = document.get(key)
+        if not isinstance(value, dict):
+            continue
+        minimum = value.get("min")
+        maximum = value.get("max")
+        if isinstance(minimum, dict) and isinstance(maximum, dict):
+            minimum = tuple(minimum.get(axis) for axis in "xyz")
+            maximum = tuple(maximum.get(axis) for axis in "xyz")
+        if minimum is None or maximum is None:
+            minimum = tuple(value.get(name) for name in ("lx", "ly", "lz"))
+            maximum = tuple(value.get(name) for name in ("ux", "uy", "uz"))
+        bounds = _validated_bounds((minimum, maximum))
+        if bounds is not None:
+            return bounds
+    return None
+
+
+def _validated_bounds(bounds):
+    try:
+        minimum, maximum = tuple(tuple(float(value) for value in point) for point in bounds)
+    except (TypeError, ValueError):
+        return None
+    if len(minimum) != 3 or len(maximum) != 3:
+        return None
+    if not all(math.isfinite(value) for value in (*minimum, *maximum)):
+        return None
+    if any(lower > upper for lower, upper in zip(minimum, maximum, strict=True)):
+        return None
+    return minimum, maximum
+
+
+def _horizontal_bounds_distance(first, second) -> float:
+    gaps = (
+        max(second[0][axis] - first[1][axis], first[0][axis] - second[1][axis], 0.0)
+        for axis in range(2)
+    )
+    return math.sqrt(sum(gap * gap for gap in gaps))
+
+
+def _format_distance(distance: float) -> str:
+    if distance >= 1000.0:
+        return f"{distance / 1000.0:.1f} km".replace(".", ",")
+    return f"{distance:.0f} m"
+
+
 __all__ = [
     "GLB_UPLOAD_STAGING_ROOT_NAME",
     "GLB_UPLOAD_RUN_TEMP_PREFIX",
+    "MODEL_POINTCLOUD_BOUNDS_TOLERANCE_METERS",
     "NewProjectUploadWorkflowRequest",
     "UploadWorkflowService",
+    "build_model_pointcloud_spatial_warning",
+    "build_model_pointcloud_spatial_warning_for_bounds",
     "cleanup_glb_upload_run_staging_root",
     "cleanup_prepared_glb_staging_dirs",
     "create_glb_upload_run_staging_root",

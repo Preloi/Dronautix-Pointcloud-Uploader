@@ -80,6 +80,17 @@ class PointcloudPreview:
 
 
 @dataclass(frozen=True)
+class ModelPreview:
+    model_id: str
+    name: str
+    s3_path: str
+    viewer_path: str = ""
+    crs: str = ""
+    vertical_crs: str = ""
+    format: str = "glb"
+
+
+@dataclass(frozen=True)
 class ProjectPreview:
     project_id: str
     project: str
@@ -89,6 +100,7 @@ class ProjectPreview:
     link: str
     disabled: bool
     pointclouds: tuple[PointcloudPreview, ...]
+    models: tuple[ModelPreview, ...] = ()
     created: str = DATUM_PLACEHOLDER
     s3_path: str = ""
     viewer_path: str = ""
@@ -139,6 +151,7 @@ def make_project_preview(project: dict[str, Any], disabled: bool) -> ProjectPrev
         link=str(project.get("link", "")).strip(),
         disabled=bool(disabled),
         pointclouds=pointclouds,
+        models=tuple(_make_model_previews(project)),
         created=format_project_datum(created_at),
         s3_path=str(project.get("s3_path", "")).strip(),
         viewer_path=str(project.get("viewer_path", "")).strip(),
@@ -304,6 +317,32 @@ def _make_pointcloud_previews(project: dict[str, Any]) -> list[PointcloudPreview
             viewer_path=str(project.get("viewer_path", "")).strip(),
         )
     ]
+
+
+def _make_model_previews(project: dict[str, Any]) -> list[ModelPreview]:
+    models = project.get("models")
+    if not isinstance(models, list):
+        return []
+    previews = []
+    for index, model in enumerate(models, start=1):
+        if not isinstance(model, dict):
+            continue
+        model_id = str(model.get("id", "")).strip()
+        s3_path = str(model.get("s3_path", "")).strip().rstrip("/")
+        if not model_id or not s3_path:
+            continue
+        previews.append(
+            ModelPreview(
+                model_id=model_id,
+                name=str(model.get("name", "")).strip() or f"3D-Modell {index}",
+                format=str(model.get("format", "")).strip().lower() or "glb",
+                viewer_path=str(model.get("viewer_path", "")).strip(),
+                s3_path=s3_path,
+                crs=str(model.get("crs", "")).strip(),
+                vertical_crs=str(model.get("vertical_crs", "")).strip(),
+            )
+        )
+    return previews
 
 
 def _get_pointcloud_crs_label(pointcloud: dict[str, Any]) -> str:

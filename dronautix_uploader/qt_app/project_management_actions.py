@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .project_management import PointcloudPreview, ProjectPreview
+from .project_management import ModelPreview, PointcloudPreview, ProjectPreview
 
 
 ACTION_DUPLICATE = "duplicate"
@@ -18,12 +18,17 @@ ACTION_COPY_LINK = "copy_link"
 ACTION_RENAME = "rename"
 ACTION_REPLACE_ALL_POINTCLOUDS = "replace_all_pointclouds"
 ACTION_REPLACE_SINGLE_POINTCLOUD = "replace_single_pointcloud"
+ACTION_REPLACE_SINGLE_MODEL = "replace_single_model"
+ACTION_ADD_MODELS = "add_models"
+ACTION_REMOVE_MODEL = "remove_model"
 ACTION_ADD_POINTCLOUDS = "add_pointclouds"
 ACTION_REMOVE_POINTCLOUD = "remove_pointcloud"
+ACTION_REPAIR_CRS_METADATA = "repair_crs_metadata"
 
 PROJECT_MANAGEMENT_SECTION = "Projektverwaltung"
 POINTCLOUD_REPLACEMENT_SECTION = "Punktwolkendaten austauschen"
 POINTCLOUD_MANAGEMENT_SECTION = "Punktwolken verwalten"
+MODEL_MANAGEMENT_SECTION = "3D-Modelle verwalten"
 
 SUCCESS_STATUS = "success"
 PARTIAL_STATUS = "partial"
@@ -82,6 +87,11 @@ PROJECT_MANAGEMENT_ACTIONS = (
     ProjectManagementAction(ACTION_DOWNLOAD, "Projekt herunterladen", PROJECT_MANAGEMENT_SECTION),
     ProjectManagementAction(ACTION_DISABLE_LINK, "Link deaktivieren", PROJECT_MANAGEMENT_SECTION),
     ProjectManagementAction(ACTION_ENABLE_LINK, "Link aktivieren", PROJECT_MANAGEMENT_SECTION),
+    ProjectManagementAction(
+        ACTION_REPAIR_CRS_METADATA,
+        "CRS-Metadaten prüfen/reparieren",
+        PROJECT_MANAGEMENT_SECTION,
+    ),
     ProjectManagementAction(ACTION_DELETE, "Projekt löschen", PROJECT_MANAGEMENT_SECTION),
     ProjectManagementAction(
         ACTION_REPLACE_ALL_POINTCLOUDS,
@@ -103,6 +113,21 @@ PROJECT_MANAGEMENT_ACTIONS = (
         "Ausgewählte Punktwolke entfernen",
         POINTCLOUD_MANAGEMENT_SECTION,
     ),
+    ProjectManagementAction(
+        ACTION_ADD_MODELS,
+        "3D-Modell hinzufügen",
+        MODEL_MANAGEMENT_SECTION,
+    ),
+    ProjectManagementAction(
+        ACTION_REPLACE_SINGLE_MODEL,
+        "Gewähltes 3D-Modell ersetzen",
+        MODEL_MANAGEMENT_SECTION,
+    ),
+    ProjectManagementAction(
+        ACTION_REMOVE_MODEL,
+        "Gewähltes 3D-Modell entfernen",
+        MODEL_MANAGEMENT_SECTION,
+    ),
 )
 PROJECT_MANAGEMENT_ACTION_BY_ID = {action.action_id: action for action in PROJECT_MANAGEMENT_ACTIONS}
 
@@ -114,15 +139,15 @@ def action_by_id(action_id: str) -> ProjectManagementAction:
 def is_action_available(
     action_id: str,
     project: ProjectPreview | None,
-    pointcloud: PointcloudPreview | None = None,
+    resource: PointcloudPreview | ModelPreview | None = None,
 ) -> bool:
-    return action_availability(action_id, project, pointcloud).available
+    return action_availability(action_id, project, resource).available
 
 
 def action_availability(
     action_id: str,
     project: ProjectPreview | None,
-    pointcloud: PointcloudPreview | None = None,
+    resource: PointcloudPreview | ModelPreview | None = None,
 ) -> ActionAvailability:
     action = action_by_id(action_id)
 
@@ -140,14 +165,16 @@ def action_availability(
         return ActionAvailability(action, False, "Projekt-Link ist bereits deaktiviert.")
     if action_id == ACTION_ENABLE_LINK and not project.disabled:
         return ActionAvailability(action, False, "Projekt-Link ist bereits aktiv.")
-    if action_id == ACTION_REPLACE_SINGLE_POINTCLOUD and pointcloud is None:
+    if action_id == ACTION_REPLACE_SINGLE_POINTCLOUD and not isinstance(resource, PointcloudPreview):
         return ActionAvailability(action, False, "Keine konkrete Punktwolke ausgewählt.")
+    if action_id in {ACTION_REPLACE_SINGLE_MODEL, ACTION_REMOVE_MODEL} and not isinstance(resource, ModelPreview):
+        return ActionAvailability(action, False, "Kein konkretes GLB ausgewählt.")
     if action_id in {ACTION_ADD_POINTCLOUDS, ACTION_REMOVE_POINTCLOUD} and not project.has_explicit_pointclouds:
         return ActionAvailability(action, False, "Nur Projekte mit expliziter pointclouds[]-Liste können Punktwolken verwalten.")
     if action_id == ACTION_REMOVE_POINTCLOUD:
-        if pointcloud is None:
+        if not isinstance(resource, PointcloudPreview):
             return ActionAvailability(action, False, "Keine konkrete Punktwolke ausgewählt.")
-        if not pointcloud.s3_path:
+        if not resource.s3_path:
             return ActionAvailability(action, False, "Ausgewählte Punktwolke hat keinen S3-Pfad.")
         if len(project.pointclouds) <= 1:
             return ActionAvailability(action, False, "Die letzte Punktwolke eines Projekts kann nicht entfernt werden.")
@@ -156,12 +183,12 @@ def action_availability(
 
 def available_actions(
     project: ProjectPreview | None,
-    pointcloud: PointcloudPreview | None = None,
+    resource: PointcloudPreview | ModelPreview | None = None,
 ) -> tuple[ProjectManagementAction, ...]:
     return tuple(
         availability.action
         for availability in (
-            action_availability(action.action_id, project, pointcloud) for action in PROJECT_MANAGEMENT_ACTIONS
+            action_availability(action.action_id, project, resource) for action in PROJECT_MANAGEMENT_ACTIONS
         )
         if availability.available
     )
@@ -252,13 +279,18 @@ __all__ = [
     "ACTION_RENAME",
     "ACTION_REPLACE_ALL_POINTCLOUDS",
     "ACTION_REPLACE_SINGLE_POINTCLOUD",
+    "ACTION_REPLACE_SINGLE_MODEL",
+    "ACTION_ADD_MODELS",
+    "ACTION_REMOVE_MODEL",
     "ACTION_ADD_POINTCLOUDS",
     "ACTION_REMOVE_POINTCLOUD",
+    "ACTION_REPAIR_CRS_METADATA",
     "CANCELLED_STATUS",
     "FAILED_STATUS",
     "PARTIAL_STATUS",
     "POINTCLOUD_REPLACEMENT_SECTION",
     "POINTCLOUD_MANAGEMENT_SECTION",
+    "MODEL_MANAGEMENT_SECTION",
     "PROJECT_MANAGEMENT_ACTIONS",
     "PROJECT_MANAGEMENT_ACTION_BY_ID",
     "PROJECT_MANAGEMENT_SECTION",

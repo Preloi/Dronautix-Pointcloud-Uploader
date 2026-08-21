@@ -6,7 +6,14 @@ import os
 import pytest
 
 from dronautix_uploader.core.constants import S3_DISABLED_PROJECTS_KEY
-from dronautix_uploader.core.contracts import PointcloudSource, ProgressEvent
+from dronautix_uploader.core.contracts import (
+    GLBOptimizationResult,
+    ModelIndexEntry,
+    ModelUploadInput,
+    PointcloudSource,
+    PreparedModelUpload,
+    ProgressEvent,
+)
 from dronautix_uploader.core.project_operations import PreparedProjectUpload
 from dronautix_uploader.core.project_operations import (
     add_project_pointclouds,
@@ -22,6 +29,9 @@ from dronautix_uploader.core.project_operations import (
     ProjectDownloadCancelledError,
     replace_project_pointclouds,
     replace_single_project_pointcloud,
+    replace_single_project_model,
+    add_project_models,
+    remove_project_model,
     remove_project_pointcloud,
     upload_new_project,
 )
@@ -1162,6 +1172,308 @@ def test_replace_single_project_pointcloud_supports_disabled_legacy_single_proje
     assert "pointclouds" not in project
     assert project["crs"] == "EPSG:4326"
     assert deleted_keys == ["pointclouds/kunde/project/projekt/old.bin"]
+
+
+def test_replace_single_project_model_switches_only_selected_model_after_verified_upload(tmp_path):
+    old_prefix = "pointclouds/kunde/project/projekt/models/fassade/versions/old"
+    new_version = "a" * 64
+    new_prefix = f"pointclouds/kunde/project/projekt/models/fassade/versions/{new_version}"
+    prepared = _prepared_model_upload(tmp_path, model_id="fassade", version=new_version)
+    original_other = {
+        "id": "dach",
+        "name": "Dach",
+        "format": "glb",
+        "viewer_path": "kunde/project/projekt/models/dach/versions/keep/model.json",
+        "s3_path": "pointclouds/kunde/project/projekt/models/dach/versions/keep",
+        "crs": "EPSG:25833",
+        "vertical_crs": "EPSG:7837",
+    }
+    index_data = {
+        "projects": [
+            {
+                "id": "project",
+                "kunde": "Kunde",
+                "projekt": "Projekt",
+                "models": [
+                    {
+                        "id": "fassade",
+                        "name": "Fassade",
+                        "format": "glb",
+                        "viewer_path": "kunde/project/projekt/models/fassade/versions/old/model.json",
+                        "s3_path": old_prefix,
+                        "crs": "EPSG:25833",
+                        "vertical_crs": "EPSG:7837",
+                        "visible": False,
+                    },
+                    copy.deepcopy(original_other),
+                ],
+            }
+        ]
+    }
+    client = FakeProjectS3Client()
+    deleted = []
+
+    result = replace_single_project_model(
+        s3_client=client,
+        index_data=index_data,
+        project_id="project",
+        prepared_model=prepared,
+        target_model_s3_path=old_prefix,
+        existing_target_keys=(f"{old_prefix}/scene.glb", f"{old_prefix}/model.json"),
+        save_index=lambda _data: True,
+        delete_keys=lambda keys: deleted.extend(keys),
+        timestamp="2026-08-20T12:00:00",
+    )
+
+    models = index_data["projects"][0]["models"]
+    assert result.status == "success"
+    assert [key for _bucket, key, _args in client.uploads] == [
+        f"{new_prefix}/scene.glb",
+        f"{new_prefix}/model.json",
+    ]
+    assert all(upload[2]["ChecksumAlgorithm"] == "SHA256" for upload in client.uploads)
+    assert models[0]["id"] == "fassade"
+    assert models[0]["name"] == "Fassade"
+    assert models[0]["s3_path"] == new_prefix
+    assert models[0]["visible"] is False
+    assert models[1] == original_other
+    assert deleted == [f"{old_prefix}/scene.glb", f"{old_prefix}/model.json"]
+    assert index_data["projects"][0]["history"][-1]["message"] == "3D-Modell 'Fassade' wurde ausgetauscht."
+
+
+def test_replace_single_project_model_rolls_back_new_package_when_index_save_fails(tmp_path):
+    old_prefix = "pointclouds/kunde/project/projekt/models/fassade/versions/old"
+    prepared = _prepared_model_upload(tmp_path, model_id="fassade", version="b" * 64)
+    index_data = {
+        "projects": [
+            {
+                "id": "project",
+                "models": [
+                    {
+                        "id": "fassade",
+                        "name": "Fassade",
+                        "format": "glb",
+                        "viewer_path": "kunde/project/projekt/models/fassade/versions/old/model.json",
+                        "s3_path": old_prefix,
+                        "crs": "EPSG:25833",
+                        "vertical_crs": "EPSG:7837",
+                    }
+                ],
+            }
+        ]
+    }
+    original = copy.deepcopy(index_data)
+    deleted = []
+
+    with pytest.raises(RuntimeError, match="Index"):
+        replace_single_project_model(
+            s3_client=FakeProjectS3Client(),
+            index_data=index_data,
+            project_id="project",
+            prepared_model=prepared,
+            target_model_s3_path=old_prefix,
+            existing_target_keys=(f"{old_prefix}/scene.glb", f"{old_prefix}/model.json"),
+            save_index=lambda _data: False,
+            delete_keys=lambda keys: deleted.extend(keys),
+        )
+
+    new_prefix = prepared.index_entry.s3_path
+    assert index_data == original
+    assert deleted == [f"{new_prefix}/scene.glb", f"{new_prefix}/model.json"]
+
+
+def _prepared_model_upload(tmp_path, *, model_id: str, version: str) -> PreparedModelUpload:
+    staging = tmp_path / f"staging-{version[:4]}"
+    staging.mkdir()
+    scene = staging / "scene.glb"
+    manifest = staging / "model.json"
+    scene.write_bytes(b"replacement-glb")
+    manifest.write_text('{"entrypoint":"scene.glb"}', encoding="utf-8")
+    relative = f"models/{model_id}/versions/{version}"
+    return PreparedModelUpload(
+        model_input=ModelUploadInput(str(scene), name="Fassade", slug=model_id),
+        name="Fassade",
+        slug=model_id,
+        staging_dir=str(staging),
+        scene_path=str(scene),
+        manifest_path=str(manifest),
+        original_sha256="c" * 64,
+        model_to_project=(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+        bounds_min=(0.0, 0.0, 0.0),
+        bounds_max=(1.0, 1.0, 1.0),
+        crs_info={"value": "EPSG:25833", "vertical_crs": "EPSG:7837"},
+        optimization=GLBOptimizationResult(output_sha256="d" * 64),
+        data_version=version,
+        index_entry=ModelIndexEntry(
+            id=model_id,
+            name="Fassade",
+            viewer_path=f"kunde/project/projekt/{relative}/model.json",
+            s3_path=f"pointclouds/kunde/project/projekt/{relative}",
+            crs="EPSG:25833",
+            vertical_crs="EPSG:7837",
+        ),
+    )
+
+
+def test_add_project_models_appends_verified_packages_without_changing_existing_models(tmp_path):
+    existing = {
+        "id": "bestand",
+        "name": "Bestand",
+        "format": "glb",
+        "viewer_path": "kunde/project/projekt/models/bestand/versions/old/model.json",
+        "s3_path": "pointclouds/kunde/project/projekt/models/bestand/versions/old",
+        "crs": "EPSG:25833",
+        "vertical_crs": "EPSG:7837",
+    }
+    first = _prepared_model_upload(tmp_path, model_id="fassade", version="2" * 64)
+    second = _prepared_model_upload(tmp_path, model_id="dach", version="3" * 64)
+    index_data = {
+        "projects": [
+            {
+                "id": "project",
+                "kunde": "Kunde",
+                "projekt": "Projekt",
+                "viewer_path": "kunde/project/projekt",
+                "s3_path": "pointclouds/kunde/project/projekt",
+                "models": [copy.deepcopy(existing)],
+            }
+        ]
+    }
+    client = FakeProjectS3Client()
+    deleted = []
+
+    result = add_project_models(
+        s3_client=client,
+        index_data=index_data,
+        project_id="project",
+        project_viewer_root="kunde/project/projekt",
+        project_s3_prefix="pointclouds/kunde/project/projekt",
+        prepared_models=(first, second),
+        save_index=lambda _data: True,
+        delete_keys=lambda keys: deleted.extend(keys),
+        timestamp="2026-08-21T10:00:00",
+    )
+
+    models = index_data["projects"][0]["models"]
+    assert result.status == "success"
+    assert models[0] == existing
+    assert [model["id"] for model in models] == ["bestand", "fassade", "dach"]
+    assert [key for _bucket, key, _args in client.uploads] == [
+        f"{first.index_entry.s3_path}/scene.glb",
+        f"{first.index_entry.s3_path}/model.json",
+        f"{second.index_entry.s3_path}/scene.glb",
+        f"{second.index_entry.s3_path}/model.json",
+    ]
+    assert deleted == []
+    assert index_data["projects"][0]["history"][-1]["message"].startswith("2 3D-Modelle wurden hinzugefügt")
+
+
+def test_add_project_models_rolls_back_all_new_packages_when_index_save_fails(tmp_path):
+    prepared = _prepared_model_upload(tmp_path, model_id="fassade", version="4" * 64)
+    index_data = {"projects": [{"id": "project", "models": []}]}
+    original = copy.deepcopy(index_data)
+    deleted = []
+
+    with pytest.raises(RuntimeError, match="Index"):
+        add_project_models(
+            s3_client=FakeProjectS3Client(),
+            index_data=index_data,
+            project_id="project",
+            project_viewer_root="kunde/project/projekt",
+            project_s3_prefix="pointclouds/kunde/project/projekt",
+            prepared_models=(prepared,),
+            save_index=lambda _data: False,
+            delete_keys=lambda keys: deleted.extend(keys),
+        )
+
+    assert index_data == original
+    assert deleted == [
+        f"{prepared.index_entry.s3_path}/scene.glb",
+        f"{prepared.index_entry.s3_path}/model.json",
+    ]
+
+
+def test_remove_project_model_saves_remaining_models_before_deleting_only_selected_package():
+    target_prefix = "pointclouds/kunde/project/models/fassade/versions/old"
+    keep = {"id": "dach", "name": "Dach", "s3_path": "pointclouds/kunde/project/models/dach/versions/old"}
+    index_data = {
+        "projects": [{
+            "id": "project",
+            "projekt": "Unverändert",
+            "models": [
+                {"id": "fassade", "name": "Fassade", "s3_path": target_prefix},
+                copy.deepcopy(keep),
+            ],
+        }]
+    }
+    events = []
+
+    result = remove_project_model(
+        index_data=index_data,
+        project_id="project",
+        target_model_s3_path=target_prefix,
+        existing_target_keys=(
+            f"{target_prefix}/scene.glb",
+            f"{target_prefix}/model.json",
+            f"{target_prefix}-backup/scene.glb",
+        ),
+        save_index=lambda data: events.append(("save", copy.deepcopy(data))) or True,
+        delete_keys=lambda keys: events.append(("delete", keys)),
+        timestamp="2026-08-21T12:00:00",
+    )
+
+    assert result.status == "success"
+    assert index_data["projects"][0]["projekt"] == "Unverändert"
+    assert index_data["projects"][0]["models"] == [keep]
+    assert index_data["projects"][0]["history"][-1]["message"] == "3D-Modell 'Fassade' wurde entfernt."
+    assert events[0][0] == "save"
+    assert events[1] == ("delete", (f"{target_prefix}/scene.glb", f"{target_prefix}/model.json"))
+
+
+def test_remove_project_model_restores_index_and_never_deletes_when_index_save_fails():
+    target_prefix = "pointclouds/kunde/project/models/fassade/versions/old"
+    index_data = {"projects": [{"id": "project", "models": [{"id": "fassade", "s3_path": target_prefix}]}]}
+    original = copy.deepcopy(index_data)
+    deleted = []
+
+    with pytest.raises(RuntimeError, match="Index"):
+        remove_project_model(
+            index_data=index_data,
+            project_id="project",
+            target_model_s3_path=target_prefix,
+            existing_target_keys=(f"{target_prefix}/scene.glb",),
+            save_index=lambda _data: False,
+            delete_keys=lambda keys: deleted.extend(keys),
+        )
+
+    assert index_data == original
+    assert deleted == []
+
+
+def test_remove_project_model_keeps_package_referenced_by_another_project():
+    target_prefix = "pointclouds/kunde/shared/models/fassade/versions/old"
+    shared = {"id": "fassade", "name": "Fassade", "s3_path": target_prefix}
+    index_data = {
+        "projects": [
+            {"id": "remove-here", "models": [copy.deepcopy(shared)]},
+            {"id": "keep-here", "models": [copy.deepcopy(shared)]},
+        ]
+    }
+    deleted = []
+
+    result = remove_project_model(
+        index_data=index_data,
+        project_id="remove-here",
+        target_model_s3_path=target_prefix,
+        existing_target_keys=(f"{target_prefix}/scene.glb", f"{target_prefix}/model.json"),
+        save_index=lambda _data: True,
+        delete_keys=lambda keys: deleted.extend(keys),
+    )
+
+    assert result.status == "success"
+    assert index_data["projects"][0]["models"] == []
+    assert index_data["projects"][1]["models"] == [shared]
+    assert deleted == []
 
 
 def test_add_project_pointclouds_preserves_multi_project_identity_and_existing_children(tmp_path):

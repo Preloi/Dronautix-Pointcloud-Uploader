@@ -54,3 +54,62 @@ def test_replace_dialog_state_from_inputs_uses_injected_converter_and_temp_outpu
     assert state.horizontal_crs == ""
     assert state.vertical_crs == ""
     assert payload.crs_info_by_source_path is None
+
+
+def test_add_models_prompt_returns_all_selected_glb_paths_without_qt_runtime():
+    dialogs = importlib.import_module("dronautix_uploader.qt_app.project_management_dialogs")
+    project_model = importlib.import_module("dronautix_uploader.qt_app.project_management")
+
+    class FileDialog:
+        @staticmethod
+        def getOpenFileNames(parent, title, start_dir, file_filter):
+            assert "Projekt" in title
+            assert file_filter == "GLB-Modelle (*.glb)"
+            return (["C:/models/fassade.glb", "C:/models/dach.glb"], file_filter)
+
+    class QtWidgets:
+        QFileDialog = FileDialog
+
+    project = project_model.make_project_preview(
+        {"id": "project", "projekt": "Projekt", "kunde": "Kunde"},
+        disabled=False,
+    )
+
+    payload = dialogs.prompt_add_project_models(QtWidgets, None, project)
+
+    assert payload.source_paths == ("C:/models/fassade.glb", "C:/models/dach.glb")
+
+
+def test_crs_repair_suggestions_prefill_horizontal_and_vertical_values_from_project_clouds():
+    dialogs = importlib.import_module("dronautix_uploader.qt_app.project_management_dialogs")
+    project_model = importlib.import_module("dronautix_uploader.qt_app.project_management")
+    project = project_model.make_project_preview(
+        {
+            "id": "project",
+            "projekt": "Terra Hydron",
+            "kunde": "Kunde",
+            "pointclouds": [
+                {"name": "Mellitzgraben", "format": "potree", "crs": "EPSG:31255 + EPSG:5778"},
+            ],
+        },
+        disabled=False,
+    )
+
+    assert dialogs._suggest_project_crs(project) == ("EPSG:31255", "EPSG:5778")
+
+
+def test_crs_repair_suggestions_never_mix_epsg_codes_from_different_clouds():
+    dialogs = importlib.import_module("dronautix_uploader.qt_app.project_management_dialogs")
+    project_model = importlib.import_module("dronautix_uploader.qt_app.project_management")
+    project = project_model.make_project_preview(
+        {
+            "id": "project",
+            "pointclouds": [
+                {"name": "Ohne Höhe", "format": "potree", "crs": "EPSG:25832"},
+                {"name": "Donor", "format": "potree", "crs": "EPSG:31255 + EPSG:5778"},
+            ],
+        },
+        disabled=False,
+    )
+
+    assert dialogs._suggest_project_crs(project) == ("EPSG:31255", "EPSG:5778")

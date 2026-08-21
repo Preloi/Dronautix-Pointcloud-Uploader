@@ -255,7 +255,7 @@ class GLBOptimizationService:
                 project_crs_info,
             )
             status = self.toolchain_self_test()
-            selected_path, selected_name, warnings = self._select_candidate(
+            selected_path, selected_name, warnings, output_inspection = self._select_candidate(
                 inspection.path,
                 inspection,
                 matrix,
@@ -265,9 +265,6 @@ class GLBOptimizationService:
             )
             scene_path = stage_dir / "scene.glb"
             _copy_with_cancel(selected_path, scene_path, cancel_requested)
-            output_inspection = self._inspect_glb(scene_path, stage_dir, cancel_requested=cancel_requested)
-            _assert_bounds_match(inspection, output_inspection)
-            _assert_control_points_match(inspection, output_inspection, matrix)
             _raise_if_cancelled(cancel_requested)
 
             original_sha256 = _sha256(staged_original, cancel_requested)
@@ -519,15 +516,14 @@ class GLBOptimizationService:
         stage_dir: Path,
         status: GLBToolchainStatus,
         cancel_requested: CancelCallback | None,
-    ) -> tuple[Path, str, list[str]]:
+    ) -> tuple[Path, str, list[str], _GLBInspection]:
         if not (
             status.toolchain_available
             and status.viewer_supports_compressed_output
             and self.toolchain is not None
         ):
-            return original_path, "original", []
+            return original_path, "original", [], original_inspection
         warnings: list[str] = []
-        best_path, best_name = original_path, "original"
         try:
             candidates = self.toolchain.optimize_candidates(original_path, stage_dir, cancel_requested)
             runner_warnings = getattr(self.toolchain, "last_warnings", ())
@@ -535,27 +531,44 @@ class GLBOptimizationService:
                 text = str(warning)
                 if "E_NOT_STATIC" not in text:
                     warnings.append(f"GLB-Optimierung ausgelassen ({text})")
+            available_candidates: list[tuple[str, Path]] = []
             for candidate_name, candidate_path in candidates:
-                _raise_if_cancelled(cancel_requested)
                 candidate = Path(candidate_path)
-                if not candidate.is_file():
+                if candidate.is_file():
+                    available_candidates.append((str(candidate_name or "optimized"), candidate))
+                else:
                     warnings.append(f"Optimierungskandidat fehlt: {candidate_name}.")
+            original_size = original_path.stat().st_size
+            original_signature: dict[str, Any] | None = None
+            for candidate_name, candidate in sorted(
+                available_candidates,
+                key=lambda item: item[1].stat().st_size,
+            ):
+                _raise_if_cancelled(cancel_requested)
+                if candidate.stat().st_size >= original_size:
+                    continue
+                if candidate_name.casefold() == "ktx2" and original_inspection.texture_count == 0:
                     continue
                 try:
                     candidate_inspection = self._inspect_glb(candidate, stage_dir, cancel_requested=cancel_requested)
                     _assert_bounds_match(original_inspection, candidate_inspection)
                     _assert_control_points_match(original_inspection, candidate_inspection, model_to_project)
-                    _assert_preserved_model_features(original_inspection, candidate_inspection)
+                    if original_signature is None:
+                        original_signature = _preservation_signature(original_inspection)
+                    _assert_preserved_model_features(
+                        original_inspection,
+                        candidate_inspection,
+                        original_signature=original_signature,
+                    )
                 except GLBValidationError as error:
                     warnings.append(f"Optimierungskandidat verworfen ({candidate_name}): {error}")
                     continue
-                if candidate.stat().st_size < best_path.stat().st_size:
-                    best_path, best_name = candidate, str(candidate_name or "optimized")
+                return candidate, candidate_name, warnings, candidate_inspection
         except OperationCancelledError:
             raise
         except Exception as error:
             warnings.append(f"GLB-Optimierung fehlgeschlagen: {error}")
-        return best_path, best_name, warnings
+        return original_path, "original", warnings, original_inspection
 
 
 def prepare_model_uploads(
@@ -1533,10 +1546,16 @@ def _assert_control_points_match(
             raise GLBValidationError(f"Optimierter GLB-Kontrollpunkt {index} weicht mehr als 1 mm vom Original ab.")
 
 
-def _assert_preserved_model_features(original: _GLBInspection, candidate: _GLBInspection) -> None:
+def _assert_preserved_model_features(
+    original: _GLBInspection,
+    candidate: _GLBInspection,
+    *,
+    original_signature: dict[str, Any] | None = None,
+) -> None:
     """Reject candidates that silently lose viewer-visible glTF semantics."""
 
-    if _preservation_signature(original) != _preservation_signature(candidate):
+    expected_signature = original_signature if original_signature is not None else _preservation_signature(original)
+    if expected_signature != _preservation_signature(candidate):
         raise GLBValidationError(
             "Optimierungskandidat verändert Materialien, Texturen, Animationen, Skins, Morph Targets, "
             "Vertex-Attribute, Knotennamen, Georeferenzierung oder Szenenstruktur."

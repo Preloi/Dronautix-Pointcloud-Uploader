@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-from dronautix_uploader.qt_app.project_management import PointcloudPreview, ProjectPreview
+from dronautix_uploader.qt_app.project_management import ModelPreview, PointcloudPreview, ProjectPreview
 from dronautix_uploader.qt_app.project_management_actions import (
     ACTION_DELETE,
     ACTION_DISABLE_LINK,
@@ -13,6 +13,9 @@ from dronautix_uploader.qt_app.project_management_actions import (
     ACTION_RENAME,
     ACTION_REPLACE_ALL_POINTCLOUDS,
     ACTION_REPLACE_SINGLE_POINTCLOUD,
+    ACTION_REPLACE_SINGLE_MODEL,
+    ACTION_ADD_MODELS,
+    ACTION_REMOVE_MODEL,
     ACTION_ADD_POINTCLOUDS,
     ACTION_REMOVE_POINTCLOUD,
     ProjectOperationSummary,
@@ -24,6 +27,9 @@ from dronautix_uploader.qt_app.project_management_controller import (
     RenameProjectInput,
     ReplaceAllPointcloudsInput,
     ReplaceSinglePointcloudInput,
+    ReplaceSingleModelInput,
+    RepairProjectCrsInput,
+    AddModelsInput,
     AddPointcloudsInput,
 )
 
@@ -124,6 +130,60 @@ class FakeService:
         )
         return self.result
 
+    def replace_single_project_model_from_source(
+        self,
+        project_id,
+        target_model_s3_path,
+        source_path,
+        *,
+        model_json_path="",
+        on_progress=None,
+        confirm_spatial_warning=None,
+        confirm_crs_repair=None,
+    ):
+        self.calls.append(
+            (
+                "replace_single_project_model_from_source",
+                project_id,
+                target_model_s3_path,
+                source_path,
+                model_json_path,
+                on_progress,
+                confirm_spatial_warning,
+                confirm_crs_repair,
+            )
+        )
+        return self.result
+
+    def add_project_models_from_sources(
+        self,
+        project_id,
+        source_paths,
+        *,
+        model_json_by_source_path=None,
+        on_progress=None,
+        confirm_spatial_warning=None,
+        confirm_crs_repair=None,
+    ):
+        self.calls.append(
+            (
+                "add_project_models_from_sources",
+                project_id,
+                tuple(source_paths),
+                model_json_by_source_path,
+                on_progress,
+                confirm_spatial_warning,
+                confirm_crs_repair,
+            )
+        )
+        return self.result
+
+    def repair_project_crs_metadata(self, project_id, crs_info, *, confirm_repair=None, allow_conflicting_overwrite=False):
+        self.calls.append(
+            ("repair_project_crs_metadata", project_id, crs_info, confirm_repair, allow_conflicting_overwrite)
+        )
+        return self.result
+
     def add_project_pointclouds(self, project_id, prepared_clouds, on_progress=None):
         self.calls.append(("add_project_pointclouds", project_id, tuple(prepared_clouds), on_progress))
         return self.result
@@ -154,6 +214,10 @@ class FakeService:
 
     def remove_project_pointcloud(self, project_id, target_pointcloud_s3_path):
         self.calls.append(("remove_project_pointcloud", project_id, target_pointcloud_s3_path))
+        return self.result
+
+    def remove_project_model(self, project_id, target_model_s3_path):
+        self.calls.append(("remove_project_model", project_id, target_model_s3_path))
         return self.result
 
 
@@ -373,6 +437,121 @@ def test_replace_single_pointcloud_forwards_progress_callback_to_service():
     assert service.calls[0][7] is on_progress
 
 
+def test_replace_single_model_routes_selected_package_and_optional_sidecar():
+    service = FakeService()
+    controller = ProjectManagementController(service)
+    model = _model("Fassade")
+
+    confirm = lambda message: bool(message)
+    confirm_repair = lambda message: bool(message)
+    controller.replace_single_model(
+        _project(models=(model,)),
+        model,
+        ReplaceSingleModelInput("new-fassade.glb", "new-model.json"),
+        confirm_spatial_warning=confirm,
+        confirm_crs_repair=confirm_repair,
+    )
+
+    assert service.calls == [
+        (
+            "replace_single_project_model_from_source",
+            "project-1",
+            model.s3_path,
+            "new-fassade.glb",
+            "new-model.json",
+            None,
+            confirm,
+            confirm_repair,
+        )
+    ]
+
+
+def test_handle_action_rejects_pointcloud_as_glb_selection():
+    controller = ProjectManagementController(FakeService())
+
+    with pytest.raises(ValueError, match="GLB"):
+        controller.handle_action(
+            ACTION_REPLACE_SINGLE_MODEL,
+            _project(),
+            pointcloud_preview=_pointcloud("Scan"),
+            payload=ReplaceSingleModelInput("replacement.glb"),
+        )
+
+
+def test_remove_model_routes_selected_package_to_service():
+    service = FakeService()
+    controller = ProjectManagementController(service)
+    model = _model("Fassade")
+
+    controller.handle_action(ACTION_REMOVE_MODEL, _project(models=(model,)), pointcloud_preview=model)
+
+    assert service.calls == [("remove_project_model", "project-1", model.s3_path)]
+
+
+def test_add_models_routes_multiple_glbs_and_sidecars_to_service():
+    service = FakeService()
+    controller = ProjectManagementController(service)
+
+    confirm = lambda message: bool(message)
+    confirm_repair = lambda message: bool(message)
+    controller.handle_action(
+        ACTION_ADD_MODELS,
+        _project(),
+        payload=AddModelsInput(
+            source_paths=("fassade.glb", "dach.glb"),
+            model_json_by_source_path={"dach.glb": "dach-model.json"},
+        ),
+        confirm_spatial_warning=confirm,
+        confirm_crs_repair=confirm_repair,
+    )
+
+    assert service.calls == [
+        (
+            "add_project_models_from_sources",
+            "project-1",
+            ("fassade.glb", "dach.glb"),
+            {"dach.glb": "dach-model.json"},
+            None,
+            confirm,
+            confirm_repair,
+        )
+    ]
+
+
+def test_repair_project_crs_routes_complete_manual_crs_and_confirmation():
+    service = FakeService()
+    controller = ProjectManagementController(service)
+    confirm = lambda message: bool(message)
+
+    controller.repair_project_crs_metadata(
+        _project(),
+        RepairProjectCrsInput("EPSG:31255", "EPSG:5778"),
+        confirm_repair=confirm,
+    )
+
+    assert service.calls == [
+        (
+            "repair_project_crs_metadata",
+            "project-1",
+            {"value": "EPSG:31255", "projection": "EPSG:31255", "vertical_crs": "EPSG:5778"},
+            confirm,
+            False,
+        )
+    ]
+
+
+def test_repair_project_crs_forwards_explicit_conflicting_overwrite():
+    service = FakeService()
+    controller = ProjectManagementController(service)
+
+    controller.repair_project_crs_metadata(
+        _project(),
+        RepairProjectCrsInput("EPSG:31255", "EPSG:5778", allow_conflicting_overwrite=True),
+    )
+
+    assert service.calls[0][-1] is True
+
+
 def test_add_pointclouds_routes_sources_and_progress_to_the_expected_service_method():
     service = FakeService()
     controller = ProjectManagementController(service)
@@ -577,7 +756,12 @@ def test_handle_action_forwards_download_cancel_callback():
     assert service.calls == [("download_project", "project-1", "C:/Downloads", None, cancel_requested)]
 
 
-def _project(*pointclouds: PointcloudPreview, disabled: bool = False, explicit: bool = False) -> ProjectPreview:
+def _project(
+    *pointclouds: PointcloudPreview,
+    disabled: bool = False,
+    explicit: bool = False,
+    models: tuple[ModelPreview, ...] = (),
+) -> ProjectPreview:
     return ProjectPreview(
         project_id="project-1",
         project="Projekt 1",
@@ -587,6 +771,7 @@ def _project(*pointclouds: PointcloudPreview, disabled: bool = False, explicit: 
         link="viewer/projekte/project-1",
         disabled=disabled,
         pointclouds=pointclouds,
+        models=models,
         s3_path="projects/project-1",
         has_explicit_pointclouds=explicit,
     )
@@ -599,4 +784,15 @@ def _pointcloud(name: str, s3_path: str = "projects/project-1/scan") -> Pointclo
         points="-",
         crs="EPSG:25832",
         s3_path=s3_path,
+    )
+
+
+def _model(name: str) -> ModelPreview:
+    return ModelPreview(
+        model_id="fassade",
+        name=name,
+        s3_path="pointclouds/kunde/project-1/projekt/models/fassade/versions/old",
+        viewer_path="kunde/project-1/projekt/models/fassade/versions/old/model.json",
+        crs="EPSG:25833",
+        vertical_crs="EPSG:7837",
     )

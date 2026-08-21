@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from .path_drop import append_unique_paths, create_path_drop_plain_text_edit
-from .project_management import PointcloudPreview, ProjectPreview
+from .project_management import ModelPreview, PointcloudPreview, ProjectPreview
+from .project_management_controller import AddModelsInput, RepairProjectCrsInput, ReplaceSingleModelInput
 from .project_management_dialog_models import (
     ProjectDuplicateDialogState,
     ProjectDownloadDialogState,
@@ -111,6 +112,19 @@ def confirm_remove_pointcloud(QtWidgets, parent, project: ProjectPreview, pointc
     buttons.rejected.connect(dialog.reject)
     layout.addWidget(buttons)
     return dialog.exec() == QtWidgets.QDialog.Accepted
+
+
+def confirm_remove_model(QtWidgets, parent, project: ProjectPreview, model: ModelPreview) -> bool:
+    answer = QtWidgets.QMessageBox.warning(
+        parent,
+        "3D-Modell entfernen",
+        f"„{model.name}“ aus „{project.project}“ entfernen?\n\n"
+        "Der models[]-Eintrag und das zugehörige GLB-Paket in S3 werden gelöscht. "
+        "Projektname, Link und Punktwolken bleiben unverändert.",
+        QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+        QtWidgets.QMessageBox.No,
+    )
+    return answer == QtWidgets.QMessageBox.Yes
 
 
 def prompt_download_project(QtWidgets, parent, project: ProjectPreview):
@@ -254,6 +268,91 @@ def prompt_replace_single_pointcloud(QtWidgets, parent, project: ProjectPreview,
     return validate_replace_single_dialog_state(
         _replace_dialog_state_from_inputs(source_paths, converter_path, output_base_dir)
     )
+
+
+def prompt_replace_single_model(QtWidgets, parent, project: ProjectPreview, model: ModelPreview):
+    source_path, _filter = QtWidgets.QFileDialog.getOpenFileName(
+        parent,
+        f"GLB für „{model.name}“ auswählen",
+        "",
+        "GLB-Modelle (*.glb)",
+    )
+    if not source_path:
+        return None
+    answer = QtWidgets.QMessageBox.question(
+        parent,
+        "GLB austauschen",
+        f"„{model.name}“ in „{project.project}“ durch diese Datei ersetzen?\n\n{source_path}",
+        QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+        QtWidgets.QMessageBox.No,
+    )
+    if answer != QtWidgets.QMessageBox.Yes:
+        return None
+    return ReplaceSingleModelInput(source_path=source_path)
+
+
+def prompt_add_project_models(QtWidgets, parent, project: ProjectPreview):
+    source_paths, _filter = QtWidgets.QFileDialog.getOpenFileNames(
+        parent,
+        f"3D-Modelle zu „{project.project}“ hinzufügen",
+        "",
+        "GLB-Modelle (*.glb)",
+    )
+    paths = tuple(str(path).strip() for path in source_paths if str(path).strip())
+    return AddModelsInput(source_paths=paths) if paths else None
+
+
+def prompt_repair_project_crs(QtWidgets, parent, project: ProjectPreview):
+    horizontal_crs, vertical_crs = _suggest_project_crs(project)
+    dialog = QtWidgets.QDialog(parent)
+    dialog.setWindowTitle("CRS-Metadaten prüfen/reparieren")
+    dialog.setMinimumWidth(560)
+    layout = QtWidgets.QVBoxLayout(dialog)
+    layout.setContentsMargins(20, 20, 20, 20)
+    layout.setSpacing(12)
+    detail = QtWidgets.QLabel(
+        "Übernimmt ausschließlich CRS-Metadaten; X/Y/Z-Positionen und Modellgeometrie bleiben unverändert. "
+        "Widersprüchliche Quellen werden blockiert."
+    )
+    detail.setObjectName("MutedText")
+    detail.setWordWrap(True)
+    layout.addWidget(detail)
+    form = QtWidgets.QFormLayout()
+    horizontal_input = QtWidgets.QLineEdit(horizontal_crs)
+    vertical_input = QtWidgets.QLineEdit(vertical_crs)
+    horizontal_input.setPlaceholderText("z. B. EPSG:25833")
+    vertical_input.setPlaceholderText("z. B. EPSG:7837")
+    form.addRow("Horizontales CRS", horizontal_input)
+    form.addRow("Höhenbezug", vertical_input)
+    layout.addLayout(form)
+    overwrite_conflicts = QtWidgets.QCheckBox("Vorhandene widersprüchliche CRS-Werte ersetzen")
+    overwrite_conflicts.setChecked(False)
+    layout.addWidget(overwrite_conflicts)
+    buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+    buttons.button(QtWidgets.QDialogButtonBox.Ok).setText("Prüfen")
+    buttons.accepted.connect(dialog.accept)
+    buttons.rejected.connect(dialog.reject)
+    layout.addWidget(buttons)
+    if dialog.exec() != QtWidgets.QDialog.Accepted:
+        return None
+    return RepairProjectCrsInput(
+        horizontal_input.text(),
+        vertical_input.text(),
+        allow_conflicting_overwrite=overwrite_conflicts.isChecked(),
+    )
+
+
+def _suggest_project_crs(project: ProjectPreview) -> tuple[str, str]:
+    import re
+
+    matches_by_cloud = [
+        [match.upper().replace(" ", "") for match in re.findall(r"EPSG\s*:\s*\d+", pointcloud.crs)]
+        for pointcloud in project.pointclouds
+    ]
+    complete = next((matches for matches in matches_by_cloud if len(matches) >= 2), ())
+    if complete:
+        return complete[0], complete[1]
+    return next((matches[0] for matches in matches_by_cloud if matches), ""), ""
 
 
 def _build_project_metadata_dialog(
@@ -443,11 +542,14 @@ def _default_text(defaults, attribute: str) -> str:
 __all__ = [
     "confirm_delete_project",
     "confirm_remove_pointcloud",
+    "confirm_remove_model",
     "confirm_set_project_link_state",
     "prompt_download_project",
     "prompt_replace_all_pointclouds",
     "prompt_add_project_pointclouds",
+    "prompt_add_project_models",
     "prompt_replace_single_pointcloud",
+    "prompt_replace_single_model",
     "prompt_duplicate_project",
     "prompt_rename_project",
 ]

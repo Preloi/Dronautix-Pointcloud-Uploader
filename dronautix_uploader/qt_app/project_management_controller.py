@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from dronautix_uploader.core.contracts import CancelCallback, ProgressCallback
 
-from .project_management import PointcloudPreview, ProjectPreview
+from .project_management import ModelPreview, PointcloudPreview, ProjectPreview
 from .project_management_actions import (
     ACTION_DELETE,
     ACTION_DISABLE_LINK,
@@ -17,8 +17,12 @@ from .project_management_actions import (
     ACTION_RENAME,
     ACTION_REPLACE_ALL_POINTCLOUDS,
     ACTION_REPLACE_SINGLE_POINTCLOUD,
+    ACTION_REPLACE_SINGLE_MODEL,
+    ACTION_ADD_MODELS,
+    ACTION_REMOVE_MODEL,
     ACTION_ADD_POINTCLOUDS,
     ACTION_REMOVE_POINTCLOUD,
+    ACTION_REPAIR_CRS_METADATA,
     ProjectOperationSummary,
     summarize_project_operation_result,
 )
@@ -63,6 +67,12 @@ class ReplaceSinglePointcloudInput:
 
 
 @dataclass(frozen=True)
+class ReplaceSingleModelInput:
+    source_path: str
+    model_json_path: str = ""
+
+
+@dataclass(frozen=True)
 class AddPointcloudsInput:
     prepared_clouds: tuple[Any, ...] = ()
     source_paths: tuple[str, ...] = ()
@@ -70,6 +80,19 @@ class AddPointcloudsInput:
     output_base_dir: str = ""
     overwrite: bool = False
     crs_info_by_source_path: dict[str, dict[str, Any]] | None = None
+
+
+@dataclass(frozen=True)
+class AddModelsInput:
+    source_paths: tuple[str, ...]
+    model_json_by_source_path: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class RepairProjectCrsInput:
+    horizontal_crs: str
+    vertical_crs: str
+    allow_conflicting_overwrite: bool = False
 
 
 class ProjectManagementController:
@@ -204,6 +227,31 @@ class ProjectManagementController:
         )
         return summarize_project_operation_result(result)
 
+    def replace_single_model(
+        self,
+        project_preview: ProjectPreview | None,
+        model_preview: ModelPreview | None,
+        request: ReplaceSingleModelInput,
+        on_progress: ProgressCallback | None = None,
+        confirm_spatial_warning: Callable[[str], bool] | None = None,
+        confirm_crs_repair: Callable[[str], bool] | None = None,
+    ) -> ProjectOperationSummary:
+        project = _require_project(project_preview)
+        model = _require_model(model_preview)
+        source_path = request.source_path.strip()
+        if not source_path:
+            raise ValueError("Eine GLB-Ersatzdatei ist erforderlich.")
+        result = self.service.replace_single_project_model_from_source(
+            project.project_id,
+            model.s3_path,
+            source_path,
+            model_json_path=request.model_json_path.strip(),
+            on_progress=on_progress,
+            confirm_spatial_warning=confirm_spatial_warning,
+            confirm_crs_repair=confirm_crs_repair,
+        )
+        return summarize_project_operation_result(result)
+
     def add_pointclouds(
         self,
         project_preview: ProjectPreview | None,
@@ -231,6 +279,28 @@ class ProjectManagementController:
         )
         return summarize_project_operation_result(result)
 
+    def add_models(
+        self,
+        project_preview: ProjectPreview | None,
+        request: AddModelsInput,
+        on_progress: ProgressCallback | None = None,
+        confirm_spatial_warning: Callable[[str], bool] | None = None,
+        confirm_crs_repair: Callable[[str], bool] | None = None,
+    ) -> ProjectOperationSummary:
+        project = _require_project(project_preview)
+        source_paths = tuple(path.strip() for path in request.source_paths if path.strip())
+        if not source_paths:
+            raise ValueError("Mindestens eine GLB-Datei ist erforderlich.")
+        result = self.service.add_project_models_from_sources(
+            project.project_id,
+            source_paths,
+            model_json_by_source_path=request.model_json_by_source_path,
+            on_progress=on_progress,
+            confirm_spatial_warning=confirm_spatial_warning,
+            confirm_crs_repair=confirm_crs_repair,
+        )
+        return summarize_project_operation_result(result)
+
     def remove_pointcloud(
         self,
         project_preview: ProjectPreview | None,
@@ -245,14 +315,45 @@ class ProjectManagementController:
         result = self.service.remove_project_pointcloud(project.project_id, pointcloud.s3_path)
         return summarize_project_operation_result(result)
 
+    def remove_model(
+        self,
+        project_preview: ProjectPreview | None,
+        model_preview: ModelPreview | None,
+    ) -> ProjectOperationSummary:
+        project = _require_project(project_preview)
+        model = _require_model(model_preview)
+        result = self.service.remove_project_model(project.project_id, model.s3_path)
+        return summarize_project_operation_result(result)
+
+    def repair_project_crs_metadata(
+        self,
+        project_preview: ProjectPreview | None,
+        request: RepairProjectCrsInput,
+        confirm_repair: Callable[[str], bool] | None = None,
+    ) -> ProjectOperationSummary:
+        project = _require_project(project_preview)
+        horizontal_crs = request.horizontal_crs.strip()
+        vertical_crs = request.vertical_crs.strip()
+        if not horizontal_crs or not vertical_crs:
+            raise ValueError("Horizontales CRS und Höhenbezug sind für die Reparatur erforderlich.")
+        result = self.service.repair_project_crs_metadata(
+            project.project_id,
+            {"value": horizontal_crs, "projection": horizontal_crs, "vertical_crs": vertical_crs},
+            confirm_repair=confirm_repair,
+            allow_conflicting_overwrite=request.allow_conflicting_overwrite,
+        )
+        return summarize_project_operation_result(result)
+
     def handle_action(
         self,
         action_id: str,
         project_preview: ProjectPreview | None,
-        pointcloud_preview: PointcloudPreview | None = None,
+        pointcloud_preview: PointcloudPreview | ModelPreview | None = None,
         payload: Any = None,
         on_progress: ProgressCallback | None = None,
         cancel_requested: CancelCallback | None = None,
+        confirm_spatial_warning: Callable[[str], bool] | None = None,
+        confirm_crs_repair: Callable[[str], bool] | None = None,
     ) -> ProjectOperationSummary:
         if action_id == ACTION_RENAME:
             if not isinstance(payload, RenameProjectInput):
@@ -284,13 +385,55 @@ class ProjectManagementController:
         if action_id == ACTION_REPLACE_SINGLE_POINTCLOUD:
             if not isinstance(payload, ReplaceSinglePointcloudInput):
                 raise ValueError("ReplaceSinglePointcloudInput ist für einzelnen Austausch erforderlich.")
-            return self.replace_single_pointcloud(project_preview, pointcloud_preview, payload, on_progress=on_progress)
+            return self.replace_single_pointcloud(
+                project_preview,
+                pointcloud_preview if isinstance(pointcloud_preview, PointcloudPreview) else None,
+                payload,
+                on_progress=on_progress,
+            )
+        if action_id == ACTION_REPLACE_SINGLE_MODEL:
+            if not isinstance(payload, ReplaceSingleModelInput):
+                raise ValueError("ReplaceSingleModelInput ist für den GLB-Austausch erforderlich.")
+            return self.replace_single_model(
+                project_preview,
+                pointcloud_preview if isinstance(pointcloud_preview, ModelPreview) else None,
+                payload,
+                on_progress=on_progress,
+                confirm_spatial_warning=confirm_spatial_warning,
+                confirm_crs_repair=confirm_crs_repair,
+            )
         if action_id == ACTION_ADD_POINTCLOUDS:
             if not isinstance(payload, AddPointcloudsInput):
                 raise ValueError("AddPointcloudsInput ist für das Hinzufügen erforderlich.")
             return self.add_pointclouds(project_preview, payload, on_progress=on_progress)
+        if action_id == ACTION_ADD_MODELS:
+            if not isinstance(payload, AddModelsInput):
+                raise ValueError("AddModelsInput ist für das Hinzufügen von 3D-Modellen erforderlich.")
+            return self.add_models(
+                project_preview,
+                payload,
+                on_progress=on_progress,
+                confirm_spatial_warning=confirm_spatial_warning,
+                confirm_crs_repair=confirm_crs_repair,
+            )
+        if action_id == ACTION_REPAIR_CRS_METADATA:
+            if not isinstance(payload, RepairProjectCrsInput):
+                raise ValueError("RepairProjectCrsInput ist für die CRS-Reparatur erforderlich.")
+            return self.repair_project_crs_metadata(
+                project_preview,
+                payload,
+                confirm_repair=confirm_crs_repair,
+            )
         if action_id == ACTION_REMOVE_POINTCLOUD:
-            return self.remove_pointcloud(project_preview, pointcloud_preview)
+            return self.remove_pointcloud(
+                project_preview,
+                pointcloud_preview if isinstance(pointcloud_preview, PointcloudPreview) else None,
+            )
+        if action_id == ACTION_REMOVE_MODEL:
+            return self.remove_model(
+                project_preview,
+                pointcloud_preview if isinstance(pointcloud_preview, ModelPreview) else None,
+            )
         raise ValueError(f"Unbekannte Projektverwaltungsaktion: {action_id}")
 
 
@@ -308,6 +451,14 @@ def _require_pointcloud(pointcloud_preview: PointcloudPreview | None) -> Pointcl
     return pointcloud_preview
 
 
+def _require_model(model_preview: ModelPreview | None) -> ModelPreview:
+    if not isinstance(model_preview, ModelPreview):
+        raise ValueError("Kein GLB ausgewählt.")
+    if not model_preview.s3_path:
+        raise ValueError("Ausgewähltes GLB hat keinen S3-Pfad.")
+    return model_preview
+
+
 def _require_explicit_pointcloud_project(project_preview: ProjectPreview | None) -> ProjectPreview:
     project = _require_project(project_preview)
     if not project.has_explicit_pointclouds:
@@ -318,9 +469,12 @@ def _require_explicit_pointcloud_project(project_preview: ProjectPreview | None)
 __all__ = [
     "DownloadProjectInput",
     "AddPointcloudsInput",
+    "AddModelsInput",
     "DuplicateProjectInput",
     "ProjectManagementController",
     "RenameProjectInput",
     "ReplaceAllPointcloudsInput",
     "ReplaceSinglePointcloudInput",
+    "ReplaceSingleModelInput",
+    "RepairProjectCrsInput",
 ]

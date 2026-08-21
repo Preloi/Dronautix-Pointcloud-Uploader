@@ -35,7 +35,11 @@ from .project_management_actions import (
     ACTION_RENAME,
     ACTION_REPLACE_ALL_POINTCLOUDS,
     ACTION_REPLACE_SINGLE_POINTCLOUD,
+    ACTION_REPLACE_SINGLE_MODEL,
+    ACTION_REPAIR_CRS_METADATA,
     ACTION_ADD_POINTCLOUDS,
+    ACTION_ADD_MODELS,
+    ACTION_REMOVE_MODEL,
     ACTION_REMOVE_POINTCLOUD,
     ProjectOperationSummary,
     action_by_id,
@@ -55,6 +59,20 @@ GLB_UPLOAD_TEMP_PREFIX = ".glb-upload-"
 GLB_UPLOAD_STALE_AGE_SECONDS = 24 * 60 * 60
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclasses.dataclass
+class _SpatialWarningRequest:
+    message: str
+    completed: threading.Event = dataclasses.field(default_factory=threading.Event)
+    accepted: bool = False
+
+
+@dataclasses.dataclass
+class _CrsRepairRequest:
+    message: str
+    completed: threading.Event = dataclasses.field(default_factory=threading.Event)
+    accepted: bool = False
 
 
 def cleanup_stale_upload_temp_dirs(
@@ -172,6 +190,12 @@ def create_main_window(
             if self._on_finished is not None:
                 self._on_finished()
 
+    class _SpatialWarningEmitter(QtCore.QObject):
+        requested = QtCore.Signal(object)
+
+    class _CrsRepairEmitter(QtCore.QObject):
+        requested = QtCore.Signal(object)
+
     class MainWindow(QtWidgets.QMainWindow):
         def __init__(self):
             super().__init__()
@@ -202,6 +226,10 @@ def create_main_window(
             self._active_tasks = []
             self._task_records = {}
             self._progress_bridges = {}
+            self._spatial_warning_emitter = _SpatialWarningEmitter()
+            self._spatial_warning_emitter.requested.connect(self._show_spatial_warning)
+            self._crs_repair_emitter = _CrsRepairEmitter()
+            self._crs_repair_emitter.requested.connect(self._show_crs_repair_confirmation)
             self._closing_for_update = False
             cleanup_stale_upload_temp_dirs()
             root = QtWidgets.QWidget()
@@ -467,6 +495,7 @@ def create_main_window(
                     request,
                     on_progress=progress_callback,
                     cancel_requested=cancel_event.is_set,
+                    confirm_spatial_warning=self._confirm_spatial_warning,
                 )
 
             def handle_result(summary: ProjectOperationSummary):
@@ -510,6 +539,44 @@ def create_main_window(
                 ),
                 on_finished=finish_upload,
             )
+
+        def _confirm_spatial_warning(self, message: str) -> bool:
+            warning = _SpatialWarningRequest(message=message)
+            self._spatial_warning_emitter.requested.emit(warning)
+            while not warning.completed.wait(0.1):
+                if self._upload_cancel_event is not None and self._upload_cancel_event.is_set():
+                    return False
+            return warning.accepted
+
+        def _confirm_crs_repair(self, message: str) -> bool:
+            repair = _CrsRepairRequest(message=message)
+            self._crs_repair_emitter.requested.emit(repair)
+            repair.completed.wait()
+            return repair.accepted
+
+        @QtCore.Slot(object)
+        def _show_spatial_warning(self, warning: _SpatialWarningRequest):
+            answer = QtWidgets.QMessageBox.warning(
+                self,
+                "Modelle außerhalb der Punktwolke",
+                f"{warning.message}\n\nTrotzdem hochladen?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No,
+            )
+            warning.accepted = answer == QtWidgets.QMessageBox.Yes
+            warning.completed.set()
+
+        @QtCore.Slot(object)
+        def _show_crs_repair_confirmation(self, repair: _CrsRepairRequest):
+            answer = QtWidgets.QMessageBox.warning(
+                self,
+                "CRS-Metadaten reparieren",
+                f"{repair.message}\n\nAudit-Hinweis: Die übernommenen CRS-Metadaten werden im Projektverlauf protokolliert.\n\nCRS-Metadaten jetzt reparieren und fortfahren?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No,
+            )
+            repair.accepted = answer == QtWidgets.QMessageBox.Yes
+            repair.completed.set()
 
         def _run_local_conversion(self, form):
             if local_conversion_controller is None:
@@ -598,13 +665,17 @@ def create_main_window(
 
             from .project_management_dialogs import (
                 confirm_delete_project,
+                confirm_remove_model,
                 confirm_remove_pointcloud,
                 prompt_add_project_pointclouds,
+                prompt_add_project_models,
                 prompt_download_project,
                 prompt_duplicate_project,
                 prompt_rename_project,
                 prompt_replace_all_pointclouds,
                 prompt_replace_single_pointcloud,
+                prompt_replace_single_model,
+                prompt_repair_project_crs,
             )
 
             progress_callback = None
@@ -761,6 +832,49 @@ def create_main_window(
                         payload,
                         on_progress=progress_callback,
                     )
+                elif action_id == ACTION_ADD_MODELS:
+                    if project is None:
+                        self._placeholder_action(action_id, project, pointcloud)
+                        return
+                    payload = prompt_add_project_models(QtWidgets, self, project)
+                    if payload is None:
+                        return
+                    progress_dialog = self._create_action_progress_dialog(
+                        "3D-Modelle hinzufügen",
+                        f"3D-Modelle werden zu „{project.project}“ hinzugefügt...",
+                    )
+                    progress_callback = self._make_progress_callback(
+                        ACTIVITY_ACTION_UPLOAD,
+                        project=project.project,
+                        customer=project.customer,
+                        actor="Projektverwaltung",
+                        source_path="; ".join(payload.source_paths),
+                        target_path=project.s3_path or project.viewer_path,
+                        extra_sink=self._progress_dialog_sink(progress_dialog),
+                    )
+                    operation = lambda: project_controller.add_models(
+                        project,
+                        payload,
+                        on_progress=progress_callback,
+                        confirm_spatial_warning=self._confirm_spatial_warning,
+                        confirm_crs_repair=self._confirm_crs_repair,
+                    )
+                elif action_id == ACTION_REPAIR_CRS_METADATA:
+                    if project is None:
+                        self._placeholder_action(action_id, project, pointcloud)
+                        return
+                    payload = prompt_repair_project_crs(QtWidgets, self, project)
+                    if payload is None:
+                        return
+                    progress_dialog = self._create_action_progress_dialog(
+                        "CRS-Metadaten reparieren",
+                        f"CRS-Metadaten in „{project.project}“ werden geprüft...",
+                    )
+                    operation = lambda: project_controller.repair_project_crs_metadata(
+                        project,
+                        payload,
+                        confirm_repair=self._confirm_crs_repair,
+                    )
                 elif action_id == ACTION_REPLACE_SINGLE_POINTCLOUD:
                     if project is None or pointcloud is None:
                         self._placeholder_action(action_id, project, pointcloud)
@@ -797,6 +911,34 @@ def create_main_window(
                         payload,
                         on_progress=progress_callback,
                     )
+                elif action_id == ACTION_REPLACE_SINGLE_MODEL:
+                    if project is None or pointcloud is None:
+                        self._placeholder_action(action_id, project, pointcloud)
+                        return
+                    payload = prompt_replace_single_model(QtWidgets, self, project, pointcloud)
+                    if payload is None:
+                        return
+                    progress_dialog = self._create_action_progress_dialog(
+                        "GLB austauschen",
+                        f"„{pointcloud.name}“ wird vorbereitet und ausgetauscht...",
+                    )
+                    progress_callback = self._make_progress_callback(
+                        ACTIVITY_ACTION_REPLACE,
+                        project=project.project,
+                        customer=project.customer,
+                        actor="Projektverwaltung",
+                        source_path=payload.source_path,
+                        target_path=pointcloud.s3_path or pointcloud.viewer_path,
+                        extra_sink=self._progress_dialog_sink(progress_dialog),
+                    )
+                    operation = lambda: project_controller.replace_single_model(
+                        project,
+                        pointcloud,
+                        payload,
+                        on_progress=progress_callback,
+                        confirm_spatial_warning=self._confirm_spatial_warning,
+                        confirm_crs_repair=self._confirm_crs_repair,
+                    )
                 elif action_id == ACTION_REMOVE_POINTCLOUD:
                     if project is None or pointcloud is None:
                         self._placeholder_action(action_id, project, pointcloud)
@@ -808,6 +950,17 @@ def create_main_window(
                         f"„{pointcloud.name}“ wird entfernt...",
                     )
                     operation = lambda: project_controller.remove_pointcloud(project, pointcloud)
+                elif action_id == ACTION_REMOVE_MODEL:
+                    if project is None or pointcloud is None:
+                        self._placeholder_action(action_id, project, pointcloud)
+                        return
+                    if not confirm_remove_model(QtWidgets, self, project, pointcloud):
+                        return
+                    progress_dialog = self._create_action_progress_dialog(
+                        "3D-Modell entfernen",
+                        f"„{pointcloud.name}“ wird entfernt...",
+                    )
+                    operation = lambda: project_controller.remove_model(project, pointcloud)
                 else:
                     self._placeholder_action(action_id, project, pointcloud)
                     return
@@ -1291,9 +1444,9 @@ def _detect_crs_or_none(source_path: str):
 def _activity_action_for_project_action(action_id: str) -> str:
     if action_id in {ACTION_REPLACE_ALL_POINTCLOUDS, ACTION_REPLACE_SINGLE_POINTCLOUD}:
         return ACTIVITY_ACTION_REPLACE
-    if action_id == ACTION_ADD_POINTCLOUDS:
+    if action_id in {ACTION_ADD_POINTCLOUDS, ACTION_ADD_MODELS}:
         return ACTIVITY_ACTION_UPLOAD
-    if action_id in {ACTION_DELETE, ACTION_REMOVE_POINTCLOUD}:
+    if action_id in {ACTION_DELETE, ACTION_REMOVE_POINTCLOUD, ACTION_REMOVE_MODEL}:
         return ACTIVITY_ACTION_DELETE
     if action_id == ACTION_DOWNLOAD:
         return ACTIVITY_ACTION_DOWNLOAD

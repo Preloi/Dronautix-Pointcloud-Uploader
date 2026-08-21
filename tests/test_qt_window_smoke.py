@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import threading
 import time
 
 import pytest
@@ -111,6 +112,78 @@ def test_main_window_constructs_with_service_backed_fake_runtime_when_qt_availab
         assert "Projektverwaltung" in window._pages
         assert window.stack.currentWidget() is window._pages["Upload"]
         window._projects_page.reload_projects()
+    finally:
+        window.deleteLater()
+
+
+def test_spatial_warning_is_marshaled_to_modal_dialog_with_no_as_default(monkeypatch):
+    QtCore, QtGui, QtWidgets = _import_qt()
+    app = _app(QtWidgets)
+    from dronautix_uploader.qt_app.main_window import create_main_window
+
+    calls = []
+
+    def answer_no(parent, title, text, buttons, default):
+        calls.append((title, text, buttons, default))
+        return QtWidgets.QMessageBox.No
+
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", answer_no)
+    window = create_main_window(QtCore, QtGui, QtWidgets)
+    result = []
+    worker = threading.Thread(target=lambda: result.append(window._confirm_spatial_warning("Halle: ca. 6,7 km")))
+    try:
+        worker.start()
+        deadline = time.time() + 2.0
+        while worker.is_alive() and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        worker.join(timeout=1.0)
+
+        assert result == [False]
+        assert calls[0][0] == "Modelle außerhalb der Punktwolke"
+        assert "6,7 km" in calls[0][1]
+        assert "Trotzdem hochladen?" in calls[0][1]
+        assert calls[0][3] == QtWidgets.QMessageBox.No
+    finally:
+        window.deleteLater()
+
+
+def test_crs_repair_confirmation_is_marshaled_to_modal_dialog_with_no_as_default(monkeypatch):
+    QtCore, QtGui, QtWidgets = _import_qt()
+    app = _app(QtWidgets)
+    from dronautix_uploader.qt_app.main_window import create_main_window
+
+    calls = []
+
+    def answer_no(parent, title, text, buttons, default):
+        calls.append((title, text, buttons, default))
+        return QtWidgets.QMessageBox.No
+
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", answer_no)
+    window = create_main_window(QtCore, QtGui, QtWidgets)
+    result = []
+    worker = threading.Thread(
+        target=lambda: result.append(
+            window._confirm_crs_repair(
+                "Mellitzgraben (EPSG:31255, Höhenbezug EPSG:5778) → Terra Hydron. "
+                "Fehlende Metadaten: Projekt und Punktwolke Bestand."
+            )
+        )
+    )
+    try:
+        worker.start()
+        deadline = time.time() + 2.0
+        while worker.is_alive() and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        worker.join(timeout=1.0)
+
+        assert result == [False]
+        assert calls[0][0] == "CRS-Metadaten reparieren"
+        assert "Mellitzgraben (EPSG:31255, Höhenbezug EPSG:5778) → Terra Hydron" in calls[0][1]
+        assert "Punktwolke Bestand" in calls[0][1]
+        assert "Audit-Hinweis" in calls[0][1]
+        assert calls[0][3] == QtWidgets.QMessageBox.No
     finally:
         window.deleteLater()
 
@@ -350,6 +423,86 @@ def test_upload_page_shows_independent_process_progress_when_qt_available():
         assert preparation.value() == 40
         assert upload.value() == 65
         assert index.value() == 100
+    finally:
+        page.deleteLater()
+
+
+def test_projects_page_lists_models_and_routes_selected_glb_replace_when_qt_available():
+    QtCore, QtGui, QtWidgets = _import_qt()
+    app = _app(QtWidgets)
+
+    from dronautix_uploader.qt_app.pages import create_projects_page
+    from dronautix_uploader.qt_app.project_management import make_project_preview
+    from dronautix_uploader.qt_app.project_management_actions import ACTION_ADD_MODELS, ACTION_REPLACE_SINGLE_MODEL
+
+    preview = make_project_preview(
+        {
+            "id": "project-with-model",
+            "kunde": "Kunde",
+            "projekt": "Projekt mit GLB",
+            "s3_path": "pointclouds/kunde/project/projekt",
+            "pointclouds": [{"name": "Scan", "crs": "EPSG:25833"}],
+            "models": [
+                {
+                    "id": "fassade",
+                    "name": "Fassade",
+                    "format": "glb",
+                    "viewer_path": "kunde/project/projekt/models/fassade/versions/old/model.json",
+                    "s3_path": "pointclouds/kunde/project/projekt/models/fassade/versions/old",
+                    "crs": "EPSG:25833",
+                    "vertical_crs": "EPSG:7837",
+                }
+            ],
+        },
+        disabled=False,
+    )
+    calls = []
+    page = create_projects_page(
+        QtCore,
+        QtGui,
+        QtWidgets,
+        project_previews=(preview,),
+        on_project_action=lambda action, project, resource: calls.append((action, project, resource)),
+    )
+
+    try:
+        model_list = page.findChild(QtWidgets.QListWidget, "ModelList")
+        assert model_list is not None
+        assert model_list.count() == 1
+        assert "Fassade - GLB" in model_list.item(0).text()
+        model_list.setCurrentRow(0)
+        replace_action = next(
+            action
+            for action in page.findChildren(QtGui.QAction)
+            if action.text() == "Gewähltes 3D-Modell ersetzen"
+        )
+        assert replace_action.isEnabled()
+        replace_action.trigger()
+        app.processEvents()
+
+        assert calls[0][0] == ACTION_REPLACE_SINGLE_MODEL
+        assert calls[0][1].project_id == "project-with-model"
+        assert calls[0][2].model_id == "fassade"
+        remove_action = next(
+            action
+            for action in page.findChildren(QtGui.QAction)
+            if action.text() == "Gewähltes 3D-Modell entfernen"
+        )
+        assert remove_action.isEnabled()
+        remove_action.trigger()
+        app.processEvents()
+        assert calls[1][0] == "remove_model"
+        assert calls[1][2].model_id == "fassade"
+        add_action = next(
+            action
+            for action in page.findChildren(QtGui.QAction)
+            if action.text() == "3D-Modell hinzufügen"
+        )
+        add_action.trigger()
+        app.processEvents()
+        assert calls[2][0] == ACTION_ADD_MODELS
+        assert calls[2][1].project_id == "project-with-model"
+        assert calls[2][2] is None
     finally:
         page.deleteLater()
 

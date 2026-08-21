@@ -56,7 +56,11 @@ from .project_management_actions import (
     ACTION_RENAME,
     ACTION_REPLACE_ALL_POINTCLOUDS,
     ACTION_REPLACE_SINGLE_POINTCLOUD,
+    ACTION_REPLACE_SINGLE_MODEL,
+    ACTION_REPAIR_CRS_METADATA,
+    ACTION_ADD_MODELS,
     ACTION_ADD_POINTCLOUDS,
+    ACTION_REMOVE_MODEL,
     ACTION_REMOVE_POINTCLOUD,
     action_by_id,
     is_action_available,
@@ -1094,6 +1098,7 @@ def create_projects_page(
     pointcloud_role = QtCore.Qt.UserRole + 3
     search_role = QtCore.Qt.UserRole + 4
     sort_role = QtCore.Qt.UserRole + 5
+    model_role = QtCore.Qt.UserRole + 6
     date_columns = (4, 5)
 
     class ProjectsFilterProxy(QtCore.QSortFilterProxyModel):
@@ -1259,7 +1264,7 @@ def create_projects_page(
     info_grid.setContentsMargins(0, 0, 0, 0)
     info_grid.setHorizontalSpacing(14)
     info_grid.setVerticalSpacing(8)
-    info_field_keys = ("Kunde", "Format", "Punktwolken", "Erstellt am", "Viewer-Link", "S3-Pfad")
+    info_field_keys = ("Kunde", "Format", "Punktwolken", "3D-Modelle", "Erstellt am", "Viewer-Link", "S3-Pfad")
     info_values = {}
     for row, key in enumerate(info_field_keys):
         key_label = QtWidgets.QLabel(key)
@@ -1304,6 +1309,17 @@ def create_projects_page(
     detail_layout.addWidget(cloud_label)
     detail_layout.addWidget(cloud_list, 1)
 
+    model_label = QtWidgets.QLabel("3D-Modelle")
+    model_label.setObjectName("SectionTitle")
+    model_label.hide()
+    model_list = QtWidgets.QListWidget()
+    model_list.setObjectName("ModelList")
+    model_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+    model_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+    model_list.hide()
+    detail_layout.addWidget(model_label)
+    detail_layout.addWidget(model_list, 1)
+
     history_label = QtWidgets.QLabel("Historie")
     history_label.setObjectName("SectionTitle")
     history_label.hide()
@@ -1318,9 +1334,13 @@ def create_projects_page(
     primary_action_ids = (ACTION_OPEN_LINK, ACTION_COPY_LINK)
     edit_action_ids = (
         ACTION_RENAME,
+        ACTION_REPAIR_CRS_METADATA,
         ACTION_REPLACE_ALL_POINTCLOUDS,
         ACTION_ADD_POINTCLOUDS,
+        ACTION_ADD_MODELS,
         ACTION_REPLACE_SINGLE_POINTCLOUD,
+        ACTION_REPLACE_SINGLE_MODEL,
+        ACTION_REMOVE_MODEL,
         ACTION_REMOVE_POINTCLOUD,
         ACTION_DUPLICATE,
         ACTION_DOWNLOAD,
@@ -1353,7 +1373,7 @@ def create_projects_page(
     edit_menu = QtWidgets.QMenu(edit_button)
     edit_actions = {}
     for action_id in edit_action_ids:
-        if action_id in {ACTION_REMOVE_POINTCLOUD, ACTION_DELETE}:
+        if action_id in {ACTION_REMOVE_POINTCLOUD, ACTION_REMOVE_MODEL, ACTION_DELETE}:
             edit_menu.addSeparator()
         menu_action = edit_menu.addAction(action_by_id(action_id).label)
         menu_action.triggered.connect(
@@ -1381,6 +1401,12 @@ def create_projects_page(
         if not selected_items:
             return None
         return selected_items[0].data(pointcloud_role)
+
+    def selected_model():
+        selected_items = model_list.selectedItems()
+        if not selected_items:
+            return None
+        return selected_items[0].data(model_role)
 
     def reload_projects():
         nonlocal projects
@@ -1464,7 +1490,9 @@ def create_projects_page(
         # "triggered" slot re-enters the menu's popup loop and can crash Qt on
         # Windows, so the dispatch is deferred until the menu has fully closed.
         project = project_override or selected_project()
-        pointcloud = None if project_override is not None else selected_pointcloud()
+        pointcloud = None if project_override is not None or action_id == ACTION_ADD_MODELS else (
+            selected_model() if action_id in {ACTION_REPLACE_SINGLE_MODEL, ACTION_REMOVE_MODEL} else selected_pointcloud()
+        )
         QtCore.QTimer.singleShot(
             0,
             lambda: _dispatch_project_action(action_callback, action_id, project, pointcloud),
@@ -1510,6 +1538,7 @@ def create_projects_page(
             ACTION_OPEN_LINK,
             ACTION_COPY_LINK,
             ACTION_RENAME,
+            ACTION_REPAIR_CRS_METADATA,
             ACTION_DUPLICATE,
             ACTION_DOWNLOAD,
             ACTION_DISABLE_LINK,
@@ -1517,6 +1546,7 @@ def create_projects_page(
             ACTION_DELETE,
             ACTION_REPLACE_ALL_POINTCLOUDS,
             ACTION_ADD_POINTCLOUDS,
+            ACTION_ADD_MODELS,
         ):
             if not is_action_available(action_id, project):
                 continue
@@ -1546,6 +1576,30 @@ def create_projects_page(
         if menu.actions():
             menu.exec(cloud_list.viewport().mapToGlobal(position))
 
+    def show_model_context_menu(position):
+        item = model_list.itemAt(position)
+        if item is None:
+            return
+        model_list.setCurrentItem(item)
+        project = selected_project()
+        model = selected_model()
+        if not any(
+            is_action_available(action_id, project, model)
+            for action_id in (ACTION_REPLACE_SINGLE_MODEL, ACTION_REMOVE_MODEL)
+        ):
+            return
+        menu = QtWidgets.QMenu(model_list)
+        for action_id in (ACTION_REPLACE_SINGLE_MODEL, ACTION_REMOVE_MODEL):
+            if not is_action_available(action_id, project, model):
+                continue
+            if action_id == ACTION_REMOVE_MODEL and menu.actions():
+                menu.addSeparator()
+            menu_action = menu.addAction(action_by_id(action_id).label)
+            menu_action.triggered.connect(
+                lambda checked=False, selected_action_id=action_id: _handle_project_action_click(selected_action_id)
+            )
+        menu.exec(model_list.viewport().mapToGlobal(position))
+
     def update_action_buttons():
         project = selected_project()
         pointcloud = selected_pointcloud()
@@ -1553,7 +1607,8 @@ def create_projects_page(
             button.setEnabled(is_action_available(action_id, project, pointcloud))
         any_edit_available = False
         for action_id, menu_action in edit_actions.items():
-            available = is_action_available(action_id, project, pointcloud)
+            resource = selected_model() if action_id in {ACTION_REPLACE_SINGLE_MODEL, ACTION_REMOVE_MODEL} else pointcloud
+            available = is_action_available(action_id, project, resource)
             menu_action.setEnabled(available)
             menu_action.setVisible(available)
             any_edit_available = any_edit_available or available
@@ -1563,6 +1618,7 @@ def create_projects_page(
         project = selected_project()
         update_action_buttons()
         cloud_list.clear()
+        model_list.clear()
         if project is None:
             detail_title.setText("Kein Projekt ausgewählt")
             status_badge.hide()
@@ -1570,6 +1626,8 @@ def create_projects_page(
             info_container.hide()
             cloud_label.hide()
             cloud_list.hide()
+            model_label.hide()
+            model_list.hide()
             history_label.hide()
             history_log.hide()
             return
@@ -1586,6 +1644,7 @@ def create_projects_page(
         info_values["Kunde"].setText(project.customer or "-")
         info_values["Format"].setText(project.format or "-")
         info_values["Punktwolken"].setText(str(len(project.pointclouds)))
+        info_values["3D-Modelle"].setText(str(len(project.models)))
         info_values["Erstellt am"].setText(project.created or "-")
         _set_viewer_link(info_values["Viewer-Link"], project)
         info_values["S3-Pfad"].setText(project.s3_path or "-")
@@ -1600,6 +1659,19 @@ def create_projects_page(
             if pointcloud.s3_path:
                 item.setToolTip(pointcloud.s3_path)
             cloud_list.addItem(item)
+
+        if project.models:
+            model_label.show()
+            model_list.show()
+            for model in project.models:
+                crs = " / ".join(value for value in (model.crs, model.vertical_crs) if value) or "Unbekannt"
+                item = QtWidgets.QListWidgetItem(f"{model.name} - GLB - CRS: {crs}")
+                item.setData(model_role, model)
+                item.setToolTip(model.s3_path)
+                model_list.addItem(item)
+        else:
+            model_label.hide()
+            model_list.hide()
 
         if project.history:
             history_log.setPlainText("\n".join(project.history))
@@ -1623,12 +1695,21 @@ def create_projects_page(
         if is_action_available(ACTION_REPLACE_SINGLE_POINTCLOUD, project, pointcloud):
             _handle_project_action_click(ACTION_REPLACE_SINGLE_POINTCLOUD)
 
+    def replace_double_clicked_model():
+        project = selected_project()
+        model = selected_model()
+        if is_action_available(ACTION_REPLACE_SINGLE_MODEL, project, model):
+            _handle_project_action_click(ACTION_REPLACE_SINGLE_MODEL)
+
     table.selectionModel().selectionChanged.connect(lambda selected, deselected: update_detail_panel())
     table.doubleClicked.connect(lambda index: open_selected_project_if_available())
     cloud_list.itemSelectionChanged.connect(update_action_buttons)
+    model_list.itemSelectionChanged.connect(update_action_buttons)
     cloud_list.itemDoubleClicked.connect(lambda item: replace_double_clicked_pointcloud())
+    model_list.itemDoubleClicked.connect(lambda item: replace_double_clicked_model())
     table.customContextMenuRequested.connect(show_project_context_menu)
     cloud_list.customContextMenuRequested.connect(show_pointcloud_context_menu)
+    model_list.customContextMenuRequested.connect(show_model_context_menu)
     search.textChanged.connect(lambda text: (_select_first_visible_project_if_needed(), update_detail_panel()))
     status_filter.currentTextChanged.connect(lambda text: (_select_first_visible_project_if_needed(), update_detail_panel()))
     refresh_button.clicked.connect(reload_projects)
@@ -2043,6 +2124,10 @@ def _format_project_search_text(project) -> str:
         " ".join((pointcloud.name, pointcloud.format, pointcloud.crs, pointcloud.s3_path, pointcloud.viewer_path))
         for pointcloud in project.pointclouds
     )
+    model_text = " ".join(
+        " ".join((model.model_id, model.name, model.format, model.crs, model.vertical_crs, model.s3_path, model.viewer_path))
+        for model in project.models
+    )
     return " ".join(
         (
             project.project_id,
@@ -2056,6 +2141,7 @@ def _format_project_search_text(project) -> str:
             project.s3_path,
             project.viewer_path,
             pointcloud_text,
+            model_text,
         )
     )
 

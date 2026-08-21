@@ -129,6 +129,17 @@ def test_make_project_previews_converts_service_rows_with_paths_and_crs_info():
                             "visible": False,
                         }
                     ],
+                    "models": [
+                        {
+                            "id": "fassade",
+                            "name": "Fassade",
+                            "format": "glb",
+                            "viewer_path": "kunde/p1/projekt/models/fassade/versions/v1/model.json",
+                            "s3_path": "pointclouds/kunde/p1/projekt/models/fassade/versions/v1",
+                            "crs": "EPSG:25832",
+                            "vertical_crs": "EPSG:7837",
+                        }
+                    ],
                 },
                 False,
             )
@@ -141,6 +152,11 @@ def test_make_project_previews_converts_service_rows_with_paths_and_crs_info():
     assert previews[0].pointclouds[0].crs == "EPSG:25832"
     assert previews[0].pointclouds[0].s3_path == "pointclouds/kunde/p1/projekt/a/source.copc.laz"
     assert previews[0].pointclouds[0].visible is False
+    assert len(previews[0].models) == 1
+    assert previews[0].models[0].model_id == "fassade"
+    assert previews[0].models[0].name == "Fassade"
+    assert previews[0].models[0].s3_path.endswith("/models/fassade/versions/v1")
+    assert previews[0].models[0].vertical_crs == "EPSG:7837"
 
 
 def test_load_project_previews_accepts_callable_or_service_object():

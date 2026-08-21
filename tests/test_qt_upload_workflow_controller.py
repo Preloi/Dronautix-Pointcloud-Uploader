@@ -22,10 +22,18 @@ class FakeService:
         self.calls = []
         self.result = OperationResult()
 
-    def upload_new_project(self, request, on_progress=None, cancel_requested=None):
+    def upload_new_project(
+        self,
+        request,
+        on_progress=None,
+        cancel_requested=None,
+        confirm_spatial_warning=None,
+    ):
         self.calls.append((request, on_progress))
         self.cancel_callbacks = getattr(self, "cancel_callbacks", [])
         self.cancel_callbacks.append(cancel_requested)
+        self.spatial_warning_callbacks = getattr(self, "spatial_warning_callbacks", [])
+        self.spatial_warning_callbacks.append(confirm_spatial_warning)
         return self.result
 
 
@@ -115,6 +123,19 @@ def test_upload_new_project_accepts_core_request_and_forwards_progress_callback(
     controller.upload_new_project(request, on_progress=on_progress)
 
     assert service.calls == [(request, on_progress)]
+
+
+def test_upload_new_project_forwards_spatial_warning_confirmation(controller_module):
+    service = FakeService()
+    controller = controller_module.UploadWorkflowController(service)
+    request = NewProjectUploadWorkflowRequest(source_paths=("scan.copc.laz",), kunde="Kunde", projekt="Projekt")
+
+    def confirm(message):
+        return bool(message)
+
+    controller.upload_new_project(request, confirm_spatial_warning=confirm)
+
+    assert service.spatial_warning_callbacks == [confirm]
 
 
 @pytest.mark.parametrize(

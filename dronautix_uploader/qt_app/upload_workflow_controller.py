@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from dronautix_uploader.core.contracts import CancelCallback, ProgressCallback
@@ -22,6 +23,7 @@ class UploadWorkflowController:
         request_or_state: NewProjectUploadWorkflowRequest | UploadDialogState,
         on_progress: ProgressCallback | None = None,
         cancel_requested: CancelCallback | None = None,
+        confirm_spatial_warning: Callable[[str], bool] | None = None,
     ) -> ProjectOperationSummary:
         if isinstance(request_or_state, UploadDialogState):
             request = validate_upload_dialog_state(request_or_state)
@@ -34,6 +36,7 @@ class UploadWorkflowController:
             request,
             on_progress=on_progress,
             cancel_requested=cancel_requested,
+            confirm_spatial_warning=confirm_spatial_warning,
         )
         return summarize_project_operation_result(result)
 

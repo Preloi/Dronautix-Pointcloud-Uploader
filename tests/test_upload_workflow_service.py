@@ -2,6 +2,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import struct
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +14,7 @@ from dronautix_uploader.core.upload_workflow_service import (
     GLB_UPLOAD_STAGING_ROOT_NAME,
     NewProjectUploadWorkflowRequest,
     UploadWorkflowService,
+    build_model_pointcloud_spatial_warning,
     cleanup_prepared_glb_staging_dirs,
 )
 
@@ -76,6 +78,112 @@ def make_converter_runner(events=None, calls=None):
             on_progress(event)
 
     return fake_runner
+
+
+def _write_potree_bounds(directory: Path, minimum, maximum):
+    directory.mkdir()
+    (directory / "metadata.json").write_text(
+        json.dumps({"boundingBox": {"min": list(minimum), "max": list(maximum)}}),
+        encoding="utf-8",
+    )
+
+
+def _write_las_bounds(path: Path, minimum, maximum):
+    header = bytearray(227)
+    header[:4] = b"LASF"
+    struct.pack_into(
+        "<6d",
+        header,
+        179,
+        maximum[0],
+        minimum[0],
+        maximum[1],
+        minimum[1],
+        maximum[2],
+        minimum[2],
+    )
+    path.write_bytes(header)
+
+
+def test_spatial_warning_lists_far_model_and_distance_for_potree_bounds(tmp_path):
+    pointcloud = tmp_path / "pointcloud"
+    _write_potree_bounds(pointcloud, (286445.7865, 5395595.6958, 422.9587), (288171.3629, 5397321.2722, 2148.5351))
+    sources = (SimpleNamespace(source_path=str(pointcloud)),)
+    models = (
+        SimpleNamespace(
+            name="WA-F-P1_SK219",
+            slug="wa_f_p1_sk219",
+            bounds_min=(281535.918222, 5401959.547388, 424.993697),
+            bounds_max=(281572.504959, 5401993.634319, 452.936716),
+        ),
+    )
+
+    warning = build_model_pointcloud_spatial_warning(sources, models)
+
+    assert "WA-F-P1_SK219" in warning
+    assert "6,7 km" in warning
+    assert "vollständig außerhalb" in warning
+
+
+def test_spatial_warning_accepts_model_overlapping_copc_las_header_bounds(tmp_path):
+    pointcloud = tmp_path / "cloud.copc.laz"
+    _write_las_bounds(pointcloud, (100.0, 200.0, 300.0), (200.0, 300.0, 400.0))
+    sources = (SimpleNamespace(source_path=str(pointcloud)),)
+    models = (SimpleNamespace(name="Halle", slug="halle", bounds_min=(150.0, 250.0, 310.0), bounds_max=(160.0, 260.0, 320.0)),)
+
+    assert build_model_pointcloud_spatial_warning(sources, models) == ""
+
+
+def test_upload_declines_far_model_before_first_s3_upload(tmp_path, monkeypatch):
+    from dronautix_uploader.core import upload_workflow_service
+
+    pointcloud = tmp_path / "pointcloud"
+    _write_potree_bounds(pointcloud, (100.0, 200.0, 300.0), (200.0, 300.0, 400.0))
+    model = tmp_path / "halle.glb"
+    model.write_bytes(b"original")
+    app_temp_root = tmp_path / "temp"
+    monkeypatch.setattr(upload_workflow_service.tempfile, "gettempdir", lambda: str(app_temp_root))
+
+    class FarModelService:
+        def prepare_many(self, _model_inputs, **kwargs):
+            stage = Path(kwargs["staging_root"]) / ".glb-upload-far"
+            stage.mkdir()
+            return (
+                SimpleNamespace(
+                    staging_dir=str(stage),
+                    name="Halle",
+                    slug="halle",
+                    bounds_min=(5000.0, 6000.0, 300.0),
+                    bounds_max=(5010.0, 6010.0, 310.0),
+                ),
+            )
+
+    repository = FakeRepository()
+    s3_client = FakeS3Client()
+    confirmations = []
+    events = []
+    result = UploadWorkflowService(
+        repository=repository,
+        s3_client=s3_client,
+        glb_service=FarModelService(),
+    ).upload_new_project(
+        NewProjectUploadWorkflowRequest(
+            source_paths=(str(pointcloud),),
+            kunde="Kunde",
+            projekt="Projekt",
+            crs_info_by_source_path={str(pointcloud): {"value": "EPSG:25833", "vertical_crs": "EPSG:7837"}},
+            model_inputs=(ModelUploadInput(source_path=str(model)),),
+        ),
+        on_progress=events.append,
+        confirm_spatial_warning=lambda message: confirmations.append(message) or False,
+    )
+
+    assert result.status == "cancelled"
+    assert confirmations and "Halle" in confirmations[0]
+    assert any(event.kind == "warning" and "außerhalb" in event.message for event in events)
+    assert s3_client.uploads == []
+    assert repository.loaded_indexes == 0
+    assert not list((app_temp_root / GLB_UPLOAD_STAGING_ROOT_NAME).glob(".glb-upload-run-*"))
 
 
 def test_glb_staging_cleanup_retries_and_never_removes_a_source_outside_its_staging_root(tmp_path, monkeypatch):
