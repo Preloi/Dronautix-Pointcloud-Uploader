@@ -520,6 +520,9 @@ def test_upload_page_accepts_optional_native_glbs_when_qt_available(tmp_path):
 
     try:
         page.add_source_paths(("scan.copc.laz",))
+        label_texts = {label.text() for label in page.findChildren(QtWidgets.QLabel)}
+        assert "3D-Modelle (GLB)" in label_texts
+        assert not any("nativ X=Ost" in text for text in label_texts)
         page.findChild(QtWidgets.QLineEdit, "UploadCustomerInput").setText("Kunde")
         page.findChild(QtWidgets.QLineEdit, "UploadProjectInput").setText("Projekt")
         horizontal = [field for field in page.findChildren(QtWidgets.QLineEdit) if field.placeholderText() == "automatisch erkennen"][0]

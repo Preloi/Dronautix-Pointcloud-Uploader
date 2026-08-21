@@ -401,13 +401,10 @@ def create_upload_page(
     models_layout.setContentsMargins(20, 16, 20, 16)
     models_layout.setSpacing(10)
     models_header = QtWidgets.QHBoxLayout()
-    models_title = QtWidgets.QLabel("3D-Modelle (optional)")
+    models_title = QtWidgets.QLabel("3D-Modelle (GLB)")
     models_title.setObjectName("PanelTitle")
-    models_hint = QtWidgets.QLabel("Nur GLB · nativ X=Ost, Y=Nord, Z=Höhe (m)")
-    models_hint.setObjectName("MutedText")
     models_header.addWidget(models_title)
     models_header.addStretch(1)
-    models_header.addWidget(models_hint)
     models_layout.addLayout(models_header)
 
     model_handlers = {}
