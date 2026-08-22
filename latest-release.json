@@ -6,6 +6,6 @@
   "manifest_branch": "master",
   "release_tag": "v2.1.6",
   "installer_url": "https://github.com/Preloi/Dronautix-Pointcloud-Uploader/releases/download/v2.1.6/Dronautix_Pointcloud_Uploader_Setup_2.1.6.exe",
-  "published_at": "2026-08-20T16:19:20",
-  "installer_sha256": "dc052e08b862c825b3884d9667c5c29dccb2568f5e25959b4793807ab97ae731"
+  "published_at": "2026-08-22T14:30:58",
+  "installer_sha256": "d43a13ebd47c58ac786a62b09ac4c5d1668fae25701d30dcb330f5e5e12659c7"
 }
