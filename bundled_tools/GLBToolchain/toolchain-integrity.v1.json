@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "toolchain_version": "1.0.0-win32-x64",
+  "toolchain_version": "1.1.0-win32-x64",
   "files": [
     {
       "relative_path": "ktx/bin/ktx.dll",
@@ -21020,7 +21020,7 @@
     },
     {
       "relative_path": "runners/optimize-glb.mjs",
-      "sha256": "2a013624ef758ba367a19fbcace5fca6db2529115d1fd7ab3d4700d5db072857"
+      "sha256": "8fc832fb5e1dce36bf2cf920961e5e50f290fedde5d40fe27e75ed4801e4146c"
     },
     {
       "relative_path": "runners/validate-glb.mjs",
@@ -21032,7 +21032,7 @@
     },
     {
       "relative_path": "toolchain-manifest.v1.json",
-      "sha256": "f02cd9988d9984de4a8ec74445bd1271aacd323ddb59943ddcf8ac953d8f231b"
+      "sha256": "f9a87fbda1c65406ce0bd3bbcbb4f70aa077c3a8f8cd2996b7cfd372397f0d98"
     },
     {
       "relative_path": "viewer-capabilities.v1.json",

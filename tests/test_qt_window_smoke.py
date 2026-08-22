@@ -521,6 +521,7 @@ def test_upload_page_accepts_optional_native_glbs_when_qt_available(tmp_path):
     try:
         page.add_source_paths(("scan.copc.laz",))
         label_texts = {label.text() for label in page.findChildren(QtWidgets.QLabel)}
+        assert "Punktwolken (las,laz)" in label_texts
         assert "3D-Modelle (GLB)" in label_texts
         assert not any("nativ X=Ost" in text for text in label_texts)
         page.findChild(QtWidgets.QLineEdit, "UploadCustomerInput").setText("Kunde")
@@ -531,7 +532,29 @@ def test_upload_page_accepts_optional_native_glbs_when_qt_available(tmp_path):
         vertical.setText("EPSG:7837")
 
         page.add_model_paths((str(glb_path), str(glb_path), str(tmp_path / "not-supported.obj")))
+        source_list = page.findChild(QtWidgets.QListWidget, "UploadSourceList")
         model_list = page.findChild(QtWidgets.QListWidget, "UploadModelList")
+        log_view = page.findChild(QtWidgets.QPlainTextEdit, "UploadLogView")
+        form_scroll = page.findChild(QtWidgets.QScrollArea, "UploadFormScrollArea")
+        assert source_list.minimumHeight() == model_list.minimumHeight()
+        assert source_list.maximumHeight() == model_list.maximumHeight()
+        assert source_list.parentWidget().sizePolicy().verticalPolicy() == QtWidgets.QSizePolicy.Fixed
+        assert model_list.parentWidget().sizePolicy().verticalPolicy() == QtWidgets.QSizePolicy.Fixed
+        assert not log_view.isHidden()
+        assert page.layout().stretch(page.layout().indexOf(form_scroll)) == 1
+        assert form_scroll.horizontalScrollBarPolicy() == QtCore.Qt.ScrollBarAsNeeded
+        assert form_scroll.widget().layout().indexOf(source_list.parentWidget()) >= 0
+        assert form_scroll.widget().layout().indexOf(model_list.parentWidget()) >= 0
+        assert source_list.parentWidget().layout().stretch(
+            source_list.parentWidget().layout().indexOf(source_list)
+        ) == model_list.parentWidget().layout().stretch(
+            model_list.parentWidget().layout().indexOf(model_list)
+        )
+        page.resize(1000, 600)
+        page.show()
+        QtWidgets.QApplication.processEvents()
+        assert log_view.isVisible()
+        assert log_view.geometry().bottom() <= page.contentsRect().bottom()
         assert model_list.count() == 1
         assert "Haus.glb" in model_list.item(0).text()
         assert "Georeferenzierung aus GLB" in model_list.item(0).text()

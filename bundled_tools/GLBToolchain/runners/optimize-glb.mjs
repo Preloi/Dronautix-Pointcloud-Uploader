@@ -4,7 +4,7 @@ import {tmpdir} from "node:os";
 import path from "node:path";
 import {fileURLToPath} from "node:url";
 import {NodeIO} from "@gltf-transform/core";
-import {ALL_EXTENSIONS, KHRTextureBasisu} from "@gltf-transform/extensions";
+import {ALL_EXTENSIONS, EXTMeshoptCompression, KHRTextureBasisu} from "@gltf-transform/extensions";
 import sharp from "sharp";
 
 const bundleRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -13,7 +13,7 @@ const ktxDirectory = path.join(bundleRoot, "ktx", "bin");
 const ktx = path.join(ktxDirectory, "ktx.exe");
 
 function fail(message) {
-	process.stderr.write(`${message}\n`);
+	process.stderr.write(`${message?.stack || message}\n`);
 	process.exitCode = 1;
 }
 
@@ -56,6 +56,29 @@ async function executeKtx(argumentsList) {
 	});
 }
 
+async function executeKtxWithQualityAudit(argumentsList) {
+	const output = await new Promise((resolve, reject) => {
+		const child = spawn(ktx, argumentsList, {
+			cwd: bundleRoot,
+			env: bundledEnvironment(),
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		let report = "";
+		child.stdout.on("data", (chunk) => { report += chunk; });
+		child.stderr.on("data", (chunk) => { report += chunk; });
+		child.once("error", reject);
+		child.once("exit", (code, signal) => {
+			if (code === 0) resolve(report);
+			else reject(new Error(`KTX beendet (${signal || code}): ${report.trim()}`));
+		});
+	});
+	const levelZero = /Level 0:\s*[\r\n]+\s*PSNR:\s*([0-9.]+)/i.exec(output);
+	const psnr = Number(levelZero?.[1]);
+	if (!Number.isFinite(psnr) || psnr < MIN_KTX2_PSNR_DB) {
+		throw new Error(`E_KTX_QUALITY: ${Number.isFinite(psnr) ? psnr.toFixed(2) : "unbekannt"} dB unterschreitet ${MIN_KTX2_PSNR_DB} dB.`);
+	}
+}
+
 async function isStaticScene(source) {
 	const bytes = await readFile(source);
 	if (bytes.length < 20 || bytes.toString("ascii", 0, 4) !== "glTF") return false;
@@ -93,6 +116,11 @@ const LINEAR_TEXTURE_SLOTS = new Set([
 	"iridescenceThicknessTexture", "anisotropyTexture", "bumpTexture",
 ]);
 const KTX_INPUT_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/avif"]);
+const MIN_KTX2_PSNR_DB = 38;
+const MAX_POSITION_ERROR_METRES = 0.001;
+const SIMPLIFICATION_ERROR_BUDGET_METRES = 0.0005;
+const QUANTIZATION_ERROR_BUDGET_METRES = MAX_POSITION_ERROR_METRES - SIMPLIFICATION_ERROR_BUDGET_METRES;
+const VISURA_SIMPLIFICATION_ERROR = 0.000005;
 
 function ktxTextureRoles(document) {
 	if ([...(document.extensionsUsed || []), ...(document.extensionsRequired || [])].includes("KHR_texture_basisu")) {
@@ -204,11 +232,14 @@ async function createKtx2Candidate(source, destination) {
 			const input = await ktxInputImage(image, mimeType, path.join(workDir, `image-${imageIndex}`));
 			const output = path.join(workDir, `image-${imageIndex}.ktx2`);
 			const format = `${input.hasAlpha ? "R8G8B8A8" : "R8G8B8"}_${colorSpace === "srgb" ? "SRGB" : "UNORM"}`;
-			await executeKtx([
-				// UASTC quality 2 preserves a single conservative Basis Universal
-				// profile for both sRGB colour and linear data maps. No RDO or
-				// channel-repacking is enabled; normal/ORM alpha stays intact.
-				"create", "--encode", "uastc", "--uastc-quality", "2",
+			const encoding = colorSpace === "srgb"
+				? ["--encode", "basis-lz", "--qlevel", "255", "--clevel", "6"]
+				: ["--encode", "uastc", "--uastc-quality", "4", "--zstd", "18"];
+			await executeKtxWithQualityAudit([
+				// Full-resolution mipmaps remain GPU-compressed in the viewer.
+				// Colour textures use high-quality ETC1S for transfer size; linear
+				// data maps use high-quality UASTC to avoid block/RDO artefacts.
+				"create", ...encoding, "--generate-mipmap", "--mipmap-filter", "lanczos4", "--compare-psnr",
 				"--assign-tf", colorSpace === "srgb" ? "srgb" : "linear",
 				"--assign-primaries", colorSpace === "srgb" ? "bt709" : "none",
 				"--format", format, input.path, output,
@@ -219,6 +250,220 @@ async function createKtx2Candidate(source, destination) {
 		if (!basisu) throw new Error("E_KTX_EXTENSION: KHR_texture_basisu wurde nicht erzeugt.");
 	} finally {
 		await rm(workDir, {recursive: true, force: true});
+	}
+}
+
+async function createLosslessMeshoptCandidate(source, destination) {
+	const reordered = `${destination}.reordered.glb`;
+	try {
+		await execute(["reorder", source, reordered, "--target", "size"]);
+		const {MeshoptEncoder} = await import("meshoptimizer");
+		await MeshoptEncoder.ready;
+		const io = new NodeIO()
+			.registerExtensions(ALL_EXTENSIONS)
+			.registerDependencies({"meshopt.encoder": MeshoptEncoder});
+		const document = await io.read(reordered);
+		document.createExtension(EXTMeshoptCompression)
+			.setRequired(true)
+			.setEncoderOptions({method: EXTMeshoptCompression.EncoderMethod.QUANTIZE});
+		await io.write(destination, document);
+	} finally {
+		await rm(reordered, {force: true});
+	}
+}
+
+function attributeTolerance(semantic) {
+	if (semantic === "NORMAL" || semantic === "TANGENT") return 0.0001;
+	if (semantic.startsWith("TEXCOORD_") || semantic.startsWith("COLOR_")) return 0.00002;
+	if (semantic.startsWith("WEIGHTS_") || semantic.startsWith("_")) return 0.00002;
+	return 0;
+}
+
+function transformPoint(point, matrix) {
+	const x = point[0], y = point[1], z = point[2];
+	const divisor = matrix[3] * x + matrix[7] * y + matrix[11] * z + matrix[15] || 1;
+	return [
+		(matrix[0] * x + matrix[4] * y + matrix[8] * z + matrix[12]) / divisor,
+		(matrix[1] * x + matrix[5] * y + matrix[9] * z + matrix[13]) / divisor,
+		(matrix[2] * x + matrix[6] * y + matrix[10] * z + matrix[14]) / divisor,
+	];
+}
+
+function worldTransformNormUpperBound(matrix) {
+	if (!matrix || matrix.length < 16) return NaN;
+	const values = [matrix[0], matrix[1], matrix[2], matrix[4], matrix[5], matrix[6], matrix[8], matrix[9], matrix[10]];
+	if (values.some((value) => !Number.isFinite(value))) return NaN;
+	const columnNorm = Math.max(
+		Math.abs(matrix[0]) + Math.abs(matrix[1]) + Math.abs(matrix[2]),
+		Math.abs(matrix[4]) + Math.abs(matrix[5]) + Math.abs(matrix[6]),
+		Math.abs(matrix[8]) + Math.abs(matrix[9]) + Math.abs(matrix[10]),
+	);
+	const rowNorm = Math.max(
+		Math.abs(matrix[0]) + Math.abs(matrix[4]) + Math.abs(matrix[8]),
+		Math.abs(matrix[1]) + Math.abs(matrix[5]) + Math.abs(matrix[9]),
+		Math.abs(matrix[2]) + Math.abs(matrix[6]) + Math.abs(matrix[10]),
+	);
+	return Math.sqrt(columnNorm * rowNorm);
+}
+
+function accessorsMatch(source, output, tolerance) {
+	if (!source || !output) return source === output;
+	if (source.getCount() !== output.getCount() || source.getElementSize() !== output.getElementSize()) return false;
+	const sourceValue = [];
+	const outputValue = [];
+	for (let index = 0; index < source.getCount(); index++) {
+		source.getElement(index, sourceValue);
+		output.getElement(index, outputValue);
+		for (let component = 0; component < sourceValue.length; component++) {
+			if (Math.abs(sourceValue[component] - outputValue[component]) > tolerance) return false;
+		}
+	}
+	return true;
+}
+
+function assertQuantizationAudit(beforeDocument, afterDocument, maximumPositionErrorMetres) {
+	const beforeRoot = beforeDocument.getRoot();
+	const afterRoot = afterDocument.getRoot();
+	const beforeMeshes = beforeRoot.listMeshes();
+	const afterMeshes = afterRoot.listMeshes();
+	const beforeNodes = beforeRoot.listNodes();
+	const afterNodes = afterRoot.listNodes();
+	if (beforeMeshes.length !== afterMeshes.length || beforeNodes.length !== afterNodes.length) {
+		throw new Error("E_QUANTIZATION_STRUCTURE: Quantisierung hat Mesh- oder Node-Struktur verändert.");
+	}
+	for (let meshIndex = 0; meshIndex < beforeMeshes.length; meshIndex++) {
+		const sourceMesh = beforeMeshes[meshIndex].listPrimitives();
+		const outputMesh = afterMeshes[meshIndex].listPrimitives();
+		if (sourceMesh.length !== outputMesh.length) throw new Error("E_QUANTIZATION_STRUCTURE: Primitive-Anzahl wurde verändert.");
+		for (let primitiveIndex = 0; primitiveIndex < sourceMesh.length; primitiveIndex++) {
+			const source = sourceMesh[primitiveIndex];
+			const output = outputMesh[primitiveIndex];
+			if (source.getMode() !== output.getMode() || source.listTargets().length !== output.listTargets().length
+				|| !accessorsMatch(source.getIndices(), output.getIndices(), 0)) {
+				throw new Error("E_QUANTIZATION_TOPOLOGY: Primitive-Topologie wurde verändert.");
+			}
+			const sourceSemantics = source.listSemantics().sort();
+			const outputSemantics = output.listSemantics().sort();
+			if (sourceSemantics.join("\0") !== outputSemantics.join("\0")) {
+				throw new Error("E_QUANTIZATION_ATTRIBUTES: Vertex-Attribute wurden verändert.");
+			}
+			for (const semantic of sourceSemantics) {
+				if (semantic === "POSITION") continue;
+				const tolerance = attributeTolerance(semantic);
+				if (!accessorsMatch(source.getAttribute(semantic), output.getAttribute(semantic), tolerance)) {
+					throw new Error(`E_QUANTIZATION_ATTRIBUTE_ERROR: ${semantic} überschreitet die kontrollierte Fehlerschranke.`);
+				}
+			}
+		}
+	}
+	const beforeMeshIndex = new Map(beforeMeshes.map((mesh, index) => [mesh, index]));
+	const afterMeshIndex = new Map(afterMeshes.map((mesh, index) => [mesh, index]));
+	for (let nodeIndex = 0; nodeIndex < beforeNodes.length; nodeIndex++) {
+		const sourceNode = beforeNodes[nodeIndex];
+		const outputNode = afterNodes[nodeIndex];
+		const sourceMeshIndex = sourceNode.getMesh() ? beforeMeshIndex.get(sourceNode.getMesh()) : null;
+		const outputMeshIndex = outputNode.getMesh() ? afterMeshIndex.get(outputNode.getMesh()) : null;
+		if (sourceMeshIndex !== outputMeshIndex) {
+			throw new Error("E_QUANTIZATION_STRUCTURE: Node-Mesh-Zuordnung wurde verändert.");
+		}
+		if (sourceMeshIndex === null) continue;
+		const sourceMesh = beforeMeshes[sourceMeshIndex].listPrimitives();
+		const outputMesh = afterMeshes[outputMeshIndex].listPrimitives();
+		for (let primitiveIndex = 0; primitiveIndex < sourceMesh.length; primitiveIndex++) {
+			const sourcePositions = sourceMesh[primitiveIndex].getAttribute("POSITION");
+			const outputPositions = outputMesh[primitiveIndex].getAttribute("POSITION");
+			if (!sourcePositions || !outputPositions || sourcePositions.getCount() !== outputPositions.getCount()) {
+				throw new Error("E_QUANTIZATION_POSITION: POSITION-Accessor wurde verändert.");
+			}
+			const sourceValue = [];
+			const outputValue = [];
+			for (let index = 0; index < sourcePositions.getCount(); index++) {
+				sourcePositions.getElement(index, sourceValue);
+				outputPositions.getElement(index, outputValue);
+				const sourcePoint = transformPoint(sourceValue, sourceNode.getWorldMatrix());
+				const outputPoint = transformPoint(outputValue, outputNode.getWorldMatrix());
+				const error = Math.hypot(
+					sourcePoint[0] - outputPoint[0], sourcePoint[1] - outputPoint[1], sourcePoint[2] - outputPoint[2],
+				);
+				if (error > maximumPositionErrorMetres) {
+					throw new Error(
+						`E_QUANTIZATION_POSITION_ERROR: ${error.toFixed(6)} m überschreitet das verbleibende Fehlerbudget.`,
+					);
+				}
+			}
+		}
+	}
+}
+
+async function simplificationNormalizedBudget(document) {
+	const root = document.getRoot();
+	const meshes = root.listMeshes();
+	const primitives = meshes.flatMap((mesh) => mesh.listPrimitives());
+	if (!primitives.length || primitives.some((primitive) => primitive.getMode() !== 4
+		|| !primitive.getIndices() || !(primitive.getAttribute("POSITION")?.getArray() instanceof Float32Array))) {
+		return null;
+	}
+	const {MeshoptSimplifier} = await import("meshoptimizer");
+	await MeshoptSimplifier.ready;
+	const worldAmplification = new Map(meshes.map((mesh) => [mesh, 1]));
+	for (const node of root.listNodes()) {
+		const mesh = node.getMesh();
+		if (!mesh) continue;
+		const amplification = worldTransformNormUpperBound(node.getWorldMatrix());
+		if (!(amplification > 0) || !Number.isFinite(amplification)) return null;
+		worldAmplification.set(mesh, Math.max(worldAmplification.get(mesh) || 1, amplification));
+	}
+	const scales = meshes.flatMap((mesh) => mesh.listPrimitives().map((primitive) => (
+		MeshoptSimplifier.getScale(primitive.getAttribute("POSITION").getArray(), 3)
+		* (worldAmplification.get(mesh) || 1)
+	)));
+	if (scales.some((scale) => !(scale > 0) || !Number.isFinite(scale))) return null;
+	return Math.min(VISURA_SIMPLIFICATION_ERROR, SIMPLIFICATION_ERROR_BUDGET_METRES / Math.max(...scales));
+}
+
+async function createVisuraSafeCandidate(source, destination) {
+	const io = new NodeIO().registerExtensions(ALL_EXTENSIONS);
+	const textureOnly = `${destination}.ktx2.glb`;
+	const simplified = `${destination}.simplified.glb`;
+	const quantized = `${destination}.quantized.glb`;
+	try {
+		await createKtx2Candidate(source, textureOnly);
+		const document = await io.read(textureOnly);
+		const normalizedSimplificationBudget = await simplificationNormalizedBudget(document);
+		let geometrySource = textureOnly;
+		let geometryDocument = document;
+		if (normalizedSimplificationBudget !== null) {
+			await execute([
+				"simplify", textureOnly, simplified,
+				"--ratio", "0", "--error", normalizedSimplificationBudget.toPrecision(12),
+			]);
+			geometrySource = simplified;
+			geometryDocument = await io.read(simplified);
+		}
+		let compressionSource = geometrySource;
+		try {
+			await execute([
+				"quantize", geometrySource, quantized,
+				"--quantization-volume", "mesh",
+				"--quantize-position", "16", "--quantize-normal", "16",
+				"--quantize-texcoord", "16", "--quantize-color", "16",
+				"--quantize-weight", "16", "--quantize-generic", "16",
+			]);
+			const quantizedDocument = await io.read(quantized);
+			assertQuantizationAudit(
+				geometryDocument,
+				quantizedDocument,
+				QUANTIZATION_ERROR_BUDGET_METRES,
+			);
+			compressionSource = quantized;
+		} catch (error) {
+			process.stderr.write(`Visura-Kandidat: Geometrie bleibt wegen 1-mm-Vertrag unquantisiert (${error?.message || error}).\n`);
+		}
+		await createLosslessMeshoptCandidate(compressionSource, destination);
+	} finally {
+		await rm(textureOnly, {force: true});
+		await rm(simplified, {force: true});
+		await rm(quantized, {force: true});
 	}
 }
 
@@ -275,6 +520,17 @@ function assertKtxPolicyMatrix() {
 	if (!existingKtx) throw new Error("KTX2-Selbsttest: bestehendes KTX2 wurde nicht konservativ übersprungen.");
 }
 
+function assertWorldTransformBudgetMatrix() {
+	const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+	const scaled = [1000, 0, 0, 0, 0, 1000, 0, 0, 0, 0, 1000, 0, 0, 0, 0, 1];
+	const sheared = [1, 0, 0, 0, 10, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+	if (worldTransformNormUpperBound(identity) !== 1
+		|| worldTransformNormUpperBound(scaled) !== 1000
+		|| worldTransformNormUpperBound(sheared) < Math.hypot(10, 1)) {
+		throw new Error("GLB-Selbsttest: Welttransformation wird für die metrische Fehlerschranke nicht konservativ erfasst.");
+	}
+}
+
 async function main() {
 	if (process.argv[2] === "--self-test") {
 		await access(cli);
@@ -282,12 +538,13 @@ async function main() {
 		await execute(["--version"]);
 		await executeKtx(["--version"]);
 		assertKtxPolicyMatrix();
+		assertWorldTransformBudgetMatrix();
 		process.stdout.write("gltf-transform and KTX BasisU encoder ready\n");
 		return;
 	}
 	const [, , codec, source, destination, ...extra] = process.argv;
-	if (extra.length || !source || !destination || !["conservative", "meshopt", "draco", "ktx2"].includes(codec)) {
-		throw new Error("Aufruf: optimize-glb.mjs <conservative|meshopt|draco|ktx2> <eingabe.glb> <ausgabe.glb>");
+	if (extra.length || !source || !destination || !["conservative", "visura-safe", "meshopt", "draco", "ktx2"].includes(codec)) {
+		throw new Error("Aufruf: optimize-glb.mjs <conservative|visura-safe|meshopt|draco|ktx2> <eingabe.glb> <ausgabe.glb>");
 	}
 	if (codec === "conservative") {
 		const temporary = `${destination}.dedup.glb`;
@@ -300,6 +557,10 @@ async function main() {
 	if (!(await isStaticScene(source))) {
 		process.stderr.write("E_NOT_STATIC: Starke GLB-Optimierung ist für Animationen, Skins oder Morph Targets gesperrt.\n");
 		process.exitCode = 20;
+		return;
+	}
+	if (codec === "visura-safe") {
+		await createVisuraSafeCandidate(source, destination);
 		return;
 	}
 	if (codec === "ktx2") {
@@ -323,4 +584,4 @@ async function main() {
 	]);
 }
 
-main().catch((error) => fail(error?.message || String(error)));
+main().catch((error) => fail(error));

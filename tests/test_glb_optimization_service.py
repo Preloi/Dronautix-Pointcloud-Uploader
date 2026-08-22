@@ -718,6 +718,30 @@ def test_candidate_may_losslessly_bake_a_one_pixel_base_color_swatch(tmp_path):
     cleanup_prepared_model_uploads((prepared,))
 
 
+def test_audited_transcoding_ignores_only_explicit_standard_material_defaults(tmp_path):
+    original = native_document(materials=[{"pbrMetallicRoughness": {"metallicFactor": 0.5}}])
+    explicit_defaults = native_document(materials=[{
+        "emissiveFactor": [0, 0, 0],
+        "alphaMode": "OPAQUE",
+        "alphaCutoff": 0.5,
+        "doubleSided": False,
+        "pbrMetallicRoughness": {
+            "baseColorFactor": [1, 1, 1, 1],
+            "metallicFactor": 0.5,
+            "roughnessFactor": 1,
+        },
+    }])
+
+    original_signature = optimization_module._material_signature(
+        original, tmp_path / "original.glb", 0, audited_transcoding=True
+    )
+    candidate_signature = optimization_module._material_signature(
+        explicit_defaults, tmp_path / "candidate.glb", 0, audited_transcoding=True
+    )
+
+    assert original_signature == candidate_signature
+
+
 def test_candidate_that_drops_animation_skin_or_morph_semantics_is_rejected(tmp_path):
     source = tmp_path / "animated.glb"
     document = native_document(extras={"padding": "x" * 2000})
@@ -821,7 +845,7 @@ def test_meshopt_virtual_buffer_is_accepted_only_with_bounded_compressed_source(
         _read_glb_document(source)
 
 
-def test_bundled_optimizer_offers_conservative_then_each_explicit_codec(tmp_path, monkeypatch):
+def test_bundled_optimizer_offers_conservative_visura_then_each_explicit_codec(tmp_path, monkeypatch):
     source = tmp_path / "source.glb"
     source.write_bytes(b"source")
     seen = []
@@ -835,7 +859,7 @@ def test_bundled_optimizer_offers_conservative_then_each_explicit_codec(tmp_path
     monkeypatch.setattr(optimization_module, "_run_bundled_runner", run)
     candidates = tuple(BundledGLBOptimizationToolchain(tmp_path).optimize_candidates(source, tmp_path))
 
-    assert seen == ["conservative", "meshopt", "draco", "ktx2"]
+    assert seen == ["conservative", "visura-safe", "meshopt", "draco", "ktx2"]
     assert [name for name, _path in candidates] == seen
 
 
@@ -992,7 +1016,7 @@ def test_bundled_adapter_resolves_relative_source_and_output_paths(monkeypatch, 
     monkeypatch.setattr(module, "get_glb_toolchain_status", lambda _root: enabled_status())
     monkeypatch.setattr(module, "_run_bundled_runner", runner)
     candidates = tuple(BundledGLBOptimizationToolchain(tmp_path).optimize_candidates(Path("input.glb"), Path("out")))
-    assert len(candidates) == 4
+    assert len(candidates) == 5
     assert all(Path(arguments[1]).is_absolute() and Path(arguments[2]).is_absolute() for arguments in recorded)
 
 

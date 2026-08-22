@@ -7,6 +7,7 @@ import subprocess
 import pytest
 
 import dronautix_uploader.core.glb_toolchain as toolchain_module
+from dronautix_uploader.core.contracts import ModelUploadInput
 from dronautix_uploader.core.glb_toolchain import (
     REQUIRED_DECODER_IDS,
     REQUIRED_RUNNER_IDS,
@@ -19,7 +20,12 @@ from dronautix_uploader.core.glb_toolchain import (
     load_viewer_capabilities,
     validate_glb_toolchain_for_packaging,
 )
-from dronautix_uploader.core.glb_optimization_service import BundledGLBCompressedAssetDecoder, GLBValidationError
+from dronautix_uploader.core.glb_optimization_service import (
+    BundledGLBCompressedAssetDecoder,
+    GLBOptimizationService,
+    GLBValidationError,
+    cleanup_prepared_model_uploads,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -168,10 +174,26 @@ def test_runner_contract_uses_explicit_pipeline_and_decodes_compressed_extension
     assert "[\"dedup\"" in optimizer
     assert "[\"prune\"" in optimizer
     assert "[\"reorder\"" in optimizer
+    assert '"visura-safe"' in optimizer
+    assert "MAX_POSITION_ERROR_METRES = 0.001" in optimizer
+    assert "MIN_KTX2_PSNR_DB = 38" in optimizer
+    assert "SIMPLIFICATION_ERROR_BUDGET_METRES = 0.0005" in optimizer
+    assert "VISURA_SIMPLIFICATION_ERROR = 0.000005" in optimizer
+    assert "worldTransformNormUpperBound" in optimizer
+    assert "node.getWorldMatrix()" in optimizer
+    assert '"simplify", textureOnly, simplified' in optimizer
+    assert "assertQuantizationAudit" in optimizer
+    assert '"basis-lz", "--qlevel", "255", "--clevel", "6"' in optimizer
+    assert '"uastc", "--uastc-quality", "4", "--zstd", "18"' in optimizer
+    assert '"--generate-mipmap", "--mipmap-filter", "lanczos4"' in optimizer
+    assert '"--compare-psnr"' in optimizer
+    assert "executeKtxWithQualityAudit" in optimizer
+    assert "createLosslessMeshoptCandidate" in optimizer
+    assert "EXTMeshoptCompression.EncoderMethod.QUANTIZE" in optimizer
     assert '"meshopt", source, destination' in optimizer and '"--level", "medium"' in optimizer
     assert '"--quantize-position", "16"' in optimizer
     assert '"draco", source, destination' in optimizer and '"--quantize-position", "20"' in optimizer
-    assert '"--encode", "uastc", "--uastc-quality", "2"' in optimizer
+    assert '"--encode", "uastc", "--uastc-quality", "2"' not in optimizer
     assert "E_NOT_STATIC" in optimizer
     assert "ktxDirectory, system32" in optimizer
     assert "ktxDirectory, system32" in decoder
@@ -279,6 +301,194 @@ def _write_texture_matrix_glb(path: Path, images_dir: Path) -> dict:
     chunks = struct.pack("<II", len(raw_json), 0x4E4F534A) + raw_json + struct.pack("<II", len(binary), 0x004E4942) + binary
     path.write_bytes(struct.pack("<4sII", b"glTF", 2, 12 + len(chunks)) + chunks)
     return document
+
+
+def test_visura_safe_candidate_combines_full_resolution_ktx2_meshopt_and_submillimetre_quantization(tmp_path):
+    bundle = REPO_ROOT / "bundled_tools" / "GLBToolchain"
+    node = get_bundled_tool_path("node", REPO_ROOT)
+    optimizer = get_bundled_runner_path("optimizer", REPO_ROOT)
+    validator = get_bundled_runner_path("validator", REPO_ROOT)
+    texture_path = tmp_path / "terrain.jpg"
+    subprocess.run(
+        [
+            str(node), "-e",
+            "require('sharp')({create:{width:4096,height:256,channels:3,background:{r:120,g:80,b:40}}})"
+            ".jpeg({quality:96}).toFile(process.argv[1]).catch(e=>{console.error(e);process.exitCode=1})",
+            str(texture_path),
+        ],
+        cwd=bundle,
+        check=True,
+        timeout=60,
+    )
+    document = {
+        "asset": {"version": "2.0"},
+        "buffers": [{"byteLength": 60}],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": 0, "byteLength": 36},
+            {"buffer": 0, "byteOffset": 36, "byteLength": 24},
+        ],
+        "accessors": [
+            {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [2, 3, 4]},
+            {"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC2", "min": [0, 0], "max": [1, 1]},
+        ],
+        "images": [{
+            "mimeType": "image/jpeg",
+            "uri": "data:image/jpeg;base64," + base64.b64encode(texture_path.read_bytes()).decode("ascii"),
+        }],
+        "textures": [{"source": 0}],
+        "materials": [{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "TEXCOORD_0": 1}, "material": 0}]}],
+        "nodes": [{"name": "terrain", "mesh": 0}],
+        "scenes": [{"nodes": [0]}],
+        "scene": 0,
+    }
+    raw_json = json.dumps(document, separators=(",", ":")).encode("utf-8")
+    raw_json += b" " * (-len(raw_json) % 4)
+    binary = struct.pack("<9f6f", 0, 0, 0, 2, 0, 0, 0, 3, 4, 0, 0, 1, 0, 0, 1)
+    source = tmp_path / "terrain.glb"
+    chunks = struct.pack("<II", len(raw_json), 0x4E4F534A) + raw_json + struct.pack("<II", len(binary), 0x004E4942) + binary
+    source.write_bytes(struct.pack("<4sII", b"glTF", 2, 12 + len(chunks)) + chunks)
+
+    candidate = tmp_path / "terrain-visura-safe.glb"
+    subprocess.run([str(node), str(optimizer), "visura-safe", str(source), str(candidate)], cwd=bundle, check=True, timeout=60)
+    report = subprocess.run(
+        [str(node), str(validator), str(candidate)],
+        cwd=bundle,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    )
+    assert json.loads(report.stdout)["dronautix_policy"]["blocking_error_count"] == 0
+    output = _read_glb_json(candidate)
+    assert {"EXT_meshopt_compression", "KHR_mesh_quantization", "KHR_texture_basisu"}.issubset(
+        output["extensionsRequired"]
+    )
+    image_index = output["textures"][0]["extensions"]["KHR_texture_basisu"]["source"]
+    ktx2 = _read_glb_image_payload(candidate, image_index)
+    assert ktx2.startswith(b"\xabKTX 20\xbb\r\n\x1a\n")
+    assert struct.unpack_from("<II", ktx2, 20) == (4096, 256)
+    assert struct.unpack_from("<I", ktx2, 40)[0] > 1
+
+    prepared = GLBOptimizationService(resource_root=REPO_ROOT).prepare(
+        ModelUploadInput(source_path=str(source)),
+        project_crs_info={"value": "EPSG:25833", "vertical_crs": "EPSG:7837"},
+        staging_root=tmp_path / "stage",
+    )
+    assert prepared.optimization.selected_candidate == "visura-safe"
+    assert prepared.optimization.output_size < prepared.optimization.source_size
+    cleanup_prepared_model_uploads((prepared,))
+
+    # The same Visura-style 16-bit grid would exceed 1 mm on a 500 m mesh.
+    # In that case KTX2 and lossless Meshopt remain, but position quantization is rejected.
+    document["accessors"][0]["max"] = [500, 3, 4]
+    raw_json = json.dumps(document, separators=(",", ":")).encode("utf-8")
+    raw_json += b" " * (-len(raw_json) % 4)
+    binary = struct.pack("<9f6f", 0, 0, 0, 500, 0, 0, 0, 3, 4, 0, 0, 1, 0, 0, 1)
+    large_source = tmp_path / "terrain-large.glb"
+    chunks = struct.pack("<II", len(raw_json), 0x4E4F534A) + raw_json + struct.pack("<II", len(binary), 0x004E4942) + binary
+    large_source.write_bytes(struct.pack("<4sII", b"glTF", 2, 12 + len(chunks)) + chunks)
+    large_candidate = tmp_path / "terrain-large-visura-safe.glb"
+    subprocess.run(
+        [str(node), str(optimizer), "visura-safe", str(large_source), str(large_candidate)],
+        cwd=bundle,
+        check=True,
+        timeout=60,
+    )
+    large_output = _read_glb_json(large_candidate)
+    assert {"EXT_meshopt_compression", "KHR_texture_basisu"}.issubset(large_output["extensionsRequired"])
+    assert "KHR_mesh_quantization" not in large_output.get("extensionsRequired", [])
+
+
+def test_visura_safe_candidate_simplifies_static_indexed_geometry_with_metric_budget(tmp_path):
+    bundle = REPO_ROOT / "bundled_tools" / "GLBToolchain"
+    node = get_bundled_tool_path("node", REPO_ROOT)
+    optimizer = get_bundled_runner_path("optimizer", REPO_ROOT)
+    size = 32
+    positions = []
+    texcoords = []
+    for row in range(size):
+        for column in range(size):
+            positions.extend((column / (size - 1), row / (size - 1), 0.0))
+            texcoords.extend((column / (size - 1), row / (size - 1)))
+    indices = []
+    for row in range(size - 1):
+        for column in range(size - 1):
+            top_left = row * size + column
+            indices.extend((top_left, top_left + 1, top_left + size, top_left + 1, top_left + size + 1, top_left + size))
+    position_bytes = struct.pack(f"<{len(positions)}f", *positions)
+    texcoord_bytes = struct.pack(f"<{len(texcoords)}f", *texcoords)
+    index_bytes = struct.pack(f"<{len(indices)}H", *indices)
+    binary = position_bytes + texcoord_bytes + index_bytes
+    document = {
+        "asset": {"version": "2.0"},
+        "buffers": [{"byteLength": len(binary)}],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": 0, "byteLength": len(position_bytes), "target": 34962},
+            {"buffer": 0, "byteOffset": len(position_bytes), "byteLength": len(texcoord_bytes), "target": 34962},
+            {
+                "buffer": 0,
+                "byteOffset": len(position_bytes) + len(texcoord_bytes),
+                "byteLength": len(index_bytes),
+                "target": 34963,
+            },
+        ],
+        "accessors": [
+            {
+                "bufferView": 0,
+                "componentType": 5126,
+                "count": size * size,
+                "type": "VEC3",
+                "min": [0, 0, 0],
+                "max": [1, 1, 0],
+            },
+            {
+                "bufferView": 1,
+                "componentType": 5126,
+                "count": size * size,
+                "type": "VEC2",
+                "min": [0, 0],
+                "max": [1, 1],
+            },
+            {"bufferView": 2, "componentType": 5123, "count": len(indices), "type": "SCALAR"},
+        ],
+        "images": [{
+            "mimeType": "image/png",
+            "uri": "data:image/png;base64,"
+            + base64.b64encode(
+                subprocess.run(
+                    [
+                        str(node),
+                        "-e",
+                        "require('sharp')({create:{width:2,height:2,channels:3,background:{r:80,g:120,b:160}}})"
+                        ".png().toBuffer().then(x=>process.stdout.write(x))",
+                    ],
+                    cwd=bundle,
+                    capture_output=True,
+                    check=True,
+                    timeout=60,
+                ).stdout
+            ).decode("ascii"),
+        }],
+        "textures": [{"source": 0}],
+        "materials": [{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "TEXCOORD_0": 1}, "indices": 2, "material": 0}]}],
+        "nodes": [{"mesh": 0}],
+        "scenes": [{"nodes": [0]}],
+        "scene": 0,
+    }
+    raw_json = json.dumps(document, separators=(",", ":")).encode("utf-8")
+    raw_json += b" " * (-len(raw_json) % 4)
+    chunks = struct.pack("<II", len(raw_json), 0x4E4F534A) + raw_json + struct.pack("<II", len(binary), 0x004E4942) + binary
+    source = tmp_path / "indexed-grid.glb"
+    source.write_bytes(struct.pack("<4sII", b"glTF", 2, 12 + len(chunks)) + chunks)
+
+    candidate = tmp_path / "indexed-grid-visura-safe.glb"
+    subprocess.run([str(node), str(optimizer), "visura-safe", str(source), str(candidate)], cwd=bundle, check=True, timeout=60)
+    output = _read_glb_json(candidate)
+    primitive = output["meshes"][0]["primitives"][0]
+    assert output["accessors"][primitive["attributes"]["POSITION"]]["count"] < size * size
+    assert output["accessors"][primitive["indices"]]["count"] < len(indices)
 
 
 def test_sealed_toolchain_runs_generic_texture_matrix_and_compressed_combinations(tmp_path):

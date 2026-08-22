@@ -275,9 +275,20 @@ def create_upload_page(
 
     page = QtWidgets.QWidget()
     page.setObjectName("Page")
-    root = QtWidgets.QVBoxLayout(page)
-    root.setContentsMargins(32, 28, 32, 28)
+    page_root = QtWidgets.QVBoxLayout(page)
+    page_root.setContentsMargins(32, 28, 32, 28)
+    page_root.setSpacing(16)
+    form_scroll = QtWidgets.QScrollArea()
+    form_scroll.setObjectName("UploadFormScrollArea")
+    form_scroll.setWidgetResizable(True)
+    form_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+    form_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+    form_content = QtWidgets.QWidget()
+    root = QtWidgets.QVBoxLayout(form_content)
+    root.setContentsMargins(0, 0, 0, 0)
     root.setSpacing(16)
+    form_scroll.setWidget(form_content)
+    page_root.addWidget(form_scroll, 1)
 
     # --- Header with mode toggle -------------------------------------------
     header = QtWidgets.QHBoxLayout()
@@ -330,11 +341,12 @@ def create_upload_page(
     # --- Sources card -------------------------------------------------------
     sources_panel = QtWidgets.QFrame()
     sources_panel.setObjectName("DetailPanel")
+    sources_panel.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
     sources_layout = QtWidgets.QVBoxLayout(sources_panel)
     sources_layout.setContentsMargins(20, 16, 20, 16)
     sources_layout.setSpacing(10)
     sources_header = QtWidgets.QHBoxLayout()
-    sources_title = QtWidgets.QLabel("Quellen")
+    sources_title = QtWidgets.QLabel("Punktwolken (las,laz)")
     sources_title.setObjectName("PanelTitle")
     sources_hint = QtWidgets.QLabel("Dateien/Ordner hierher ziehen")
     sources_hint.setObjectName("MutedText")
@@ -370,9 +382,10 @@ def create_upload_page(
         on_delete=lambda: source_handlers.get("remove", lambda: None)(),
     )
     source_list.setObjectName("UploadSourceList")
-    source_list.setMinimumHeight(150)
+    drop_list_height = 104
+    source_list.setFixedHeight(drop_list_height)
     source_list.setToolTip("Dateien/Ordner hierher ziehen. Markieren und 'Entf' entfernt Quellen.")
-    sources_layout.addWidget(source_list, 1)
+    sources_layout.addWidget(source_list)
 
     sources_buttons = QtWidgets.QHBoxLayout()
     files_button = QtWidgets.QPushButton("Dateien")
@@ -392,11 +405,12 @@ def create_upload_page(
     sources_count.setObjectName("MutedText")
     sources_buttons.addWidget(sources_count)
     sources_layout.addLayout(sources_buttons)
-    root.addWidget(sources_panel, 1)
+    root.addWidget(sources_panel)
 
     # --- Optional GLB models ----------------------------------------------
     models_panel = QtWidgets.QFrame()
     models_panel.setObjectName("UploadModelsPanel")
+    models_panel.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
     models_layout = QtWidgets.QVBoxLayout(models_panel)
     models_layout.setContentsMargins(20, 16, 20, 16)
     models_layout.setSpacing(10)
@@ -444,7 +458,7 @@ def create_upload_page(
         on_delete=lambda: model_handlers.get("remove", lambda: None)(),
     )
     model_list.setObjectName("UploadModelList")
-    model_list.setMinimumHeight(104)
+    model_list.setFixedHeight(drop_list_height)
     model_list.setToolTip("GLB-Dateien hierher ziehen. Markieren und 'Entf' entfernt Modelle.")
     models_layout.addWidget(model_list)
 
@@ -573,6 +587,7 @@ def create_upload_page(
     phase_layout.setColumnStretch(1, 1)
     phase_panel.hide()
     root.addWidget(phase_panel)
+    root.addStretch(1)
 
     action_row = QtWidgets.QHBoxLayout()
     progress_bar = QtWidgets.QProgressBar()
@@ -592,14 +607,14 @@ def create_upload_page(
     start_button.setCursor(QtCore.Qt.PointingHandCursor)
     start_button.setEnabled(on_start is not None)
     action_row.addWidget(start_button)
-    root.addLayout(action_row)
+    page_root.addLayout(action_row)
 
     log_view = QtWidgets.QPlainTextEdit()
     log_view.setObjectName("UploadLogView")
     log_view.setReadOnly(True)
     log_view.setMinimumHeight(120)
-    log_view.hide()
-    root.addWidget(log_view)
+    log_view.setPlaceholderText("Das Upload-Protokoll erscheint hier.")
+    page_root.addWidget(log_view)
 
     # --- Behaviour ----------------------------------------------------------
     def current_defaults():

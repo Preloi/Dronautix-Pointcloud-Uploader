@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "toolchain_version": "1.0.0-win32-x64",
+  "toolchain_version": "1.1.0-win32-x64",
   "bundle_state": "sealed",
   "platform": {
     "os": "win32",
@@ -68,9 +68,9 @@
   "runners": [
     {
       "id": "optimizer",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "relative_path": "runners/optimize-glb.mjs",
-      "sha256": "2a013624ef758ba367a19fbcace5fca6db2529115d1fd7ab3d4700d5db072857"
+      "sha256": "8fc832fb5e1dce36bf2cf920961e5e50f290fedde5d40fe27e75ed4801e4146c"
     },
     {
       "id": "validator",

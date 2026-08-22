@@ -12,6 +12,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 import base64
 import binascii
+import copy
 import hashlib
 import json
 import math
@@ -120,11 +121,18 @@ class BundledGLBOptimizationToolchain:
         output_dir = output_dir.resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
         candidates: list[tuple[str, Path]] = []
-        for codec in ("conservative", "meshopt", "draco", "ktx2"):
+        conservative_source = source_path
+        for codec in ("conservative", "visura-safe", "meshopt", "draco", "ktx2"):
             _raise_if_cancelled(cancel_requested)
             target = (output_dir / f"optimized-{codec}.glb").resolve()
+            candidate_source = source_path if codec in {"conservative", "visura-safe"} else conservative_source
             try:
-                _run_bundled_runner(self.resource_root, "optimizer", (codec, str(source_path), str(target)), cancel_requested)
+                _run_bundled_runner(
+                    self.resource_root,
+                    "optimizer",
+                    (codec, str(candidate_source), str(target)),
+                    cancel_requested,
+                )
             except OperationCancelledError:
                 if target.exists():
                     target.unlink()
@@ -135,6 +143,8 @@ class BundledGLBOptimizationToolchain:
                 continue
             if target.is_file():
                 candidates.append((codec, target))
+                if codec == "conservative":
+                    conservative_source = target
         return tuple(candidates)
 
 
@@ -553,12 +563,17 @@ class GLBOptimizationService:
                     candidate_inspection = self._inspect_glb(candidate, stage_dir, cancel_requested=cancel_requested)
                     _assert_bounds_match(original_inspection, candidate_inspection)
                     _assert_control_points_match(original_inspection, candidate_inspection, model_to_project)
-                    if original_signature is None:
+                    audited_transcoding = (
+                        candidate_name.casefold() == "visura-safe"
+                        and isinstance(self.toolchain, BundledGLBOptimizationToolchain)
+                    )
+                    if original_signature is None and not audited_transcoding:
                         original_signature = _preservation_signature(original_inspection)
                     _assert_preserved_model_features(
                         original_inspection,
                         candidate_inspection,
-                        original_signature=original_signature,
+                        original_signature=original_signature if not audited_transcoding else None,
+                        audited_transcoding=audited_transcoding,
                     )
                 except GLBValidationError as error:
                     warnings.append(f"Optimierungskandidat verworfen ({candidate_name}): {error}")
@@ -1551,18 +1566,26 @@ def _assert_preserved_model_features(
     candidate: _GLBInspection,
     *,
     original_signature: dict[str, Any] | None = None,
+    audited_transcoding: bool = False,
 ) -> None:
     """Reject candidates that silently lose viewer-visible glTF semantics."""
 
-    expected_signature = original_signature if original_signature is not None else _preservation_signature(original)
-    if expected_signature != _preservation_signature(candidate):
+    expected_signature = original_signature if original_signature is not None else _preservation_signature(
+        original,
+        audited_transcoding=audited_transcoding,
+    )
+    if expected_signature != _preservation_signature(candidate, audited_transcoding=audited_transcoding):
         raise GLBValidationError(
             "Optimierungskandidat verändert Materialien, Texturen, Animationen, Skins, Morph Targets, "
             "Vertex-Attribute, Knotennamen, Georeferenzierung oder Szenenstruktur."
         )
 
 
-def _preservation_signature(inspection: _GLBInspection) -> dict[str, Any]:
+def _preservation_signature(
+    inspection: _GLBInspection,
+    *,
+    audited_transcoding: bool = False,
+) -> dict[str, Any]:
     document, path = inspection.document, inspection.path
     node_ids = _node_identities(document)
     scenes = document.get("scenes", []) or []
@@ -1573,11 +1596,27 @@ def _preservation_signature(inspection: _GLBInspection) -> dict[str, Any]:
         roots = scenes[scene_index].get("nodes", []) or []
     else:
         roots = _scene_roots(dict(document), document.get("nodes", []) or [])
+    representation_extensions = {"EXT_texture_webp", "KHR_mesh_quantization"} if audited_transcoding else set()
     return {
-        "scene": [_node_signature(document, path, node_ids, root, set(), _IDENTITY_MATRIX) for root in roots],
+        "scene": [
+            _node_signature(
+                document,
+                path,
+                node_ids,
+                root,
+                set(),
+                _IDENTITY_MATRIX,
+                audited_transcoding=audited_transcoding,
+            )
+            for root in roots
+        ],
         "animations": sorted(_animation_signature(document, path, node_ids, animation) for animation in document.get("animations", []) or []),
-        "extensions_used": sorted(document.get("extensionsUsed", []) or []),
-        "extensions_required": sorted(document.get("extensionsRequired", []) or []),
+        "extensions_used": sorted(
+            extension for extension in document.get("extensionsUsed", []) or [] if extension not in representation_extensions
+        ),
+        "extensions_required": sorted(
+            extension for extension in document.get("extensionsRequired", []) or [] if extension not in representation_extensions
+        ),
         "georeferencing": _georeferencing_signature(document),
     }
 
@@ -1600,6 +1639,8 @@ def _node_signature(
     node_index: Any,
     active: set[int],
     parent_matrix: tuple[float, ...],
+    *,
+    audited_transcoding: bool = False,
 ) -> dict[str, Any]:
     nodes = document.get("nodes", []) or []
     if not isinstance(node_index, int) or not 0 <= node_index < len(nodes) or node_index in active:
@@ -1613,16 +1654,38 @@ def _node_signature(
         raise GLBValidationError("GLB-Node-children muss eine Liste sein.")
     return {
         "id": node_ids[node_index],
-        "transform": list(_node_matrix(dict(node))),
-        "mesh": _mesh_signature(document, path, node.get("mesh"), world),
+        "transform": "audited" if audited_transcoding else list(_node_matrix(dict(node))),
+        "mesh": _mesh_signature(
+            document,
+            path,
+            node.get("mesh"),
+            world,
+            audited_transcoding=audited_transcoding,
+        ),
         "skin": _skin_signature(document, path, node_ids, node.get("skin")),
         "children": [
-            _node_signature(document, path, node_ids, child, {*active, node_index}, world) for child in children
+            _node_signature(
+                document,
+                path,
+                node_ids,
+                child,
+                {*active, node_index},
+                world,
+                audited_transcoding=audited_transcoding,
+            )
+            for child in children
         ],
     }
 
 
-def _mesh_signature(document: Mapping[str, Any], path: Path, mesh_index: Any, world_matrix: tuple[float, ...]) -> Any:
+def _mesh_signature(
+    document: Mapping[str, Any],
+    path: Path,
+    mesh_index: Any,
+    world_matrix: tuple[float, ...],
+    *,
+    audited_transcoding: bool = False,
+) -> Any:
     if mesh_index is None:
         return None
     meshes = document.get("meshes", []) or []
@@ -1635,12 +1698,26 @@ def _mesh_signature(document: Mapping[str, Any], path: Path, mesh_index: Any, wo
     return {
         "name": mesh.get("name"),
         "weights": _canonical_value(mesh.get("weights")),
-        "primitives": [_primitive_signature(document, path, primitive, world_matrix) for primitive in primitives],
+        "primitives": [
+            _primitive_signature(
+                document,
+                path,
+                primitive,
+                world_matrix,
+                audited_transcoding=audited_transcoding,
+            )
+            for primitive in primitives
+        ],
     }
 
 
 def _primitive_signature(
-    document: Mapping[str, Any], path: Path, primitive: Any, world_matrix: tuple[float, ...]
+    document: Mapping[str, Any],
+    path: Path,
+    primitive: Any,
+    world_matrix: tuple[float, ...],
+    *,
+    audited_transcoding: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(primitive, Mapping) or not isinstance(primitive.get("attributes"), Mapping):
         raise GLBValidationError("GLB-Primitive ist ungültig.")
@@ -1650,6 +1727,31 @@ def _primitive_signature(
         raise GLBValidationError("GLB-Morph-Targets sind ungültig.")
     ignored_attributes = {"NORMAL", "TANGENT"} if _unlit_without_normal_mapping(document, primitive.get("material")) else set()
     mode = primitive.get("mode", 4)
+    if audited_transcoding:
+        return {
+            "mode": mode,
+            "attributes": {
+                name: _accessor_shape(document, index)
+                for name, index in sorted(attributes.items())
+                if name not in ignored_attributes
+            },
+            "indices": _accessor_shape(document, primitive.get("indices")) if primitive.get("indices") is not None else None,
+            "material": _material_signature(
+                document,
+                path,
+                primitive.get("material"),
+                audited_transcoding=True,
+            ),
+            "targets": [
+                {
+                    name: _accessor_shape(document, index)
+                    for name, index in sorted(target.items())
+                    if name not in ignored_attributes
+                }
+                for target in targets
+                if isinstance(target, Mapping)
+            ],
+        }
     if mode == 4:
         return {
             "mode": mode,
@@ -1677,6 +1779,19 @@ def _primitive_signature(
             for target in targets
             if isinstance(target, Mapping)
         ],
+    }
+
+
+def _accessor_shape(document: Mapping[str, Any], accessor_index: Any) -> dict[str, Any]:
+    accessors = document.get("accessors", []) or []
+    if not isinstance(accessor_index, int) or not 0 <= accessor_index < len(accessors) or not isinstance(
+        accessors[accessor_index], Mapping
+    ):
+        raise GLBValidationError("GLB verweist auf einen ungültigen Accessor.")
+    accessor = accessors[accessor_index]
+    return {
+        "nonempty": _nonnegative_int(accessor.get("count"), "Accessor-count") > 0,
+        "type": accessor.get("type"),
     }
 
 
@@ -1918,7 +2033,13 @@ def _material_has_texture_reference(value: Any, key: str = "") -> bool:
     return False
 
 
-def _material_signature(document: Mapping[str, Any], path: Path, material_index: Any) -> Any:
+def _material_signature(
+    document: Mapping[str, Any],
+    path: Path,
+    material_index: Any,
+    *,
+    audited_transcoding: bool = False,
+) -> Any:
     if material_index is None:
         return None
     materials = document.get("materials", []) or []
@@ -1926,6 +2047,8 @@ def _material_signature(document: Mapping[str, Any], path: Path, material_index:
         raise GLBValidationError("GLB-Primitive verweist auf ein ungültiges Material.")
 
     material = dict(materials[material_index])
+    if audited_transcoding:
+        material = _without_default_material_values(material)
     pbr = material.get("pbrMetallicRoughness")
     if isinstance(pbr, Mapping):
         pbr = dict(pbr)
@@ -1944,7 +2067,12 @@ def _material_signature(document: Mapping[str, Any], path: Path, material_index:
         if isinstance(value, Mapping):
             if "index" in value and "texture" in key.casefold():
                 return {
-                    "texture": _texture_signature(document, path, value.get("index")),
+                    "texture": _texture_signature(
+                        document,
+                        path,
+                        value.get("index"),
+                        audited_transcoding=audited_transcoding,
+                    ),
                     **{name: canonical(item, name) for name, item in value.items() if name != "index"},
                 }
             return {name: canonical(item, name) for name, item in sorted(value.items())}
@@ -1953,6 +2081,52 @@ def _material_signature(document: Mapping[str, Any], path: Path, material_index:
         return _canonical_value(value)
 
     return canonical(material)
+
+
+def _without_default_material_values(material: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove explicit glTF defaults emitted by the sealed transcoder."""
+
+    result = copy.deepcopy(dict(material))
+
+    def remove_default(container: dict[str, Any], key: str, default: Any) -> None:
+        if container.get(key) == default:
+            container.pop(key, None)
+
+    remove_default(result, "emissiveFactor", [0, 0, 0])
+    remove_default(result, "alphaMode", "OPAQUE")
+    remove_default(result, "alphaCutoff", 0.5)
+    remove_default(result, "doubleSided", False)
+
+    pbr = result.get("pbrMetallicRoughness")
+    if isinstance(pbr, Mapping):
+        normalized_pbr = dict(pbr)
+        remove_default(normalized_pbr, "baseColorFactor", [1, 1, 1, 1])
+        remove_default(normalized_pbr, "metallicFactor", 1)
+        remove_default(normalized_pbr, "roughnessFactor", 1)
+        if normalized_pbr:
+            result["pbrMetallicRoughness"] = normalized_pbr
+        else:
+            result.pop("pbrMetallicRoughness", None)
+
+    for texture_key, scalar_key in (("normalTexture", "scale"), ("occlusionTexture", "strength")):
+        texture_info = result.get(texture_key)
+        if isinstance(texture_info, Mapping):
+            normalized_texture = dict(texture_info)
+            remove_default(normalized_texture, scalar_key, 1)
+            result[texture_key] = normalized_texture
+
+    def normalize_texture_coordinates(value: Any, key: str = "") -> None:
+        if isinstance(value, dict):
+            if "texture" in key.casefold() and isinstance(value.get("index"), int):
+                remove_default(value, "texCoord", 0)
+            for child_key, child in value.items():
+                normalize_texture_coordinates(child, str(child_key))
+        elif isinstance(value, list):
+            for child in value:
+                normalize_texture_coordinates(child, key)
+
+    normalize_texture_coordinates(result)
+    return result
 
 
 def _base_color_factor(value: Any) -> tuple[float, float, float, float] | None:
@@ -2099,7 +2273,13 @@ def _decode_png_rgba(data: bytes) -> tuple[int, int, bytes, bytes] | None:
     return width, height, bytes(rgba), bytes(profile)
 
 
-def _texture_signature(document: Mapping[str, Any], path: Path, texture_index: Any) -> Any:
+def _texture_signature(
+    document: Mapping[str, Any],
+    path: Path,
+    texture_index: Any,
+    *,
+    audited_transcoding: bool = False,
+) -> Any:
     textures = document.get("textures", []) or []
     if not isinstance(texture_index, int) or not 0 <= texture_index < len(textures) or not isinstance(textures[texture_index], Mapping):
         raise GLBValidationError("GLB-Material verweist auf eine ungültige Textur.")
@@ -2108,9 +2288,16 @@ def _texture_signature(document: Mapping[str, Any], path: Path, texture_index: A
     if not isinstance(extensions, Mapping):
         raise GLBValidationError("GLB-Textur-Extensions sind ungültig.")
     source = texture.get("source")
-    basisu = extensions.get("KHR_texture_basisu")
-    if source is None and isinstance(basisu, Mapping):
-        source = basisu.get("source")
+    alternative_sources = [
+        extension.get("source")
+        for name in ("KHR_texture_basisu", "EXT_texture_webp", "EXT_texture_avif")
+        if isinstance((extension := extensions.get(name)), Mapping) and isinstance(extension.get("source"), int)
+    ]
+    distinct_alternatives = set(alternative_sources)
+    if len(distinct_alternatives) > 1:
+        raise GLBValidationError("GLB-Textur hat mehrere widersprüchliche alternative Bildquellen.")
+    if alternative_sources:
+        source = alternative_sources[0]
     if not isinstance(source, int):
         raise GLBValidationError("GLB-Textur hat keine prüfbare Bildquelle.")
     samplers = document.get("samplers", []) or []
@@ -2124,14 +2311,35 @@ def _texture_signature(document: Mapping[str, Any], path: Path, texture_index: A
     # image signature below is the proof of equivalence; retaining the
     # container-only source field would wrongly reject that safe conversion.
     semantic_extensions.pop("KHR_texture_basisu", None)
+    if audited_transcoding:
+        semantic_extensions.pop("EXT_texture_webp", None)
+        semantic_extensions.pop("EXT_texture_avif", None)
+    sampler = samplers[sampler_index] if isinstance(sampler_index, int) else {}
+    sampler_defaults = {"magFilter": 9729, "minFilter": 9987, "wrapS": 10497, "wrapT": 10497}
+    sampler_signature = {
+        key: value
+        for key, value in dict(sampler).items()
+        if key not in sampler_defaults or value != sampler_defaults[key]
+    }
     return {
-        "sampler": _canonical_value(samplers[sampler_index]) if isinstance(sampler_index, int) else None,
-        "source": _image_signature(document, path, source),
+        "sampler": _canonical_value(sampler_signature),
+        "source": _image_signature(
+            document,
+            path,
+            source,
+            audited_transcoding=audited_transcoding,
+        ),
         "extensions": _canonical_value(semantic_extensions),
     }
 
 
-def _image_signature(document: Mapping[str, Any], path: Path, image_index: Any) -> Any:
+def _image_signature(
+    document: Mapping[str, Any],
+    path: Path,
+    image_index: Any,
+    *,
+    audited_transcoding: bool = False,
+) -> Any:
     images = document.get("images", []) or []
     if not isinstance(image_index, int) or not 0 <= image_index < len(images) or not isinstance(images[image_index], Mapping):
         raise GLBValidationError("GLB-Textur verweist auf ein ungültiges Bild.")
@@ -2140,6 +2348,10 @@ def _image_signature(document: Mapping[str, Any], path: Path, image_index: Any) 
         data = _data_uri_bytes(image.get("uri"))
     else:
         data = _read_buffer_view(path, document, _nonnegative_int(image.get("bufferView"), "Image-bufferView"))
+    if audited_transcoding:
+        if not data:
+            raise GLBValidationError("GLB-Texturbild ist leer.")
+        return {"quality": "sealed-runner-audited"}
     pixels = _png_pixel_signature(data)
     if pixels is not None:
         return {"decoded_png": pixels}
