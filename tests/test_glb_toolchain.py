@@ -31,6 +31,18 @@ from dronautix_uploader.core.glb_optimization_service import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_glb_subprocesses_hide_windows_console():
+    options = toolchain_module._hidden_process_options(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+
+    if toolchain_module.os.name != "nt":
+        assert options == {}
+        return
+    assert options["creationflags"] & subprocess.CREATE_NO_WINDOW
+    assert options["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP
+    assert options["startupinfo"].dwFlags & subprocess.STARTF_USESHOWWINDOW
+    assert options["startupinfo"].wShowWindow == subprocess.SW_HIDE
+
+
 def test_unsealed_toolchain_fails_closed_without_using_global_node_or_npm(tmp_path):
     source_bundle = REPO_ROOT / "bundled_tools" / "GLBToolchain"
     bundle = tmp_path / "bundled_tools" / "GLBToolchain"
@@ -197,6 +209,8 @@ def test_runner_contract_uses_explicit_pipeline_and_decodes_compressed_extension
     assert "E_NOT_STATIC" in optimizer
     assert "ktxDirectory, system32" in optimizer
     assert "ktxDirectory, system32" in decoder
+    assert optimizer.count("windowsHide: true") == 3
+    assert decoder.count("windowsHide: true") == 2
     assert "assertKtxPolicyMatrix" in optimizer
     assert "E_KTX_AMBIGUOUS_COLORSPACE" in optimizer
     assert "E_KTX_AMBIGUOUS_TEXTURE_SOURCE" in optimizer

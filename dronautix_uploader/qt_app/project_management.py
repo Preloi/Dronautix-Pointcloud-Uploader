@@ -309,7 +309,11 @@ def _make_pointcloud_previews(project: dict[str, Any]) -> list[PointcloudPreview
 
     return [
         PointcloudPreview(
-            name=str(project.get("projekt", "")).strip() or "Punktwolke 1",
+            name=(
+                str(project.get("name", "")).strip()
+                or str(project.get("projekt", "")).strip()
+                or "Punktwolke 1"
+            ),
             format=str(project.get("format", "")).strip() or "Unbekannt",
             points="-",
             crs=_get_pointcloud_crs_label(project),

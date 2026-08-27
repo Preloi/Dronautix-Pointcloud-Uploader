@@ -33,6 +33,7 @@ async function execute(argumentsList) {
 			cwd: bundleRoot,
 			env: bundledEnvironment(),
 			stdio: "inherit",
+			windowsHide: true,
 		});
 		child.once("error", reject);
 		child.once("exit", (code, signal) => {
@@ -48,6 +49,7 @@ async function executeKtx(argumentsList) {
 			cwd: bundleRoot,
 			env: bundledEnvironment(),
 			stdio: "inherit",
+			windowsHide: true,
 		});
 		child.once("error", reject);
 		child.once("exit", (code, signal) => {

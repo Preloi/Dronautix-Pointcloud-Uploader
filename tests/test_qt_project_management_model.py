@@ -45,6 +45,21 @@ def test_make_project_preview_normalizes_missing_values_without_qt():
     assert preview.updated == "Noch nicht geladen"
 
 
+def test_make_project_preview_uses_stored_legacy_single_pointcloud_name():
+    preview = make_project_preview(
+        {
+            "projekt": "Projektname",
+            "name": "Separater Punktwolkenname",
+            "format": "potree",
+            "s3_path": "pointclouds/kunde/id/projekt",
+        },
+        disabled=False,
+    )
+
+    assert preview.pointclouds[0].name == "Separater Punktwolkenname"
+    assert preview.has_explicit_pointclouds is False
+
+
 def test_make_project_preview_formats_change_history_newest_first():
     preview = make_project_preview(
         {

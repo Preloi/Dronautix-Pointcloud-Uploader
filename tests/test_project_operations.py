@@ -1,6 +1,7 @@
 import base64
 import copy
 import hashlib
+import json
 import os
 
 import pytest
@@ -42,6 +43,7 @@ class FakeS3Client:
         self.fail_on_key = fail_on_key
         self.uploads = []
         self.objects = {}
+        self.puts = []
 
     def upload_file(self, local_path, bucket, key, ExtraArgs=None, Callback=None):
         if key == self.fail_on_key:
@@ -61,6 +63,9 @@ class FakeS3Client:
     def head_object(self, Bucket, Key, ChecksumMode=None):
         assert ChecksumMode == "ENABLED"
         return dict(self.objects[Key])
+
+    def put_object(self, **kwargs):
+        self.puts.append(kwargs)
 
 
 class FakePaginator:
@@ -564,6 +569,23 @@ def test_apply_project_rename_metadata_changes_names_without_paths():
     assert [cloud["name"] for cloud in renamed["pointclouds"]] == ["Cloud A", "Cloud B"]
     assert renamed["models"] == project["models"]
     assert project["kunde"] == "Alt"
+
+
+def test_apply_project_rename_metadata_keeps_legacy_cloud_name_independent_when_only_project_changes():
+    project = {
+        "kunde": "Kunde",
+        "projekt": "Altprojekt",
+        "format": "potree",
+        "viewer_path": "kunde/id/altprojekt",
+        "s3_path": "pointclouds/kunde/id/altprojekt",
+    }
+
+    renamed = apply_project_rename_metadata(project, "Kunde", "Neuprojekt", ("Altprojekt",))
+
+    assert renamed["projekt"] == "Neuprojekt"
+    assert renamed["name"] == "Altprojekt"
+    assert renamed["viewer_path"] == project["viewer_path"]
+    assert renamed["s3_path"] == project["s3_path"]
 
 
 def test_duplicate_project_copies_s3_objects_and_inserts_active_multi_clone():
@@ -1172,6 +1194,68 @@ def test_replace_single_project_pointcloud_supports_disabled_legacy_single_proje
     assert "pointclouds" not in project
     assert project["crs"] == "EPSG:4326"
     assert deleted_keys == ["pointclouds/kunde/project/projekt/old.bin"]
+
+
+def test_replace_empty_legacy_potree_with_models_migrates_custom_name_to_child_and_metadata(tmp_path):
+    replacement = tmp_path / "potree"
+    replacement.mkdir()
+    (replacement / "metadata.json").write_text(
+        '{"name":"Replacement","points":5}',
+        encoding="utf-8",
+    )
+    prepared = prepare_single_project_upload(
+        PointcloudSource(str(replacement), name="Replacement", input_format="potree"),
+        "kunde/project/projekt",
+        "pointclouds/kunde/project/projekt",
+    )
+    model = {
+        "id": "halle",
+        "name": "Halle",
+        "s3_path": "pointclouds/kunde/project/projekt/models/halle/versions/v1",
+    }
+    index_data = {
+        "projects": [
+            {
+                "id": "project",
+                "datum": "2026-06-20T12:00:00",
+                "kunde": "Kunde",
+                "projekt": "Single",
+                "name": "Separater Name",
+                "format": "potree",
+                "link": "https://viewer/?id=project",
+                "viewer_path": "kunde/project/projekt",
+                "s3_path": "pointclouds/kunde/project/projekt",
+                "pointclouds": [],
+                "models": [model],
+            }
+        ],
+    }
+    s3_client = FakeS3Client()
+
+    result = replace_single_project_pointcloud(
+        s3_client=s3_client,
+        index_data=index_data,
+        project_id="project",
+        base_viewer_path="kunde/project/projekt",
+        s3_prefix="pointclouds/kunde/project/projekt",
+        prepared_cloud=prepared,
+        target_pointcloud_s3_path="pointclouds/kunde/project/projekt",
+        existing_target_keys=(
+            "pointclouds/kunde/project/projekt/metadata.json",
+            f"{model['s3_path']}/scene.glb",
+        ),
+        save_index=lambda _data: True,
+        delete_keys=lambda _keys: None,
+    )
+
+    project = index_data["projects"][0]
+    assert result.status == "success"
+    assert project["format"] == "multi"
+    assert project["pointclouds"][0]["name"] == "Separater Name"
+    assert "name" not in project
+    assert project["models"] == [model]
+    assert json.loads(s3_client.puts[0]["Body"])["name"] == "Separater Name"
+    assert s3_client.puts[0]["CacheControl"] == "no-cache"
 
 
 def test_replace_single_project_model_switches_only_selected_model_after_verified_upload(tmp_path):

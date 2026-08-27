@@ -46,6 +46,7 @@ from .crs_service import (
 )
 from .glb_toolchain import (
     GLBToolchainStatus,
+    _hidden_process_options,
     get_bundled_runner_path,
     get_bundled_tool_path,
     get_bundled_toolchain_environment,
@@ -2690,7 +2691,7 @@ def _run_bundled_runner(
         raise GLBValidationError(f"Gebündelter GLB-{runner_id}-Runner fehlt.")
     process_group_options: dict[str, Any]
     if os.name == "nt":
-        process_group_options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        process_group_options = _hidden_process_options(subprocess.CREATE_NEW_PROCESS_GROUP)
     else:
         process_group_options = {"start_new_session": True}
     try:

@@ -70,7 +70,7 @@
       "id": "optimizer",
       "version": "1.1.0",
       "relative_path": "runners/optimize-glb.mjs",
-      "sha256": "8fc832fb5e1dce36bf2cf920961e5e50f290fedde5d40fe27e75ed4801e4146c"
+      "sha256": "ece0acd9dd35660c47946b05a20a543918692f61f8df995252d5632b0b02ce77"
     },
     {
       "id": "validator",
@@ -82,7 +82,7 @@
       "id": "decoder",
       "version": "1.0.0",
       "relative_path": "runners/decode-glb.mjs",
-      "sha256": "0b9397c30062fbcd7d7e40fce19b7faa72ce0724d0cda837065647911a142ff0"
+      "sha256": "78bd843965b97fa469489b6c59b34a33780953e69cfbcf19e9b4447d23b3d1b7"
     }
   ]
 }

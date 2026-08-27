@@ -13,7 +13,7 @@ import tempfile
 from typing import Any, Callable
 from uuid import uuid4
 
-from .constants import BUCKET_NAME, COPC_OBJECT_NAME
+from .constants import BUCKET_NAME, COPC_OBJECT_NAME, S3_INDEX_CACHE_CONTROL
 from .contracts import CancelCallback, DownloadResult, ModelUploadInput, ProgressEvent, ProjectOperationResult
 from .crs_detection import detect_crs_from_metadata_dict, detect_las_crs
 from .crs_service import CrsValidationError, extract_pointcloud_crs_metadata, normalize_crs_metadata
@@ -101,6 +101,14 @@ class ProjectManagementService:
         pointcloud_names: tuple[str, ...] | list[str] = (),
     ) -> ProjectOperationResult:
         index_data = self.repository.load_projects_index()
+        original_index = copy.deepcopy(index_data)
+        project_info, _is_disabled = self._find_project(index_data, project_id)
+        metadata_updates = _prepare_potree_name_updates(
+            self.s3_client,
+            self._bucket_name,
+            project_info,
+            pointcloud_names,
+        )
         renamed_project: dict[str, Any] | None = None
         timestamp = self.timestamp_factory()
 
@@ -108,10 +116,15 @@ class ProjectManagementService:
             nonlocal renamed_project
             old_customer = str(project.get("kunde", ""))
             old_project = str(project.get("projekt", ""))
-            old_pointcloud_names = [
-                str(pointcloud.get("name", "")) if isinstance(pointcloud, dict) else ""
-                for pointcloud in project.get("pointclouds", [])
-            ]
+            pointclouds = project.get("pointclouds")
+            old_pointcloud_names = (
+                [
+                    str(pointcloud.get("name", "")) if isinstance(pointcloud, dict) else ""
+                    for pointcloud in pointclouds
+                ]
+                if isinstance(pointclouds, list) and pointclouds
+                else [str(project.get("name", "")).strip() or old_project]
+            )
             renamed_project = apply_project_rename_metadata(
                 project,
                 new_kunde,
@@ -131,11 +144,42 @@ class ProjectManagementService:
             project.clear()
             project.update(renamed_project)
 
-        if not update_project_in_index(index_data, project_id, apply_rename):
-            raise ValueError(f"Projekt mit ID '{project_id}' wurde nicht gefunden.")
-
-        if not self._save_projects_index(index_data):
-            raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
+        applied_metadata_updates = []
+        try:
+            if not update_project_in_index(index_data, project_id, apply_rename):
+                raise ValueError(f"Projekt mit ID '{project_id}' wurde nicht gefunden.")
+            for update in metadata_updates:
+                _put_s3_metadata(
+                    self.s3_client,
+                    self._bucket_name,
+                    update["key"],
+                    update["updated"],
+                    update["updated_headers"],
+                )
+                applied_metadata_updates.append(update)
+            if not self._save_projects_index(index_data):
+                raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
+        except Exception as error:
+            index_data.clear()
+            index_data.update(original_index)
+            rollback_errors = []
+            for update in reversed(applied_metadata_updates):
+                try:
+                    _put_s3_metadata(
+                        self.s3_client,
+                        self._bucket_name,
+                        update["key"],
+                        update["original"],
+                        update["original_headers"],
+                    )
+                except Exception as rollback_error:
+                    rollback_errors.append(f"{update['key']}: {rollback_error}")
+            if rollback_errors:
+                raise RuntimeError(
+                    "Umbenennung fehlgeschlagen; Potree-Metadaten konnten nicht vollständig zurückgesetzt werden: "
+                    + "; ".join(rollback_errors)
+                ) from error
+            raise
         return ProjectOperationResult(
             status="success",
             project_id=project_id,
@@ -491,11 +535,13 @@ class ProjectManagementService:
 
         project_viewer_root, project_s3_prefix = self._stable_project_roots(project_info)
         version_viewer_root, version_s3_prefix = self._versioned_roots(project_info)
+        pointclouds = project_info.get("pointclouds")
+        has_explicit_pointclouds = isinstance(pointclouds, list) and bool(pointclouds)
         versioned_cloud = rebase_prepared_cloud_upload(
             prepared_cloud,
             version_viewer_root,
             version_s3_prefix,
-            slug=prepared_cloud.slug if isinstance(project_info.get("pointclouds"), list) else "",
+            slug=prepared_cloud.slug if has_explicit_pointclouds else "",
         )
         existing_target_keys = collect_project_objects(
             self.s3_client,
@@ -559,7 +605,9 @@ class ProjectManagementService:
             version_viewer_root,
             version_s3_prefix,
         )[0]
-        if not isinstance(project_info.get("pointclouds"), list) and self._has_pointcloud_s3_path(project_info, target_path):
+        pointclouds = project_info.get("pointclouds")
+        has_explicit_pointclouds = isinstance(pointclouds, list) and bool(pointclouds)
+        if not has_explicit_pointclouds and self._has_pointcloud_s3_path(project_info, target_path):
             prepared_cloud = prepare_single_project_upload(
                 prepared_sources[0],
                 version_viewer_root,
@@ -937,6 +985,72 @@ class ProjectManagementService:
         return True if result is None else bool(result)
 
 
+def _prepare_potree_name_updates(
+    s3_client,
+    bucket_name: str,
+    project: dict[str, Any],
+    pointcloud_names: tuple[str, ...] | list[str],
+) -> tuple[dict[str, Any], ...]:
+    pointclouds = project.get("pointclouds")
+    has_explicit_pointclouds = isinstance(pointclouds, list) and bool(pointclouds)
+    entries = pointclouds if has_explicit_pointclouds else [project]
+    updates = []
+    seen_keys = set()
+    for index, new_name in enumerate(pointcloud_names):
+        if index >= len(entries) or not isinstance(entries[index], dict):
+            continue
+        entry = entries[index]
+        display_name = str(new_name or "").strip()
+        old_name = str(entry.get("name", "")).strip()
+        if entry is project and not old_name:
+            old_name = str(project.get("projekt", "")).strip()
+        if not display_name or display_name == old_name:
+            continue
+
+        s3_path = str(
+            entry.get("s3_path", "")
+            or (project.get("s3_path", "") if not has_explicit_pointclouds else "")
+        ).strip().rstrip("/")
+        pointcloud_format = str(
+            entry.get("format", "")
+            or (project.get("format", "") if not has_explicit_pointclouds else "")
+        ).strip().casefold()
+        if pointcloud_format not in {"potree", "copc"}:
+            pointcloud_format = "copc" if s3_path.casefold().endswith((".las", ".laz")) else "potree"
+        if pointcloud_format != "potree" or not s3_path:
+            continue
+
+        metadata_key = s3_path if s3_path.casefold().endswith("/metadata.json") else f"{s3_path}/metadata.json"
+        if metadata_key in seen_keys:
+            raise ValueError(f"Punktwolken-Metadatenpfad ist nicht eindeutig: {metadata_key}")
+        seen_keys.add(metadata_key)
+        try:
+            response = s3_client.get_object(Bucket=bucket_name, Key=metadata_key)
+            original = _read_s3_body(response)
+            metadata = json.loads(original.decode("utf-8"))
+        except Exception as error:
+            if _is_missing_s3_object_error(error):
+                continue
+            raise RuntimeError(f"Potree-Metadaten konnten nicht gelesen werden: {metadata_key}: {error}") from error
+        if not isinstance(metadata, dict):
+            raise ValueError(f"Potree-Metadaten sind ungültig: {metadata_key}")
+        metadata["name"] = display_name
+        updated = (json.dumps(metadata, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+        original_headers = _s3_object_headers(response)
+        updated_headers = dict(original_headers)
+        updated_headers["CacheControl"] = S3_INDEX_CACHE_CONTROL
+        updates.append(
+            {
+                "key": metadata_key,
+                "original": original,
+                "updated": updated,
+                "original_headers": original_headers,
+                "updated_headers": updated_headers,
+            }
+        )
+    return tuple(updates)
+
+
 def _attach_crs_info(
     prepared_sources,
     original_source_paths: tuple[str, ...],
@@ -1198,7 +1312,7 @@ def _is_missing_s3_object_error(error: Exception) -> bool:
         return True
     response = getattr(error, "response", None)
     code = str((response or {}).get("Error", {}).get("Code", "")).casefold() if isinstance(response, dict) else ""
-    return code in {"404", "nosuchkey", "notfound", "nosuchobject"}
+    return code in {"404", "nosuchkey", "notfound", "nosuchobject"} or "nosuchkey" in type(error).__name__.casefold()
 
 
 def _s3_potree_documents(s3_client, bucket_name: str, entry: dict[str, Any], project: dict[str, Any]):

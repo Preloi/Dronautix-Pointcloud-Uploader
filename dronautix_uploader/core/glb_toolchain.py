@@ -44,6 +44,18 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _TOOLCHAIN_STATUS_LOCK = RLock()
 
 
+def _hidden_process_options(creationflags: int = 0) -> dict[str, Any]:
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        "startupinfo": startupinfo,
+        "creationflags": creationflags | getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    }
+
+
 @dataclass(frozen=True)
 class GLBToolchainStatus:
     """The safe output decision before an optimisation starts."""
@@ -397,6 +409,7 @@ def _run_local_self_tests(manifest: Mapping[str, Any], toolchain_dir: Path) -> t
             check=False,
             cwd=toolchain_dir,
             env=_isolated_toolchain_environment(toolchain_dir),
+            **_hidden_process_options(),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return (f"Gebündelte Node-Runtime startet nicht: {exc}",)
@@ -417,6 +430,7 @@ def _run_local_self_tests(manifest: Mapping[str, Any], toolchain_dir: Path) -> t
                 check=False,
                 cwd=toolchain_dir,
                 env=_isolated_toolchain_environment(toolchain_dir),
+                **_hidden_process_options(),
             )
         except (OSError, subprocess.SubprocessError) as exc:
             errors.append(f"{runner_id}-Runner startet nicht: {exc}")

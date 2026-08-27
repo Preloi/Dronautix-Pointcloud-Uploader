@@ -288,6 +288,7 @@ def test_single_replace_from_source_legacy_single_copc_keeps_root_paths(tmp_path
                     "crs": "EPSG:25832",
                     "projection": "EPSG:25832",
                     "crs_info": {"value": "EPSG:25832"},
+                    "pointclouds": [],
                 }
             ],
             S3_DISABLED_PROJECTS_KEY: [],

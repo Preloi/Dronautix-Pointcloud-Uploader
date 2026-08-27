@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import copy
+import json
 import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .constants import BUCKET_NAME, COPC_OBJECT_NAME
+from .constants import BUCKET_NAME, COPC_OBJECT_NAME, S3_INDEX_CACHE_CONTROL
 from .contracts import (
     CancelCallback,
     OperationCancelledError,
@@ -842,6 +843,13 @@ def replace_single_project_pointcloud(
     """Replace one child pointcloud while preserving the other children."""
 
     snapshot = copy.deepcopy(index_data)
+    original_snapshot_project = _project_from_snapshot(snapshot, project_id)
+    snapshot_pointclouds = original_snapshot_project.get("pointclouds")
+    is_legacy_single = not isinstance(snapshot_pointclouds, list) or not snapshot_pointclouds
+    legacy_display_name = (
+        str(original_snapshot_project.get("name", "")).strip()
+        or str(original_snapshot_project.get("projekt", "")).strip()
+    )
     ledger = UploadedKeyLedger()
     replacement_keys = collect_upload_file_keys((prepared_cloud,))
 
@@ -857,23 +865,29 @@ def replace_single_project_pointcloud(
         def update_project(project: dict[str, Any]) -> None:
             original_project = snapshot_project(project, snapshot)
             pointclouds = original_project.get("pointclouds")
-            if not isinstance(pointclouds, list):
+            if not isinstance(pointclouds, list) or not pointclouds:
                 if not _project_matches_s3_path(original_project, target_pointcloud_s3_path):
                     raise ValueError(f"Punktwolke mit S3-Pfad '{target_pointcloud_s3_path}' wurde nicht gefunden.")
+                pointcloud_name = str(original_project.get("name", "")).strip() or str(
+                    original_project.get("projekt", "Punktwolke")
+                )
                 if isinstance(original_project.get("models"), list):
+                    pointcloud_entry = prepared_cloud.index_entry
+                    pointcloud_entry["name"] = pointcloud_name
                     project.clear()
                     project.update(
                         build_multi_project_metadata(
                             project=original_project,
                             base_viewer_path=base_viewer_path,
                             s3_prefix=s3_prefix,
-                            pointcloud_entries=[prepared_cloud.index_entry],
+                            pointcloud_entries=[pointcloud_entry],
                         )
                     )
+                    project.pop("name", None)
                     append_project_history(
                         project,
                         timestamp,
-                        f"Punktwolke '{original_project.get('projekt', 'Punktwolke')}' wurde ausgetauscht.",
+                        f"Punktwolke '{pointcloud_name}' wurde ausgetauscht.",
                     )
                     return
                 disabled_at = original_project.get("disabled_at")
@@ -890,13 +904,13 @@ def replace_single_project_pointcloud(
                 )
                 if disabled_at is not None:
                     project["disabled_at"] = disabled_at
-                for key in ("visible", "history"):
+                for key in ("visible", "history", "name"):
                     if key in original_project:
                         project[key] = original_project[key]
                 append_project_history(
                     project,
                     timestamp,
-                    f"Punktwolke '{original_project.get('projekt', 'Punktwolke')}' wurde ausgetauscht.",
+                    f"Punktwolke '{pointcloud_name}' wurde ausgetauscht.",
                 )
                 return
 
@@ -939,6 +953,13 @@ def replace_single_project_pointcloud(
 
         if not update_project_in_index(index_data, project_id, update_project):
             raise RuntimeError("Projekt konnte im Index nicht gefunden werden.")
+        if is_legacy_single and legacy_display_name:
+            _overwrite_uploaded_potree_name(
+                s3_client,
+                prepared_cloud,
+                legacy_display_name,
+                bucket_name=bucket_name,
+            )
         if not save_index(index_data):
             raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
     except Exception:
@@ -970,6 +991,43 @@ def replace_single_project_pointcloud(
         uploaded_keys=ledger.as_tuple(),
         deleted_keys=orphaned_keys,
         message="Punktwolke wurde ersetzt.",
+    )
+
+
+def _overwrite_uploaded_potree_name(
+    s3_client,
+    prepared_cloud: PreparedCloudUpload,
+    display_name: str,
+    *,
+    bucket_name: str,
+) -> None:
+    """Keep a legacy cloud's display name when its Potree data is replaced."""
+
+    if prepared_cloud.input_format != "potree":
+        return
+    metadata_upload = next(
+        (
+            (local_path, s3_key)
+            for local_path, s3_key in prepared_cloud.files_to_upload
+            if s3_key.casefold().endswith("/metadata.json")
+        ),
+        None,
+    )
+    if metadata_upload is None:
+        return
+    local_path, metadata_key = metadata_upload
+    with open(local_path, "r", encoding="utf-8") as handle:
+        metadata = json.load(handle)
+    if not isinstance(metadata, dict):
+        raise ValueError(f"Potree-Metadaten sind ungültig: {metadata_key}")
+    metadata["name"] = display_name
+    payload = (json.dumps(metadata, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    s3_client.put_object(
+        Bucket=bucket_name,
+        Key=metadata_key,
+        Body=payload,
+        ContentType="application/json",
+        CacheControl=S3_INDEX_CACHE_CONTROL,
     )
 
 
@@ -1603,10 +1661,16 @@ def apply_project_rename_metadata(
     updated["kunde"] = new_kunde
     updated["projekt"] = new_projekt
     pointclouds = updated.get("pointclouds")
-    if isinstance(pointclouds, list):
+    if isinstance(pointclouds, list) and pointclouds:
         for index, name in enumerate(pointcloud_names):
             if index < len(pointclouds) and isinstance(pointclouds[index], dict):
                 pointclouds[index]["name"] = name
+    elif pointcloud_names:
+        pointcloud_name = str(pointcloud_names[0] or "").strip()
+        if pointcloud_name and pointcloud_name != str(new_projekt or "").strip():
+            updated["name"] = pointcloud_name
+        else:
+            updated.pop("name", None)
     return updated
 
 

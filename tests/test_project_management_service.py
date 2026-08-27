@@ -958,6 +958,85 @@ def test_rename_project_updates_active_project_without_changing_paths():
     assert repository.saved_indexes[-1]["projects"][0] == renamed
 
 
+def test_rename_project_stores_legacy_cloud_name_and_updates_existing_potree_metadata():
+    metadata_key = "pointclouds/alt/legacy/altprojekt/metadata.json"
+    s3_client = FakeS3Client()
+    s3_client.read_objects[metadata_key] = b'{"name":"Altprojekt","points":123}'
+    repository = FakeRepository(
+        {
+            "projects": [
+                {
+                    "id": "legacy",
+                    "kunde": "Alt",
+                    "projekt": "Altprojekt",
+                    "format": "potree",
+                    "viewer_path": "alt/legacy/altprojekt",
+                    "s3_path": "pointclouds/alt/legacy/altprojekt",
+                }
+            ],
+            S3_DISABLED_PROJECTS_KEY: [],
+        }
+    )
+
+    result = make_service(repository, s3_client=s3_client).rename_project(
+        "legacy",
+        "Neu",
+        "Neuprojekt",
+        ("Neue Punktwolke",),
+    )
+    renamed = repository.index_data["projects"][0]
+
+    assert result.status == "success"
+    assert renamed["name"] == "Neue Punktwolke"
+    assert renamed["format"] == "potree"
+    assert renamed["viewer_path"] == "alt/legacy/altprojekt"
+    assert renamed["s3_path"] == "pointclouds/alt/legacy/altprojekt"
+    assert "pointclouds" not in renamed
+    assert json.loads(s3_client.read_objects[metadata_key])["name"] == "Neue Punktwolke"
+    assert s3_client.puts[0][4]["CacheControl"] == "no-cache"
+
+
+def test_rename_project_rolls_back_potree_metadata_when_index_save_fails():
+    metadata_key = "pointclouds/kunde/legacy/projekt/metadata.json"
+    original_metadata = b'{"name":"Alt","points":123}'
+    s3_client = FakeS3Client()
+    s3_client.read_objects[metadata_key] = original_metadata
+
+    class FailingRepository(FakeRepository):
+        def save_projects_index(self, index_data):
+            self.saved_indexes.append(copy.deepcopy(index_data))
+            return False
+
+    repository = FailingRepository(
+        {
+            "projects": [
+                {
+                    "id": "legacy",
+                    "kunde": "Kunde",
+                    "projekt": "Projekt",
+                    "name": "Alt",
+                    "format": "potree",
+                    "viewer_path": "kunde/legacy/projekt",
+                    "s3_path": "pointclouds/kunde/legacy/projekt",
+                }
+            ],
+            S3_DISABLED_PROJECTS_KEY: [],
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="Projekt-Index"):
+        make_service(repository, s3_client=s3_client).rename_project(
+            "legacy",
+            "Kunde",
+            "Projekt",
+            ("Neu",),
+        )
+
+    assert repository.index_data["projects"][0]["name"] == "Alt"
+    assert s3_client.read_objects[metadata_key] == original_metadata
+    assert len(s3_client.puts) == 2
+
+
 def test_rename_project_updates_disabled_project_and_preserves_disabled_status():
     repository = FakeRepository(
         {
