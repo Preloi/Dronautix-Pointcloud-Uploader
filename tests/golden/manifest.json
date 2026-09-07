@@ -16,13 +16,8 @@
       "required_files": ["projects_index.json", "metadata.json", "cloud.js"]
     },
     {
-      "id": "single_copc_upload",
-      "description": "Single COPC direct upload.",
-      "required_files": ["projects_index.json"]
-    },
-    {
       "id": "multi_mix_upload",
-      "description": "Multi-cloud upload with mixed Potree and COPC sources.",
+      "description": "Multi-cloud upload from two Potree sources.",
       "required_files": ["projects_index.json", "metadata.json", "cloud.js"]
     },
     {

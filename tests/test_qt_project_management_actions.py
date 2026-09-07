@@ -105,6 +105,7 @@ def test_project_actions_and_replace_all_are_available_for_single_project():
         ACTION_REPAIR_CRS_METADATA,
         ACTION_DELETE,
         ACTION_REPLACE_ALL_POINTCLOUDS,
+        ACTION_ADD_POINTCLOUDS,
         ACTION_ADD_MODELS,
     }
     assert is_action_available(ACTION_REPLACE_ALL_POINTCLOUDS, project)
@@ -128,6 +129,7 @@ def test_single_replace_requires_concrete_pointcloud_context_for_multi_project()
         ACTION_DELETE,
         ACTION_REPLACE_ALL_POINTCLOUDS,
         ACTION_REPLACE_SINGLE_POINTCLOUD,
+        ACTION_ADD_POINTCLOUDS,
         ACTION_ADD_MODELS,
     }
 
@@ -148,7 +150,7 @@ def test_glb_replace_requires_concrete_model_context():
     assert is_action_available(ACTION_ADD_MODELS, project)
 
 
-def test_add_and_remove_require_an_explicit_pointcloud_list_and_removal_needs_a_nonfinal_child_with_s3_path():
+def test_add_supports_single_projects_and_removal_needs_an_explicit_nonfinal_child_with_s3_path():
     legacy_project = _project(_pointcloud("Altbestand"))
     explicit_project = _project(
         _pointcloud("Scan A", "projects/project-1/a"),
@@ -158,13 +160,31 @@ def test_add_and_remove_require_an_explicit_pointcloud_list_and_removal_needs_a_
     single_explicit_project = _project(_pointcloud("Scan", "projects/project-1/scan"), explicit=True)
     pathless_child = _pointcloud("Ohne Pfad")
 
-    assert not is_action_available(ACTION_ADD_POINTCLOUDS, legacy_project)
+    assert is_action_available(ACTION_ADD_POINTCLOUDS, legacy_project)
     assert not is_action_available(ACTION_REMOVE_POINTCLOUD, legacy_project, legacy_project.pointclouds[0])
     assert is_action_available(ACTION_ADD_POINTCLOUDS, explicit_project)
     assert not is_action_available(ACTION_REMOVE_POINTCLOUD, explicit_project)
     assert is_action_available(ACTION_REMOVE_POINTCLOUD, explicit_project, explicit_project.pointclouds[0])
     assert not is_action_available(ACTION_REMOVE_POINTCLOUD, single_explicit_project, single_explicit_project.pointclouds[0])
     assert not is_action_available(ACTION_REMOVE_POINTCLOUD, explicit_project, pathless_child)
+
+
+def test_add_is_unavailable_for_projects_with_unsupported_pointcloud_formats():
+    legacy_copc = _project(PointcloudPreview(name="Alt", format="COPC", points="-", crs="-"))
+    mixed = _project(
+        _pointcloud("Potree", "projects/project-1/potree"),
+        PointcloudPreview(
+            name="Alt",
+            format="copc",
+            points="-",
+            crs="-",
+            s3_path="projects/project-1/alt/source.copc.laz",
+        ),
+        explicit=True,
+    )
+
+    assert not is_action_available(ACTION_ADD_POINTCLOUDS, legacy_copc)
+    assert not is_action_available(ACTION_ADD_POINTCLOUDS, mixed)
 
 
 def test_success_result_summary_is_compact_for_statusbar_and_activity_log():

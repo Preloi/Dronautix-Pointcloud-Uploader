@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import tempfile
+from dataclasses import replace
 from pathlib import Path
 from collections.abc import MutableMapping
 from typing import Any
@@ -60,9 +64,12 @@ def create_pointcloud_index_entry(
 ) -> dict[str, Any]:
     """Create a viewer-compatible pointcloud entry for projects_index.json."""
 
+    normalized_format = str(input_format or "").strip().lower()
+    if normalized_format != "potree":
+        raise ValueError(f"Nicht unterstuetztes Punktwolkenformat: {input_format}")
     entry: dict[str, Any] = {
         "name": name,
-        "format": input_format,
+        "format": normalized_format,
         "viewer_path": viewer_path,
         "s3_path": s3_path,
         "visible": True,
@@ -129,6 +136,32 @@ def write_potree_metadata_crs_for_sources(sources) -> tuple[Path, ...]:
             continue
         updated_files.extend(write_potree_metadata_crs(getattr(source, "source_path", ""), crs_info))
     return tuple(updated_files)
+
+
+def stage_potree_metadata_crs_for_sources(sources, staging_root: str | Path):
+    """Return sources whose metadata uploads point to private staged copies."""
+
+    staged_sources = []
+    root = Path(staging_root)
+    root.mkdir(parents=True, exist_ok=True)
+    for index, source in enumerate(sources or ()):
+        crs_info = getattr(source, "crs_info", None)
+        if getattr(source, "input_format", "") != "potree" or not isinstance(crs_info, dict) or not crs_info:
+            staged_sources.append(source)
+            continue
+        source_dir = Path(getattr(source, "source_path", ""))
+        overrides: dict[str, str] = {}
+        stage_dir = Path(tempfile.mkdtemp(prefix=f"cloud-{index + 1}-", dir=root))
+        for name in ("metadata.json", "cloud.js"):
+            original = source_dir / name
+            if not original.is_file():
+                continue
+            staged = stage_dir / name
+            shutil.copyfile(original, staged)
+            overrides[name] = str(staged)
+        write_potree_metadata_crs(stage_dir, crs_info)
+        staged_sources.append(replace(source, upload_file_overrides=overrides or None))
+    return tuple(staged_sources)
 
 
 def write_potree_metadata_name(output_dir: str | Path, name: str) -> Path | None:

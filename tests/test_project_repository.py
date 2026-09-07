@@ -10,11 +10,15 @@ from dronautix_uploader.core.constants import (
     S3_INDEX_CACHE_CONTROL,
     S3_INDEX_JSON,
 )
-from dronautix_uploader.core.project_repository import ProjectMetadataRepository
+from dronautix_uploader.core.project_repository import ProjectMetadataRepository, ProjectMetadataWriteUncertainError
 
 
 class NoSuchKey(Exception):
     pass
+
+
+class PreconditionFailed(Exception):
+    response = {"Error": {"Code": "PreconditionFailed"}}
 
 
 class FakeS3Client:
@@ -22,15 +26,25 @@ class FakeS3Client:
 
     def __init__(self, objects=None):
         self.objects = objects or {}
+        self.etags = {key: '"1"' for key in self.objects}
         self.puts = []
 
     def get_object(self, Bucket, Key):
         if Key not in self.objects:
             raise self.exceptions.NoSuchKey(Key)
-        return {"Body": io.BytesIO(self.objects[Key])}
+        return {"Body": io.BytesIO(self.objects[Key]), "ETag": self.etags[Key]}
 
     def put_object(self, **kwargs):
+        key = kwargs["Key"]
+        if kwargs.get("IfNoneMatch") == "*" and key in self.objects:
+            raise PreconditionFailed()
+        if "IfMatch" in kwargs and kwargs["IfMatch"] != self.etags.get(key):
+            raise PreconditionFailed()
         self.puts.append(kwargs)
+        next_etag = f'"{len(self.puts) + 1}"'
+        self.objects[key] = kwargs["Body"].encode("utf-8")
+        self.etags[key] = next_etag
+        return {"ETag": next_etag}
 
 
 def test_load_projects_index_reads_existing_json_from_s3():
@@ -75,12 +89,9 @@ def test_save_projects_index_writes_utf8_json_metadata_to_expected_key():
         timestamp_factory=lambda: "2026-06-21T12:00:00",
     )
 
-    repository.save_projects_index(
-        {
-            "projects": [{"name": "M\u00fcnchen", "id": "p1", "_link_disabled": True, "link_disabled": True}],
-            "last_updated": None,
-        }
-    )
+    snapshot = repository.load_projects_index()
+    snapshot["projects"] = [{"name": "M\u00fcnchen", "id": "p1", "_link_disabled": True, "link_disabled": True}]
+    repository.save_projects_index(snapshot)
 
     assert len(fake_s3.puts) == 1
     put = fake_s3.puts[0]
@@ -88,6 +99,7 @@ def test_save_projects_index_writes_utf8_json_metadata_to_expected_key():
     assert put["Key"] == S3_INDEX_JSON
     assert put["ContentType"] == "application/json"
     assert put["CacheControl"] == S3_INDEX_CACHE_CONTROL
+    assert put["IfNoneMatch"] == "*"
     assert isinstance(put["Body"], str)
     assert "\\u00fc" not in put["Body"]
     saved = json.loads(put["Body"])
@@ -106,13 +118,57 @@ def test_save_deleted_projects_writes_expected_key_and_json_body():
         timestamp_factory=lambda: "2026-06-21T12:00:00",
     )
 
-    repository.save_deleted_projects({"deleted_projects": [{"id": "old"}], "last_updated": None})
+    snapshot = repository.load_deleted_projects()
+    snapshot["deleted_projects"] = [{"id": "old"}]
+    repository.save_deleted_projects(snapshot)
 
     put = fake_s3.puts[0]
     assert put["Key"] == S3_DELETED_JSON
     assert put["ContentType"] == "application/json"
     assert put["CacheControl"] == S3_DELETED_CACHE_CONTROL
+    assert put["IfNoneMatch"] == "*"
     assert json.loads(put["Body"]) == {
         "deleted_projects": [{"id": "old"}],
         "last_updated": "2026-06-21T12:00:00",
     }
+
+
+def test_stale_snapshot_cannot_overwrite_newer_index():
+    initial = json.dumps({"projects": [], "last_updated": None}).encode("utf-8")
+    fake_s3 = FakeS3Client({S3_INDEX_JSON: initial})
+    repository = ProjectMetadataRepository(fake_s3, bucket_name="bucket")
+    first = repository.load_projects_index()
+    second = repository.load_projects_index()
+    first["projects"].append({"id": "first"})
+    repository.save_projects_index(first)
+    second["projects"].append({"id": "second"})
+
+    with pytest.raises(RuntimeError, match="Metadatenkonflikt") as exc_info:
+        repository.save_projects_index(second)
+
+    assert exc_info.value.current_data["projects"] == [{"id": "first"}]
+    assert json.loads(fake_s3.objects[S3_INDEX_JSON])["projects"] == [{"id": "first"}]
+
+
+def test_plain_dict_save_fails_closed():
+    repository = ProjectMetadataRepository(FakeS3Client(), bucket_name="bucket")
+
+    with pytest.raises(RuntimeError, match="geladenen Snapshot"):
+        repository.save_projects_index({"projects": []})
+
+
+def test_commit_then_transport_error_is_reported_with_verified_current_index():
+    class CommitThenTimeout(FakeS3Client):
+        def put_object(self, **kwargs):
+            super().put_object(**kwargs)
+            raise TimeoutError("response lost")
+
+    fake_s3 = CommitThenTimeout({S3_INDEX_JSON: b'{"projects":[],"last_updated":null}'})
+    repository = ProjectMetadataRepository(fake_s3, bucket_name="bucket")
+    snapshot = repository.load_projects_index()
+    snapshot["projects"].append({"id": "winner", "s3_path": "pointclouds/shared"})
+
+    with pytest.raises(ProjectMetadataWriteUncertainError) as exc_info:
+        repository.save_projects_index(snapshot)
+
+    assert exc_info.value.current_data["projects"][0]["id"] == "winner"

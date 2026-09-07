@@ -15,7 +15,6 @@ GOLDEN_DIR = Path(__file__).parent / "golden"
 MANIFEST_PATH = GOLDEN_DIR / "manifest.json"
 REQUIRED_SCENARIOS = {
     "single_potree_upload",
-    "single_copc_upload",
     "multi_mix_upload",
     "vertical_crs_upload",
     "existing_potree_folder_upload",
@@ -59,7 +58,6 @@ def test_golden_manifest_tracks_required_legacy_capture_scenarios():
     assert manifest["provenance_file"] == "provenance.json"
     assert manifest["v2_output_root"] == "tests/golden/v2_outputs"
     assert REQUIRED_SCENARIOS.issubset(scenario_ids)
-    assert scenarios_by_id["single_copc_upload"]["required_files"] == ["projects_index.json"]
     assert len(scenarios) == len(scenario_ids)
     for scenario in scenarios:
         assert scenario["description"].strip()

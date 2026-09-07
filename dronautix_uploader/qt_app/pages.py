@@ -37,6 +37,7 @@ from .glb_upload_model import (
     format_file_size,
 )
 from .path_drop import mime_data_paths
+from .task_worker import create_task_worker
 from .project_management import (
     ProjectPreview,
     STATUS_ALL,
@@ -805,7 +806,7 @@ def create_upload_page(
             add_sources([path] if path else [])
             return
         paths, _f = QtWidgets.QFileDialog.getOpenFileNames(
-            page, "Punktwolken auswählen", "", "Punktwolken (*.las *.laz *.copc.laz);;Alle Dateien (*)"
+            page, "Punktwolken auswählen", "", "Punktwolken (*.las *.laz);;Alle Dateien (*)"
         )
         add_sources(paths)
 
@@ -895,7 +896,6 @@ def create_upload_page(
             is_upload = state["mode"] == UPLOAD_MODE_UPLOAD
             needs_conversion = any(
                 str(path).lower().endswith((".las", ".laz"))
-                and not str(path).lower().endswith(".copc.laz")
                 for path in state["sources"]
             )
             required_phases = {"conversion"} if not is_upload else {"preparation", "upload", "index"}
@@ -1102,8 +1102,10 @@ def create_projects_page(
     project_previews: Iterable[ProjectPreview] | None = None,
     project_provider: ProjectProvider | None = None,
     on_project_action: ProjectActionCallback | None = None,
+    on_load_state_changed: Callable[[], None] | None = None,
+    can_start_load: Callable[[], bool] | None = None,
 ):
-    projects = _resolve_project_previews(project_previews, project_provider)
+    projects = tuple(project_previews or ())
     action_callback = on_project_action or on_placeholder_action
     project_role = QtCore.Qt.UserRole + 1
     disabled_role = QtCore.Qt.UserRole + 2
@@ -1177,6 +1179,11 @@ def create_projects_page(
     refresh_button.setObjectName("ActionButton")
     toolbar.addWidget(refresh_button)
     root.addLayout(toolbar)
+    load_error_label = QtWidgets.QLabel("")
+    load_error_label.setObjectName("ErrorText")
+    load_error_label.setWordWrap(True)
+    load_error_label.hide()
+    root.addWidget(load_error_label)
 
     content = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
     content.setObjectName("ContentSplitter")
@@ -1420,14 +1427,23 @@ def create_projects_page(
             return None
         return selected_items[0].data(model_role)
 
-    def reload_projects():
+    load_generation = 0
+    active_loads = []
+
+    def cleanup_load(current_bundle, current_receiver):
+        try:
+            active_loads.remove((current_bundle, current_receiver))
+        except ValueError:
+            pass
+        current_receiver.deleteLater()
+        if on_load_state_changed is not None:
+            on_load_state_changed()
+
+    def apply_projects(loaded_projects):
         nonlocal projects
         selected = selected_project()
         selected_project_id = selected.project_id if selected is not None else ""
-        projects = _resolve_project_previews(
-            None if project_provider is not None else project_previews,
-            project_provider,
-        )
+        projects = tuple(loaded_projects)
         source_model.blockSignals(True)
         try:
             _populate_projects_model(
@@ -1442,11 +1458,70 @@ def create_projects_page(
             )
         finally:
             source_model.blockSignals(False)
+        proxy_model.invalidate()
         table.resizeColumnsToContents()
         if selected_project_id:
             _select_project_by_id(selected_project_id)
         _select_first_visible_project_if_needed()
         update_detail_panel()
+
+    class ProjectLoadReceiver(QtCore.QObject):
+        def __init__(self, generation):
+            super().__init__(page)
+            self.generation = generation
+            self.result_handled = False
+            self.thread_done = False
+            self.bundle = None
+
+        def _finish_if_ready(self):
+            if self.result_handled and self.thread_done:
+                cleanup_load(self.bundle, self)
+
+        @QtCore.Slot(object)
+        def loaded(self, loaded_projects):
+            try:
+                if self.generation == load_generation:
+                    load_error_label.hide()
+                    load_error_label.setText("")
+                    apply_projects(loaded_projects)
+            finally:
+                self.result_handled = True
+                self._finish_if_ready()
+
+        @QtCore.Slot(object)
+        def failed(self, error):
+            try:
+                if self.generation == load_generation:
+                    load_error_label.setText(f"Projekte konnten nicht geladen werden: {error}")
+                    load_error_label.show()
+            finally:
+                self.result_handled = True
+                self._finish_if_ready()
+
+        @QtCore.Slot()
+        def thread_finished(self):
+            self.thread_done = True
+            self._finish_if_ready()
+
+    def reload_projects():
+        nonlocal load_generation
+        if can_start_load is not None and not can_start_load():
+            return
+        if project_provider is None:
+            apply_projects(project_previews or ())
+            return
+        load_generation += 1
+        receiver = ProjectLoadReceiver(load_generation)
+        bundle = create_task_worker(QtCore, lambda: load_project_previews(project_provider))
+        receiver.bundle = bundle
+        active_loads.append((bundle, receiver))
+        if on_load_state_changed is not None:
+            on_load_state_changed()
+        bundle.worker.result.connect(receiver.loaded)
+        bundle.worker.error.connect(receiver.failed)
+
+        bundle.thread.finished.connect(receiver.thread_finished)
+        bundle.thread.start()
 
     def _select_project_by_id(project_id: str):
         selection_model = table.selectionModel()
@@ -1740,9 +1815,13 @@ def create_projects_page(
     _select_first_visible_project_if_needed()
     update_detail_panel()
     page.reload_projects = reload_projects
+    page.project_load_error_label = load_error_label
+    page._active_project_loads = active_loads
     page.focus_search = focus_search
     page.clear_search = clear_search
     page.focus_default = focus_search
+    if project_provider is not None:
+        QtCore.QTimer.singleShot(0, reload_projects)
     return page
 
 

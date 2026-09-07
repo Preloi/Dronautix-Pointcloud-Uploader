@@ -20,9 +20,6 @@ def sanitize_folder_name(name: str) -> str:
 
 def get_pointcloud_display_name(source_path: str) -> str:
     filename = os.path.basename(source_path or "").strip()
-    lower_name = filename.lower()
-    if lower_name.endswith(".copc.laz"):
-        return filename[:-9] or "Punktwolke"
     name, _extension = os.path.splitext(filename)
     return name or "Punktwolke"
 

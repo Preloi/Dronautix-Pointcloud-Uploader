@@ -585,7 +585,7 @@ def test_add_pointclouds_routes_sources_and_progress_to_the_expected_service_met
     ]
 
 
-def test_add_and_remove_reject_legacy_projects_and_remove_routes_the_selected_s3_child():
+def test_add_accepts_legacy_projects_and_remove_routes_only_explicit_selected_s3_child():
     service = FakeService()
     controller = ProjectManagementController(service)
     first = _pointcloud("Scan A", "projects/project-1/a")
@@ -595,8 +595,8 @@ def test_add_and_remove_reject_legacy_projects_and_remove_routes_the_selected_s3
     controller.remove_pointcloud(explicit_project, second)
     assert service.calls == [("remove_project_pointcloud", "project-1", "projects/project-1/b")]
 
-    with pytest.raises(ValueError, match="pointclouds"):
-        controller.add_pointclouds(_project(first), AddPointcloudsInput(prepared_clouds=("prepared",)))
+    controller.add_pointclouds(_project(first), AddPointcloudsInput(prepared_clouds=("prepared",)))
+    assert service.calls[-1] == ("add_project_pointclouds", "project-1", ("prepared",), None)
     with pytest.raises(ValueError, match="letzte Punktwolke"):
         controller.remove_pointcloud(_project(first, explicit=True), first)
 

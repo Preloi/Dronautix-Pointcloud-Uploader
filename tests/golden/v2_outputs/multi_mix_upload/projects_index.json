@@ -12,10 +12,10 @@
       "pointcloud_count": 2,
       "pointclouds": [
         {
-          "name": "Fassade",
-          "format": "copc",
-          "viewer_path": "golden_kunde/abc123e2/multi_mix/fassade/source.copc.laz",
-          "s3_path": "pointclouds/golden_kunde/abc123e2/multi_mix/fassade/source.copc.laz",
+          "name": "Fassade Potree",
+          "format": "potree",
+          "viewer_path": "golden_kunde/abc123e2/multi_mix/fassade_potree",
+          "s3_path": "pointclouds/golden_kunde/abc123e2/multi_mix/fassade_potree",
           "visible": true,
           "crs": "EPSG:25832",
           "projection": "EPSG:25832",

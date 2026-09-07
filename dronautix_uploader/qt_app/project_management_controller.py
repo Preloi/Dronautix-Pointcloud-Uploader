@@ -258,7 +258,7 @@ class ProjectManagementController:
         request: AddPointcloudsInput,
         on_progress: ProgressCallback | None = None,
     ) -> ProjectOperationSummary:
-        project = _require_explicit_pointcloud_project(project_preview)
+        project = _require_project(project_preview)
         if request.source_paths:
             result = self.service.add_project_pointclouds_from_sources(
                 project.project_id,

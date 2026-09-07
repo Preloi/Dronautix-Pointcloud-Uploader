@@ -75,11 +75,11 @@ def make_prepared_cloud(tmp_path, *, name, slug, viewer_root, s3_root, content=b
     return PreparedCloudUpload(
         name=name,
         slug=slug,
-        input_format="copc",
-        viewer_path=f"{viewer_root}/{slug}/source.copc.laz",
-        s3_path=f"{s3_prefix}/source.copc.laz",
+        input_format="potree",
+        viewer_path=f"{viewer_root}/{slug}",
+        s3_path=s3_prefix,
         s3_prefix=s3_prefix,
-        files_to_upload=((str(local_file), f"{s3_prefix}/source.copc.laz"),),
+        files_to_upload=((str(local_file), f"{s3_prefix}/cloud.js"),),
         crs_info={"value": "EPSG:25832"},
     )
 
@@ -113,6 +113,7 @@ def test_full_replacement_disabled_multi_project_keeps_disabled_and_deletes_old_
                 "Contents": [
                     {"Key": f"{project_root}/old_a/cloud.js", "Size": 10},
                     {"Key": f"{project_root}/old_b/metadata.json", "Size": 10},
+                    {"Key": f"{project_root}-backup/metadata.json", "Size": 10},
                 ]
             }
         ]
@@ -125,7 +126,7 @@ def test_full_replacement_disabled_multi_project_keeps_disabled_and_deletes_old_
     result = make_service(repository, s3_client).replace_project_pointclouds("project", prepared)
 
     assert result.status == "success"
-    assert s3_client.prefixes == [project_root]
+    assert s3_client.prefixes == [f"{project_root}/"]
     assert repository.index_data["projects"] == [{"id": "active"}]
     disabled_project = repository.index_data[S3_DISABLED_PROJECTS_KEY][0]
     assert disabled_project["id"] == "project"
@@ -133,8 +134,8 @@ def test_full_replacement_disabled_multi_project_keeps_disabled_and_deletes_old_
     assert disabled_project["format"] == "multi"
     assert [cloud["name"] for cloud in disabled_project["pointclouds"]] == ["New A", "New B"]
     assert [cloud["s3_path"] for cloud in disabled_project["pointclouds"]] == [
-        f"{project_root}/versions/versionid/new_a/source.copc.laz",
-        f"{project_root}/versions/versionid/new_b/source.copc.laz",
+        f"{project_root}/versions/versionid/new_a",
+        f"{project_root}/versions/versionid/new_b",
     ]
     assert disabled_project["history"][-1] == {
         "timestamp": "2026-06-21T13:00:00",
@@ -144,6 +145,7 @@ def test_full_replacement_disabled_multi_project_keeps_disabled_and_deletes_old_
         f"{project_root}/old_a/cloud.js",
         f"{project_root}/old_b/metadata.json",
     ]
+    assert f"{project_root}-backup/metadata.json" not in s3_client.deleted
     assert repository.saved_indexes[-1][S3_DISABLED_PROJECTS_KEY][0]["id"] == "project"
 
 
@@ -186,6 +188,7 @@ def test_single_replacement_active_multi_project_replaces_only_target_and_delete
                 "Contents": [
                     {"Key": f"{target_path}/cloud.js", "Size": 10},
                     {"Key": f"{target_path}/metadata.json", "Size": 10},
+                    {"Key": f"{target_path}-backup/metadata.json", "Size": 10},
                 ]
             }
         ]
@@ -205,7 +208,7 @@ def test_single_replacement_active_multi_project_replaces_only_target_and_delete
     )
 
     assert result.status == "success"
-    assert s3_client.prefixes == [target_path]
+    assert s3_client.prefixes == [f"{target_path}/"]
     pointclouds = repository.index_data["projects"][0]["pointclouds"]
     assert pointclouds[0] == {
         "name": "Cloud A",
@@ -214,11 +217,12 @@ def test_single_replacement_active_multi_project_replaces_only_target_and_delete
         "s3_path": f"{project_root}/cloud_a",
     }
     assert pointclouds[1]["name"] == "Cloud B Replacement"
-    assert pointclouds[1]["s3_path"] == f"{project_root}/versions/versionid/cloud_b_new/source.copc.laz"
+    assert pointclouds[1]["s3_path"] == f"{project_root}/versions/versionid/cloud_b_new"
     assert s3_client.deleted == [
         f"{target_path}/cloud.js",
         f"{target_path}/metadata.json",
     ]
+    assert f"{target_path}-backup/metadata.json" not in s3_client.deleted
     assert f"{project_root}/cloud_a/cloud.js" not in s3_client.deleted
     assert repository.saved_indexes[-1]["projects"][0]["pointclouds"][1]["name"] == "Cloud B Replacement"
     assert repository.index_data["projects"][0]["history"][-1] == {
@@ -237,10 +241,10 @@ def test_single_replacement_active_legacy_single_project_keeps_top_level_shape_a
                     "id": "project",
                     "kunde": "Kunde",
                     "projekt": "Projekt",
-                    "format": "copc",
+                    "format": "potree",
                     "link": "https://viewer/?id=project",
-                    "viewer_path": f"{viewer_root}/source.copc.laz",
-                    "s3_path": f"{project_root}/source.copc.laz",
+                    "viewer_path": viewer_root,
+                    "s3_path": project_root,
                     "crs": "EPSG:25832",
                     "projection": "EPSG:25832",
                     "crs_info": {"value": "EPSG:25832"},
@@ -253,7 +257,7 @@ def test_single_replacement_active_legacy_single_project_keeps_top_level_shape_a
         pages=[
             {
                 "Contents": [
-                    {"Key": f"{project_root}/source.copc.laz", "Size": 10},
+                    {"Key": f"{project_root}/cloud.js", "Size": 10},
                     {"Key": f"{project_root}/old.bin", "Size": 10},
                 ]
             }
@@ -262,33 +266,33 @@ def test_single_replacement_active_legacy_single_project_keeps_top_level_shape_a
     prepared = PreparedCloudUpload(
         name="Replacement",
         slug="",
-        input_format="copc",
-        viewer_path=f"{viewer_root}/source.copc.laz",
-        s3_path=f"{project_root}/source.copc.laz",
+        input_format="potree",
+        viewer_path=viewer_root,
+        s3_path=project_root,
         s3_prefix=project_root,
-        files_to_upload=((str(tmp_path / "replacement.copc.laz"), f"{project_root}/source.copc.laz"),),
+        files_to_upload=((str(tmp_path / "replacement.bin"), f"{project_root}/cloud.js"),),
         crs_info={"value": "EPSG:4326"},
     )
-    (tmp_path / "replacement.copc.laz").write_bytes(b"replacement")
+    (tmp_path / "replacement.bin").write_bytes(b"replacement")
 
     result = make_service(repository, s3_client).replace_single_project_pointcloud(
         "project",
-        f"{project_root}/source.copc.laz",
+        project_root,
         prepared,
     )
 
     project = repository.index_data["projects"][0]
     assert result.status == "success"
     assert "pointclouds" not in project
-    assert project["format"] == "copc"
-    assert project["viewer_path"] == f"{viewer_root}/versions/versionid/source.copc.laz"
+    assert project["format"] == "potree"
+    assert project["viewer_path"] == f"{viewer_root}/versions/versionid"
     assert project["s3_path"] == f"{project_root}/versions/versionid"
     assert project["crs"] == "EPSG:4326"
     assert project["crs_info"] == {"value": "EPSG:4326"}
-    assert s3_client.prefixes == [f"{project_root}/source.copc.laz"]
+    assert s3_client.prefixes == [f"{project_root}/"]
     assert s3_client.deleted == [
+        f"{project_root}/cloud.js",
         f"{project_root}/old.bin",
-        f"{project_root}/source.copc.laz",
     ]
 
 
@@ -305,7 +309,7 @@ def test_versioned_project_root_is_not_nested_again():
 
     assert service._stable_project_roots(
         {
-            "viewer_path": "kunde/project/projekt/versions/old/source.copc.laz",
+            "viewer_path": "kunde/project/projekt/versions/old",
             "s3_path": "pointclouds/kunde/project/projekt/versions/old",
         }
     ) == (
@@ -328,7 +332,7 @@ def test_stable_project_root_preserves_regular_versions_path_segments():
     )
     assert service._stable_project_roots(
         {
-            "viewer_path": "kunde/project/versions/versions/old/source.copc.laz",
+            "viewer_path": "kunde/project/versions/versions/old",
             "s3_path": "pointclouds/kunde/project/versions/versions/old",
         }
     ) == (
@@ -389,13 +393,13 @@ def test_full_replacement_rolls_back_uploaded_keys_when_index_save_fails(tmp_pat
         make_service(repository, s3_client).replace_project_pointclouds("project", prepared)
 
     assert repository.index_data == original_index
-    assert s3_client.deleted == [f"{project_root}/versions/versionid/new/source.copc.laz"]
+    assert s3_client.deleted == [f"{project_root}/versions/versionid/new/cloud.js"]
 
 
-def test_remove_multi_child_lists_and_deletes_only_the_exact_copc_object():
+def test_remove_multi_child_lists_and_deletes_only_the_potree_child():
     project_root = "pointclouds/kunde/project/projekt"
     viewer_root = "kunde/project/projekt"
-    target_path = f"{project_root}/remove/source.copc.laz"
+    target_path = f"{project_root}/remove"
     repository = FakeRepository(
         {
             "projects": [
@@ -413,8 +417,8 @@ def test_remove_multi_child_lists_and_deletes_only_the_exact_copc_object():
                         },
                         {
                             "name": "Remove",
-                            "format": "copc",
-                            "viewer_path": f"{viewer_root}/remove/source.copc.laz",
+                            "format": "potree",
+                            "viewer_path": f"{viewer_root}/remove",
                             "s3_path": target_path,
                         },
                     ],
@@ -427,8 +431,8 @@ def test_remove_multi_child_lists_and_deletes_only_the_exact_copc_object():
         pages=[
             {
                 "Contents": [
-                    {"Key": target_path, "Size": 10},
-                    {"Key": f"{target_path}.backup", "Size": 10},
+                    {"Key": f"{target_path}/cloud.js", "Size": 10},
+                    {"Key": f"{target_path}-backup/cloud.js", "Size": 10},
                     {"Key": f"{project_root}/keep/cloud.js", "Size": 10},
                 ]
             }
@@ -438,18 +442,22 @@ def test_remove_multi_child_lists_and_deletes_only_the_exact_copc_object():
     result = make_service(repository, s3_client).remove_project_pointcloud("project", target_path)
 
     assert result.status == "success"
-    assert s3_client.prefixes == [target_path]
-    assert s3_client.deleted == [target_path]
+    assert s3_client.prefixes == [f"{target_path}/"]
+    assert s3_client.deleted == [f"{target_path}/cloud.js"]
     assert [cloud["name"] for cloud in repository.index_data["projects"][0]["pointclouds"]] == ["Keep"]
 
 
 def test_full_replacement_keeps_models_metadata_and_model_s3_objects(tmp_path):
+    from dataclasses import replace
+
+    crs_info = {"value": "EPSG:25832", "vertical_crs": "EPSG:7837"}
     project_root = "pointclouds/kunde/project/projekt"
     viewer_root = "kunde/project/projekt"
     version = "a" * 64
     models = [
         {
             "id": "building",
+            **crs_info,
             "viewer_path": f"{viewer_root}/models/building/versions/{version}/model.json",
             "s3_path": f"{project_root}/models/building/versions/{version}",
         }
@@ -466,9 +474,9 @@ def test_full_replacement_keeps_models_metadata_and_model_s3_objects(tmp_path):
                     "pointclouds": [
                         {
                             "name": "Old",
-                            "format": "copc",
-                            "viewer_path": f"{viewer_root}/old/source.copc.laz",
-                            "s3_path": f"{project_root}/old/source.copc.laz",
+                            "format": "potree",
+                            "viewer_path": f"{viewer_root}/old",
+                            "s3_path": f"{project_root}/old",
                         }
                     ],
                 }
@@ -480,17 +488,17 @@ def test_full_replacement_keeps_models_metadata_and_model_s3_objects(tmp_path):
         pages=[
             {
                 "Contents": [
-                    {"Key": f"{project_root}/old/source.copc.laz", "Size": 10},
+                    {"Key": f"{project_root}/old/cloud.js", "Size": 10},
                     {"Key": f"{project_root}/models/building/versions/{version}/scene.glb", "Size": 10},
                     {"Key": f"{project_root}/models/building/versions/{version}/model.json", "Size": 10},
                 ]
             }
         ]
     )
-    prepared = (make_prepared_cloud(tmp_path, name="New", slug="new", viewer_root=viewer_root, s3_root=project_root),)
+    prepared = (replace(make_prepared_cloud(tmp_path, name="New", slug="new", viewer_root=viewer_root, s3_root=project_root), crs_info=crs_info),)
 
     result = make_service(repository, s3_client).replace_project_pointclouds("project", prepared)
 
     assert result.status == "success"
     assert repository.index_data["projects"][0]["models"] == models
-    assert s3_client.deleted == [f"{project_root}/old/source.copc.laz"]
+    assert s3_client.deleted == [f"{project_root}/old/cloud.js"]

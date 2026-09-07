@@ -130,9 +130,10 @@ def test_stages_native_georeference_actual_bounds_and_control_points(tmp_path):
 
 def test_local_live_viewer_contract_from_native_glb_to_manifest_and_models_index(tmp_path):
     source = tmp_path / "halle.glb"
-    copc = tmp_path / "scan.copc.laz"
+    pointcloud = tmp_path / "scan"
     write_glb(source, native_document())
-    copc.write_bytes(b"copc")
+    pointcloud.mkdir()
+    (pointcloud / "cloud.js").write_text("cloud.js = {};", encoding="utf-8")
     project_crs = {
         "value": "EPSG:25833",
         "crs_name": "ETRS89 / UTM zone 33N",
@@ -150,7 +151,7 @@ def test_local_live_viewer_contract_from_native_glb_to_manifest_and_models_index
         project_s3_prefix=s3_root,
     )
     upload = build_new_project_upload(
-        sources=(PointcloudSource(str(copc), name="Scan", input_format="copc", crs_info=project_crs),),
+        sources=(PointcloudSource(str(pointcloud), name="Scan", input_format="potree", crs_info=project_crs),),
         timestamp="2026-08-20T12:00:00",
         kunde="Kunde",
         projekt="Projekt",
@@ -607,6 +608,55 @@ def test_original_semantic_signature_is_computed_once_for_multiple_rejected_cand
 
     assert prepared.optimization.selected_candidate == "original"
     assert calls.count("original.glb") == 1
+    cleanup_prepared_model_uploads((prepared,))
+
+
+def test_rejected_compressed_candidate_cannot_overwrite_decoded_original_fallback(tmp_path):
+    compressed_extension = "KHR_draco_mesh_compression"
+    source = tmp_path / "compressed-source.glb"
+    write_glb(source, native_document(
+        extensionsUsed=[compressed_extension],
+        extensionsRequired=[compressed_extension],
+    ))
+    capabilities = tmp_path / "capabilities.json"
+    capabilities.write_text(json.dumps({
+        "schema_version": 1,
+        "decoders": {"draco": True, "meshopt": True, "ktx2_basisu": True, "webp": True},
+        "supported_extensions": [compressed_extension],
+    }), encoding="utf-8")
+
+    class Decoder:
+        def decode(self, source_path, _extensions, output_dir, _cancel_requested=None):
+            target = Path(output_dir) / "decoded-uncompressed.glb"
+            document = native_document()
+            document["asset"]["extras"]["padding"] = "x" * 2000
+            document["nodes"][0]["translation"] = [105, -2, 1] if "candidate" in Path(source_path).name else [5, -2, 1]
+            write_glb(target, document)
+            return target
+
+    class CompressedCandidate:
+        def optimize_candidates(self, _source_path, output_dir, cancel_requested=None):
+            candidate = Path(output_dir) / "candidate.glb"
+            write_glb(candidate, native_document(
+                extensionsUsed=[compressed_extension],
+                extensionsRequired=[compressed_extension],
+            ))
+            return (("candidate", candidate),)
+
+    service = GLBOptimizationService(
+        capabilities_path=capabilities,
+        compressed_decoder=Decoder(),
+        toolchain=CompressedCandidate(),
+    )
+    service._toolchain_status = enabled_status()
+    prepared = service.prepare(model_input(source), project_crs_info=PROJECT_CRS, staging_root=tmp_path / "stage")
+    manifest = json.loads(Path(prepared.manifest_path).read_text(encoding="utf-8"))
+    output = _read_glb_document(Path(prepared.scene_path))
+
+    assert prepared.optimization.selected_candidate == "original"
+    assert output["nodes"][0]["translation"] == [5, -2, 1]
+    assert manifest["bounds"] == {"min": list(prepared.bounds_min), "max": list(prepared.bounds_max)}
+    assert manifest["bounds"]["min"][0] == pytest.approx(281496.17, abs=0.02)
     cleanup_prepared_model_uploads((prepared,))
 
 

@@ -36,6 +36,8 @@ def validate_upload_dialog_state(state: UploadDialogState) -> NewProjectUploadWo
         raise ValueError("Projektname darf nicht leer sein.")
     if not source_paths:
         raise ValueError("Mindestens eine Punktwolkenquelle auswählen.")
+    if any(path.lower().endswith(".copc.laz") for path in source_paths):
+        raise ValueError("COPC-Dateien werden nicht unterstützt. Bitte LAS/LAZ oder einen Potree-Ordner auswählen.")
     if any(_source_needs_conversion(path) for path in source_paths):
         if not converter_path:
             raise ValueError("Potree Converter ist für LAS/LAZ-Quellen erforderlich.")
@@ -75,7 +77,7 @@ def _build_crs_info_by_source_path(
 
 def _source_needs_conversion(source_path: str) -> bool:
     lower_path = source_path.lower()
-    return (lower_path.endswith(".las") or lower_path.endswith(".laz")) and not lower_path.endswith(".copc.laz")
+    return lower_path.endswith(".las") or lower_path.endswith(".laz")
 
 
 __all__ = [

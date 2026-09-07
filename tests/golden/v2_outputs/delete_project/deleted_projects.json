@@ -6,7 +6,8 @@
       "projekt": "Delete Projekt",
       "s3_path": "pointclouds/golden/delete_target",
       "deleted_at": "2026-06-21T12:00:00",
-      "original_link": "https://pointcloud.dronautix.at/index.html?id=delete-target"
+      "original_link": "https://pointcloud.dronautix.at/index.html?id=delete-target",
+      "cleanup_status": "complete"
     },
     {
       "id": "old-delete",

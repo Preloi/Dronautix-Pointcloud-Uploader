@@ -45,7 +45,7 @@ def test_example_preview_contains_five_steps_sources_crs_and_log_data():
 
     assert len(preview.steps) == 5
     assert preview.source_count_label == "3 Quellen"
-    assert any(source.format == "COPC" for source in preview.sources)
+    assert all(source.format in {"LAS", "LAZ", "Potree"} for source in preview.sources)
     assert "EPSG:25832" in preview.crs_format.horizontal_crs
     assert preview.log_entries[-1].level == "Info"
     assert "Review bereit" in preview.log_entries[-1].message
@@ -75,7 +75,7 @@ def test_upload_wizard_state_validates_each_step_before_advancing():
     ready = UploadWizardState(
         customer="Kunde",
         project="Projekt",
-        source_paths=("scan.laz", "direct.copc.laz"),
+        source_paths=("scan.laz", "C:/potree/direct"),
         converter_path="PotreeConverter.exe",
         output_base_dir="out",
         current_step=STEP_CRS_FORMAT,
@@ -96,7 +96,7 @@ def test_upload_wizard_state_builds_core_upload_request_with_crs_metadata():
     state = UploadWizardState(
         customer=" Kunde ",
         project=" Projekt ",
-        source_paths=(" scan.laz ", " direct.copc.laz "),
+        source_paths=(" scan.laz ", " C:/potree/direct "),
         converter_path=" converter.exe ",
         output_base_dir=" out ",
         overwrite=True,
@@ -109,19 +109,19 @@ def test_upload_wizard_state_builds_core_upload_request_with_crs_metadata():
 
     assert request.kunde == "Kunde"
     assert request.projekt == "Projekt"
-    assert request.source_paths == ("scan.laz", "direct.copc.laz")
+    assert request.source_paths == ("scan.laz", "C:/potree/direct")
     assert request.converter_path == "converter.exe"
     assert request.output_base_dir == "out"
     assert request.overwrite is True
     assert request.crs_info_by_source_path["scan.laz"]["projection"] == "EPSG:25832"
-    assert request.crs_info_by_source_path["direct.copc.laz"]["vertical_crs"] == "DHHN2016"
+    assert request.crs_info_by_source_path["C:/potree/direct"]["vertical_crs"] == "DHHN2016"
 
 
 def test_upload_wizard_preview_is_derived_from_state_not_only_example_data():
     state = UploadWizardState(
         customer="Kunde",
         project="Projekt",
-        source_paths=("scan.laz", "direct.copc.laz", "C:/potree/out"),
+        source_paths=("scan.laz", "C:/potree/direct", "C:/potree/out"),
         converter_path="PotreeConverter.exe",
         output_base_dir="out",
         horizontal_crs="EPSG:25832",
@@ -133,13 +133,13 @@ def test_upload_wizard_preview_is_derived_from_state_not_only_example_data():
     assert preview.project_name == "Projekt"
     assert preview.customer == "Kunde"
     assert preview.source_count_label == "3 Quellen"
-    assert [source.format for source in preview.sources] == ["LAZ", "COPC", "Potree"]
+    assert [source.format for source in preview.sources] == ["LAZ", "Potree", "Potree"]
     assert [source.handling for source in preview.sources] == [
         "Potree-Konvertierung",
-        "Direktupload",
+        "Vorhandener Potree-Ordner",
         "Vorhandener Potree-Ordner",
     ]
-    assert preview.crs_format.output_format == "Gemischt: Potree + COPC"
+    assert preview.crs_format.output_format == "Potree"
     assert preview.log_entries == (preview.log_entries[0],)
     assert preview.log_entries[0].level == "Info"
 
@@ -154,10 +154,23 @@ def test_upload_wizard_preview_surfaces_validation_errors_as_log_entries():
 
 
 def test_upload_source_format_and_handling_labels_are_stable():
-    assert source_format_label("scan.copc.laz") == "COPC"
+    assert source_format_label("scan.copc.laz") == "Nicht unterstützt"
     assert source_format_label("scan.laz") == "LAZ"
     assert source_format_label("scan.las") == "LAS"
     assert source_format_label("C:/potree/out") == "Potree"
-    assert source_handling_label("scan.copc.laz") == "Direktupload"
+    assert source_handling_label("scan.copc.laz") == "Nicht unterstützt"
     assert source_handling_label("scan.laz") == "Potree-Konvertierung"
     assert source_handling_label("C:/potree/out") == "Vorhandener Potree-Ordner"
+
+
+def test_upload_wizard_rejects_copc_at_source_step():
+    state = UploadWizardState(
+        customer="Kunde",
+        project="Projekt",
+        source_paths=("scan.copc.laz",),
+        current_step=STEP_SOURCES,
+    )
+
+    assert validate_wizard_step(state) == (
+        "COPC-Dateien werden nicht unterstützt. Bitte LAS/LAZ oder einen Potree-Ordner auswählen.",
+    )

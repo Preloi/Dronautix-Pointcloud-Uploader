@@ -24,6 +24,45 @@ PROJECTS_INDEX_DEFAULT: JsonObject = {"projects": [], "last_updated": None}
 DELETED_PROJECTS_DEFAULT: JsonObject = {"deleted_projects": [], "last_updated": None}
 
 
+class ProjectMetadataConflictError(RuntimeError):
+    """Raised when a loaded S3 metadata snapshot is no longer current."""
+
+    def __init__(self, key: str, current_data: JsonObject | None = None) -> None:
+        super().__init__(f"S3-Metadatenkonflikt bei {key}; Daten wurden inzwischen geaendert.")
+        self.key = key
+        self.current_data = current_data
+        self.cleanup_deferred_keys: tuple[str, ...] = ()
+
+    def __str__(self) -> str:
+        message = super().__str__()
+        if self.cleanup_deferred_keys:
+            return (
+                f"{message} Cleanup fuer {len(self.cleanup_deferred_keys)} hochgeladene S3-Objekte wurde "
+                "aus Sicherheitsgruenden ausgelassen, weil der aktuelle Index nicht verifiziert werden konnte."
+            )
+        return message
+
+
+class ProjectMetadataWriteUncertainError(ProjectMetadataConflictError):
+    """Raised when S3 may have committed a write but did not confirm it."""
+
+    def __init__(self, key: str, current_data: JsonObject | None = None) -> None:
+        RuntimeError.__init__(
+            self,
+            f"S3-Schreibergebnis bei {key} ist unklar; ein sicherer Cleanup ist nur nach Indexpruefung moeglich.",
+        )
+        self.key = key
+        self.current_data = current_data
+        self.cleanup_deferred_keys = ()
+
+
+class _VersionedJson(dict):
+    def __init__(self, *args, s3_etag: str | None, s3_exists: bool, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.s3_etag = s3_etag
+        self.s3_exists = s3_exists
+
+
 def _clone_default(default_data: JsonObject) -> JsonObject:
     return copy.deepcopy(default_data)
 
@@ -43,6 +82,13 @@ def _is_missing_object_error(s3_client: Any, error: Exception) -> bool:
         return error_code in {"NoSuchKey", "404", "NotFound"}
 
     return error.__class__.__name__ == "NoSuchKey"
+
+
+def _is_precondition_error(error: Exception) -> bool:
+    response = getattr(error, "response", None)
+    if isinstance(response, dict):
+        return str(response.get("Error", {}).get("Code", "")) in {"PreconditionFailed", "412", "ConditionalRequestConflict"}
+    return error.__class__.__name__ in {"PreconditionFailed", "ConditionalRequestConflict"}
 
 
 def _read_response_body(response: dict[str, Any], key: str) -> str:
@@ -104,6 +150,7 @@ class ProjectMetadataRepository:
             self.projects_index_key,
             prepare_projects_index_for_save(index_data, self.timestamp_factory()),
             cache_control=self.cache_control,
+            source_snapshot=index_data,
         )
 
     def load_deleted_projects(self) -> JsonObject:
@@ -114,6 +161,7 @@ class ProjectMetadataRepository:
             self.deleted_projects_key,
             prepare_deleted_projects_for_save(deleted_data, self.timestamp_factory()),
             cache_control=self.deleted_cache_control,
+            source_snapshot=deleted_data,
         )
 
     def load_json(self, key: str, default_data: JsonObject) -> JsonObject:
@@ -121,7 +169,7 @@ class ProjectMetadataRepository:
             response = self.s3_client.get_object(Bucket=self.bucket_name, Key=key)
         except Exception as error:
             if _is_missing_object_error(self.s3_client, error):
-                return _clone_default(default_data)
+                return _VersionedJson(_clone_default(default_data), s3_etag=None, s3_exists=False)
             raise
 
         try:
@@ -131,22 +179,59 @@ class ProjectMetadataRepository:
 
         if not isinstance(data, dict):
             raise RuntimeError(f"Invalid JSON in S3 object {key}: expected object at top level")
-        return data
+        etag = str(response.get("ETag", "") or "").strip()
+        if not etag:
+            raise RuntimeError(f"S3 object {key} liefert keinen ETag fuer sichere Aenderungen.")
+        return _VersionedJson(data, s3_etag=etag, s3_exists=True)
 
-    def save_json(self, key: str, data: JsonObject, cache_control: str | None = None) -> None:
+    def save_json(
+        self,
+        key: str,
+        data: JsonObject,
+        cache_control: str | None = None,
+        *,
+        source_snapshot: JsonObject | None = None,
+    ) -> None:
+        snapshot = source_snapshot if source_snapshot is not None else data
+        if not isinstance(snapshot, _VersionedJson):
+            raise RuntimeError(f"S3 object {key} darf nur aus einem geladenen Snapshot gespeichert werden.")
         body = json.dumps(data, indent=2, ensure_ascii=False)
-        self.s3_client.put_object(
-            Bucket=self.bucket_name,
-            Key=key,
-            Body=body,
-            ContentType="application/json",
-            CacheControl=cache_control or self.cache_control,
-        )
+        condition = {"IfMatch": snapshot.s3_etag} if snapshot.s3_exists else {"IfNoneMatch": "*"}
+        try:
+            response = self.s3_client.put_object(
+                Bucket=self.bucket_name,
+                Key=key,
+                Body=body,
+                ContentType="application/json",
+                CacheControl=cache_control or self.cache_control,
+                **condition,
+            )
+        except Exception as error:
+            current_data = None
+            try:
+                current_data = dict(self.load_json(key, {}))
+            except Exception:
+                pass
+            if _is_precondition_error(error):
+                raise ProjectMetadataConflictError(key, current_data) from error
+            raise ProjectMetadataWriteUncertainError(key, current_data) from error
+        etag = str((response or {}).get("ETag", "") or "").strip()
+        if not etag:
+            current_data = None
+            try:
+                current_data = dict(self.load_json(key, {}))
+            except Exception:
+                pass
+            raise ProjectMetadataWriteUncertainError(key, current_data)
+        snapshot.s3_etag = etag
+        snapshot.s3_exists = True
 
 
 __all__ = [
     "DELETED_PROJECTS_DEFAULT",
     "PROJECTS_INDEX_DEFAULT",
+    "ProjectMetadataConflictError",
+    "ProjectMetadataWriteUncertainError",
     "ProjectMetadataRepository",
     "prepare_deleted_projects_for_save",
     "prepare_projects_index_for_save",

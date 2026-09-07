@@ -216,7 +216,7 @@ def prompt_replace_all_pointclouds(QtWidgets, parent, project: ProjectPreview, d
         parent,
         "Punktwolken austauschen",
         f"Neue Punktwolke(n) fuer „{project.project}“ auswaehlen - "
-        "LAS/LAZ, COPC oder bereits konvertierte Potree-Ordner. "
+        "LAS/LAZ oder bereits konvertierte Potree-Ordner. "
         "Konvertierung und CRS-Erkennung laufen automatisch.",
         allow_multiple=True,
         converter_path=converter_path,
@@ -236,7 +236,7 @@ def prompt_add_project_pointclouds(QtWidgets, parent, project: ProjectPreview, d
         parent,
         "Punktwolken hinzufügen",
         f"Punktwolke(n) zu „{project.project}“ hinzufügen - "
-        "LAS/LAZ, COPC oder bereits konvertierte Potree-Ordner. "
+        "LAS/LAZ oder bereits konvertierte Potree-Ordner. "
         "Konvertierung und CRS-Erkennung laufen automatisch.",
         allow_multiple=True,
         converter_path=converter_path,
@@ -257,7 +257,7 @@ def prompt_replace_single_pointcloud(QtWidgets, parent, project: ProjectPreview,
         parent,
         "Punktwolke austauschen",
         f"Neue Punktwolke fuer „{pointcloud.name}“ auswaehlen - "
-        "LAS/LAZ, COPC oder ein bereits konvertierter Potree-Ordner. "
+        "LAS/LAZ oder ein bereits konvertierter Potree-Ordner. "
         "Konvertierung und CRS-Erkennung laufen automatisch.",
         allow_multiple=False,
         converter_path=converter_path,
@@ -455,7 +455,7 @@ def _build_replace_dialog(
     browse_row = QtWidgets.QHBoxLayout()
     files_button = QtWidgets.QPushButton("Dateien")
     files_button.setObjectName("ActionButton")
-    files_button.setToolTip("LAS/LAZ- oder COPC-Dateien auswählen")
+    files_button.setToolTip("LAS/LAZ-Dateien auswählen")
     folder_button = QtWidgets.QPushButton("Potree-Ordner")
     folder_button.setObjectName("ActionButton")
     folder_button.setToolTip("Bereits in das Potree-Format konvertierten Ordner auswählen")
@@ -476,14 +476,14 @@ def _build_replace_dialog(
                 dialog,
                 "Punktwolken auswählen",
                 "",
-                "Punktwolken (*.las *.laz *.copc.laz);;Alle Dateien (*)",
+                "Punktwolken (*.las *.laz);;Alle Dateien (*)",
             )
         else:
             path, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
                 dialog,
                 "Punktwolke auswählen",
                 "",
-                "Punktwolken (*.las *.laz *.copc.laz);;Alle Dateien (*)",
+                "Punktwolken (*.las *.laz);;Alle Dateien (*)",
             )
             paths = [path] if path else []
         append_paths(paths)

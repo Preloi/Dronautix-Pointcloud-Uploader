@@ -1,5 +1,8 @@
 import json
 import os
+import struct
+import threading
+import time
 
 import pytest
 
@@ -8,7 +11,20 @@ from dronautix_uploader.core.converter_service import (
     build_potree_command,
     parse_potree_percent,
     validate_brotli_output,
+    validate_potree_output,
 )
+
+
+def write_valid_potree(directory):
+    (directory / "metadata.json").write_text(json.dumps({
+        "version": "2.0", "encoding": "BROTLI", "points": 1,
+        "offset": [0, 0, 0], "scale": [0.001, 0.001, 0.001],
+        "hierarchy": {"firstChunkSize": 22, "stepSize": 4, "depth": 0},
+        "attributes": [{"name": "position", "type": "int32", "numElements": 3, "elementSize": 4, "size": 12}],
+        "boundingBox": {"min": [0, 0, 0], "max": [1, 1, 1]},
+    }), encoding="utf-8")
+    (directory / "octree.bin").write_bytes(b"o")
+    (directory / "hierarchy.bin").write_bytes(struct.pack("<BBIQQ", 1, 0, 1, 0, 1))
 
 
 def test_converter_process_is_started_without_a_window_on_windows(monkeypatch):
@@ -55,12 +71,21 @@ def test_parse_potree_percent_clamps_and_ignores_non_progress():
 
 
 def test_validate_brotli_output_requires_converter_metadata(tmp_path):
-    (tmp_path / "metadata.json").write_text(json.dumps({"encoding": "BROTLI"}), encoding="utf-8")
+    write_valid_potree(tmp_path)
     validate_brotli_output(str(tmp_path))
 
-    (tmp_path / "metadata.json").write_text(json.dumps({"encoding": "DEFAULT"}), encoding="utf-8")
+    metadata = json.loads((tmp_path / "metadata.json").read_text(encoding="utf-8"))
+    metadata["encoding"] = "DEFAULT"
+    (tmp_path / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
     with pytest.raises(RuntimeError, match="BROTLI-Encoding"):
         validate_brotli_output(str(tmp_path))
+
+
+def test_validate_potree_output_rejects_potree1_cloud_js(tmp_path):
+    (tmp_path / "cloud.js").write_text('cloud.js = {"version":"1.7"};', encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match=r"Potree 1.*PotreeConverter 2\.x.*metadata\.json"):
+        validate_potree_output(str(tmp_path))
 
 
 def test_converter_failure_includes_last_output_lines(monkeypatch, capsys):
@@ -97,7 +122,7 @@ def test_converter_uses_ascii_short_path_for_unicode_source(monkeypatch, tmp_pat
 
     output_dir = tmp_path / "output"
     output_dir.mkdir()
-    (output_dir / "metadata.json").write_text('{"encoding":"BROTLI"}', encoding="utf-8")
+    write_valid_potree(output_dir)
     monkeypatch.setattr(converter_service, "_windows_short_path", lambda path: "C:\\DATA\\BAUME~1.LAS")
     monkeypatch.setattr(converter_service.subprocess, "Popen", fake_popen)
 
@@ -182,3 +207,48 @@ def test_converter_success_without_valid_output_is_explained(monkeypatch, tmp_pa
 
     with pytest.raises(RuntimeError, match="(?s)scan.las.*kein verwendbares BROTLI-Ergebnis.*Ausgabeordner"):
         converter_service.run_potree_conversion("scan.las", "PotreeConverter.exe", str(tmp_path / "output"))
+
+
+def test_silent_converter_is_terminated_promptly_when_cancelled(monkeypatch, tmp_path):
+    stopped = threading.Event()
+
+    class SilentOutput:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            stopped.wait(5)
+            raise StopIteration
+
+    class SilentProcess:
+        stdout = SilentOutput()
+        returncode = None
+        terminated = False
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = -15
+            stopped.set()
+
+        def wait(self, timeout=None):
+            if self.returncode is None:
+                stopped.wait(timeout)
+            return self.returncode
+
+    process = SilentProcess()
+    monkeypatch.setattr(converter_service.subprocess, "Popen", lambda *args, **kwargs: process)
+    started = time.monotonic()
+
+    with pytest.raises(converter_service.OperationCancelledError):
+        converter_service.run_potree_conversion(
+            "scan.las",
+            "PotreeConverter.exe",
+            str(tmp_path / "output"),
+            cancel_requested=lambda: time.monotonic() - started >= 0.15,
+        )
+
+    assert process.terminated is True
+    assert time.monotonic() - started < 1.0

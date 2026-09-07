@@ -40,14 +40,14 @@ def test_replace_dialog_state_from_inputs_uses_injected_converter_and_temp_outpu
     # and a temporary output folder are injected by the caller, and CRS is
     # auto-detected later (no CRS/converter/output fields in the dialog).
     state = dialogs._replace_dialog_state_from_inputs(
-        _PlainTextWidget(" a.copc.laz \n\n b.copc.laz "),
+        _PlainTextWidget(" a.laz \n\n b.laz "),
         "C:/bundled/PotreeConverter.exe",
         "C:/temp/out",
     )
 
     payload = models.validate_replace_all_dialog_state(state)
 
-    assert state.source_paths == ("a.copc.laz", "b.copc.laz")
+    assert state.source_paths == ("a.laz", "b.laz")
     assert state.converter_path == "C:/bundled/PotreeConverter.exe"
     assert state.output_base_dir == "C:/temp/out"
     assert state.overwrite is True

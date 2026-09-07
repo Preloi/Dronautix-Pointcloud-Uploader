@@ -6,11 +6,12 @@ import io
 import json
 import os
 import shutil
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .constants import BUCKET_NAME, COPC_OBJECT_NAME, S3_DELETED_JSON, S3_DISABLED_PROJECTS_KEY, S3_INDEX_JSON
+from .constants import BUCKET_NAME, S3_DELETED_JSON, S3_DISABLED_PROJECTS_KEY, S3_INDEX_JSON
 from .golden_capture import load_golden_manifest
 from .project_management_service import ProjectManagementService
 from .project_repository import ProjectMetadataRepository
@@ -19,7 +20,6 @@ from .upload_workflow_service import NewProjectUploadWorkflowRequest, UploadWork
 
 SUPPORTED_V2_UPLOAD_SCENARIOS = (
     "single_potree_upload",
-    "single_copc_upload",
     "multi_mix_upload",
     "vertical_crs_upload",
     "existing_potree_folder_upload",
@@ -246,19 +246,32 @@ class _GoldenFakeS3Client:
         self.copies: list[_CopiedObject] = []
         self.events: list[dict[str, Any]] = []
         self._sequence = 0
+        self._etag_sequence = 0
+        self._etags: dict[str, str] = {}
 
     def get_object(self, Bucket, Key):
         self._record_event("get_object", key=str(Key), found=Key in self.objects)
         if Key not in self.objects:
             raise _NoSuchKey(Key)
-        return {"Body": io.BytesIO(self.objects[Key])}
+        return {"Body": io.BytesIO(self.objects[Key]), "ETag": self._etags.setdefault(Key, '"seed"')}
 
-    def put_object(self, Bucket, Key, Body, ContentType=None, CacheControl=None):
+    def put_object(self, Bucket, Key, Body, ContentType=None, CacheControl=None, **conditions):
+        current_etag = self._etags.get(Key, '"seed"' if Key in self.objects else None)
+        if conditions.get("IfMatch") is not None and conditions["IfMatch"] != current_etag:
+            error = RuntimeError("PreconditionFailed")
+            error.response = {"Error": {"Code": "PreconditionFailed"}}
+            raise error
+        if conditions.get("IfNoneMatch") == "*" and Key in self.objects:
+            error = RuntimeError("PreconditionFailed")
+            error.response = {"Error": {"Code": "PreconditionFailed"}}
+            raise error
         if isinstance(Body, bytes):
             body = Body
         else:
             body = str(Body).encode("utf-8")
         self.objects[Key] = body
+        self._etag_sequence += 1
+        self._etags[Key] = f'"fake-{self._etag_sequence}"'
         self._record_event(
             "put_object",
             key=str(Key),
@@ -266,7 +279,7 @@ class _GoldenFakeS3Client:
             cache_control=CacheControl,
             body_size=len(body),
         )
-        return {"ETag": '"fake"'}
+        return {"ETag": self._etags[Key]}
 
     def upload_file(self, local_path, bucket, key, ExtraArgs=None, Callback=None):
         data = Path(local_path).read_bytes()
@@ -461,18 +474,6 @@ def _build_upload_scenario_spec(scenario_id: str, work_dir: Path) -> dict[str, A
     converter_path = _write_file(work_dir / "PotreeConverter.exe", b"converter")
     output_base_dir = work_dir / "converted"
 
-    if scenario_id == "single_copc_upload":
-        source = _write_file(work_dir / "source.copc.laz", b"copc")
-        return {
-            "project_id": "abc123ef",
-            "kunde": "Golden Kunde",
-            "projekt": "Single COPC",
-            "source_paths": (str(source),),
-            "crs_info_by_source_path": {
-                str(source): {"value": "EPSG:25832", "projection": "EPSG:25832"},
-            },
-        }
-
     if scenario_id == "single_potree_upload":
         source = _write_file(work_dir / "Single Potree.laz", b"raw")
         return {
@@ -488,15 +489,15 @@ def _build_upload_scenario_spec(scenario_id: str, work_dir: Path) -> dict[str, A
         }
 
     if scenario_id == "multi_mix_upload":
-        copc = _write_file(work_dir / "Fassade.copc.laz", b"copc")
+        facade = _write_potree_fixture(work_dir / "Fassade Potree")
         potree = _write_potree_fixture(work_dir / "Bestand Potree")
         return {
             "project_id": "abc123e2",
             "kunde": "Golden Kunde",
             "projekt": "Multi Mix",
-            "source_paths": (str(copc), str(potree)),
+            "source_paths": (str(facade), str(potree)),
             "crs_info_by_source_path": {
-                str(copc): {"value": "EPSG:25832", "projection": "EPSG:25832"},
+                str(facade): {"value": "EPSG:25832", "projection": "EPSG:25832"},
                 str(potree): {"value": "EPSG:25832", "projection": "EPSG:25832"},
             },
         }
@@ -575,18 +576,18 @@ def _run_project_management_scenario(
 
     if scenario_id == "multi_replace":
         _seed_multi_replace(fake_s3)
-        copc = _write_file(work_dir / "Scan.copc.laz", b"copc")
+        potree = _write_potree_fixture(work_dir / "Scan Potree")
         raw = _write_file(work_dir / "Raw.laz", b"raw")
         converter = _write_file(work_dir / "PotreeConverter.exe", b"converter")
         service.replace_project_pointclouds_from_sources(
             "replace-multi",
-            (str(copc), str(raw)),
+            (str(potree), str(raw)),
             converter_path=str(converter),
             output_base_dir=str(work_dir / "converted"),
             overwrite=True,
             converter_runner=_fake_converter_runner,
             crs_info_by_source_path={
-                str(copc): {"value": "EPSG:25832", "projection": "EPSG:25832", "epsg": "EPSG:25832"},
+                str(potree): {"value": "EPSG:25832", "projection": "EPSG:25832", "epsg": "EPSG:25832"},
                 str(raw): {"value": "EPSG:4326", "projection": "EPSG:4326", "epsg": "EPSG:4326"},
             },
         )
@@ -596,7 +597,7 @@ def _run_project_management_scenario(
         target_path = _seed_disabled_link_state(fake_s3)
         service.set_project_link_state("disable-target", True)
         service.rename_project("disabled-target", "Disabled Kunde Neu", "Disabled Projekt Neu")
-        replacement = _write_file(work_dir / "Disabled Replacement.copc.laz", b"copc")
+        replacement = _write_potree_fixture(work_dir / "Disabled Replacement")
         service.replace_single_project_pointcloud_from_source(
             "disabled-target",
             target_path,
@@ -649,9 +650,9 @@ def _seed_duplicate_project(fake_s3: _GoldenFakeS3Client) -> None:
                         },
                         {
                             "name": "Cloud B",
-                            "format": "copc",
-                            "viewer_path": f"{viewer_root}/cloud_b/{COPC_OBJECT_NAME}",
-                            "s3_path": f"{source_prefix}/cloud_b/{COPC_OBJECT_NAME}",
+                            "format": "potree",
+                            "viewer_path": f"{viewer_root}/cloud_b",
+                            "s3_path": f"{source_prefix}/cloud_b",
                             "visible": False,
                         },
                     ],
@@ -662,7 +663,8 @@ def _seed_duplicate_project(fake_s3: _GoldenFakeS3Client) -> None:
     )
     _seed_s3_object(fake_s3, f"{source_prefix}/cloud_a/cloud.js", 'cloud.js = {"source":"old-a"};')
     _seed_s3_object(fake_s3, f"{source_prefix}/cloud_a/metadata.json", '{"source":"old-a"}')
-    _seed_s3_object(fake_s3, f"{source_prefix}/cloud_b/{COPC_OBJECT_NAME}", b"old-copc")
+    _seed_s3_object(fake_s3, f"{source_prefix}/cloud_b/cloud.js", 'cloud.js = {"source":"old-b"};')
+    _seed_s3_object(fake_s3, f"{source_prefix}/cloud_b/metadata.json", '{"source":"old-b"}')
 
 
 def _seed_delete_project(fake_s3: _GoldenFakeS3Client) -> None:
@@ -713,7 +715,6 @@ def _seed_delete_project(fake_s3: _GoldenFakeS3Client) -> None:
     )
     _seed_s3_object(fake_s3, f"{target_prefix}/cloud.js", 'cloud.js = {"source":"delete"};')
     _seed_s3_object(fake_s3, f"{target_prefix}/metadata.json", '{"source":"delete"}')
-    _seed_s3_object(fake_s3, f"{target_prefix}/{COPC_OBJECT_NAME}", b"delete-copc")
 
 
 def _seed_rename_project(fake_s3: _GoldenFakeS3Client) -> None:
@@ -745,9 +746,9 @@ def _seed_rename_project(fake_s3: _GoldenFakeS3Client) -> None:
                         },
                         {
                             "name": "Cloud Alt B",
-                            "format": "copc",
-                            "viewer_path": f"{viewer_root}/cloud_b/{COPC_OBJECT_NAME}",
-                            "s3_path": f"{project_prefix}/cloud_b/{COPC_OBJECT_NAME}",
+                            "format": "potree",
+                            "viewer_path": f"{viewer_root}/cloud_b",
+                            "s3_path": f"{project_prefix}/cloud_b",
                             "visible": False,
                         },
                     ],
@@ -831,8 +832,9 @@ def _seed_multi_replace(fake_s3: _GoldenFakeS3Client) -> None:
                         {"name": "Old A", "format": "potree", "s3_path": f"{project_prefix}/old_a"},
                         {
                             "name": "Old B",
-                            "format": "copc",
-                            "s3_path": f"{project_prefix}/old_b/{COPC_OBJECT_NAME}",
+                            "format": "potree",
+                            "viewer_path": f"{viewer_root}/old_b",
+                            "s3_path": f"{project_prefix}/old_b",
                         },
                     ],
                 }
@@ -842,14 +844,15 @@ def _seed_multi_replace(fake_s3: _GoldenFakeS3Client) -> None:
     )
     _seed_s3_object(fake_s3, f"{project_prefix}/old_a/cloud.js", 'cloud.js = {"source":"old-a"};')
     _seed_s3_object(fake_s3, f"{project_prefix}/old_a/metadata.json", '{"source":"old-a"}')
-    _seed_s3_object(fake_s3, f"{project_prefix}/old_b/{COPC_OBJECT_NAME}", b"old-copc")
+    _seed_s3_object(fake_s3, f"{project_prefix}/old_b/cloud.js", 'cloud.js = {"source":"old-b"};')
+    _seed_s3_object(fake_s3, f"{project_prefix}/old_b/metadata.json", '{"source":"old-b"}')
     _seed_s3_object(fake_s3, f"{project_prefix}/old_orphan.bin", b"old-orphan")
 
 
 def _seed_disabled_link_state(fake_s3: _GoldenFakeS3Client) -> str:
     disabled_prefix = "pointclouds/golden/disabled_target"
     disabled_viewer = "golden/disabled_target"
-    target_path = f"{disabled_prefix}/{COPC_OBJECT_NAME}"
+    target_path = disabled_prefix
     _seed_json(
         fake_s3,
         S3_INDEX_JSON,
@@ -859,10 +862,10 @@ def _seed_disabled_link_state(fake_s3: _GoldenFakeS3Client) -> str:
                     "id": "disable-target",
                     "kunde": "Disable Kunde",
                     "projekt": "Disable Projekt",
-                    "format": "copc",
+                    "format": "potree",
                     "link": "https://pointcloud.dronautix.at/index.html?id=disable-target",
-                    "viewer_path": f"golden/disable_target/{COPC_OBJECT_NAME}",
-                    "s3_path": f"pointclouds/golden/disable_target/{COPC_OBJECT_NAME}",
+                    "viewer_path": "golden/disable_target",
+                    "s3_path": "pointclouds/golden/disable_target",
                 }
             ],
             S3_DISABLED_PROJECTS_KEY: [
@@ -870,9 +873,9 @@ def _seed_disabled_link_state(fake_s3: _GoldenFakeS3Client) -> str:
                     "id": "disabled-target",
                     "kunde": "Disabled Kunde",
                     "projekt": "Disabled Projekt",
-                    "format": "copc",
+                    "format": "potree",
                     "link": "https://pointcloud.dronautix.at/index.html?id=disabled-target",
-                    "viewer_path": f"{disabled_viewer}/{COPC_OBJECT_NAME}",
+                    "viewer_path": disabled_viewer,
                     "s3_path": target_path,
                     "disabled_at": "2026-06-20T12:00:00",
                     "crs": "EPSG:25832",
@@ -884,7 +887,8 @@ def _seed_disabled_link_state(fake_s3: _GoldenFakeS3Client) -> str:
         },
     )
     _seed_json(fake_s3, S3_DELETED_JSON, {"deleted_projects": [], "last_updated": None})
-    _seed_s3_object(fake_s3, target_path, b"old-disabled-copc")
+    _seed_s3_object(fake_s3, f"{target_path}/cloud.js", 'cloud.js = {"source":"old-disabled"};')
+    _seed_s3_object(fake_s3, f"{target_path}/metadata.json", '{"source":"old-disabled"}')
     return target_path
 
 
@@ -913,17 +917,30 @@ def _write_potree_files(path: Path, *, source_name: str) -> None:
         'cloud.js = {"spacing": 0.125, "source": ' + json.dumps(source_name, ensure_ascii=False) + "};",
         encoding="utf-8",
     )
+    octree = source_name.encode("utf-8") or b"fixture-point"
     (path / "metadata.json").write_text(
         json.dumps(
             {
+                "version": "2.0",
+                "encoding": "BROTLI",
                 "spacing": 0.125,
                 "source": source_name,
                 "points": 12345,
+                "offset": [0, 0, 0],
+                "scale": [0.001, 0.001, 0.001],
+                "hierarchy": {"firstChunkSize": 22, "stepSize": 4, "depth": 0},
+                "attributes": [{
+                    "name": "position", "type": "int32", "numElements": 3,
+                    "elementSize": 4, "size": 12,
+                }],
+                "boundingBox": {"min": [0, 0, 0], "max": [1, 1, 1]},
             },
             ensure_ascii=False,
         ),
         encoding="utf-8",
     )
+    (path / "hierarchy.bin").write_bytes(struct.pack("<BBIQQ", 1, 0, 12345, 0, len(octree)))
+    (path / "octree.bin").write_bytes(octree)
 
 
 def _write_file(path: Path, data: bytes) -> Path:

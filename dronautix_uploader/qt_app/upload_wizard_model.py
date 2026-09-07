@@ -90,7 +90,7 @@ def build_wizard_steps(current_step: str = STEP_REVIEW) -> tuple[UploadWizardSte
 
     definitions = (
         (STEP_PROJECT, "Projekt", "Projektname, Kunde und Viewer-Pfad festlegen."),
-        (STEP_SOURCES, "Quellen", "LAS, LAZ, COPC oder Potree-Ordner sammeln."),
+        (STEP_SOURCES, "Quellen", "LAS, LAZ oder Potree-Ordner sammeln."),
         (STEP_CRS_FORMAT, "CRS / Format", "Koordinatensysteme und Zielformat prüfen."),
         (STEP_REVIEW, "Review", "Metadaten, Pfade und Upload-Plan kontrollieren."),
         (STEP_UPLOAD_LOG, "Upload / Log", "Fortschritt und Protokoll im Blick behalten."),
@@ -129,6 +129,10 @@ def validate_wizard_step(state: UploadWizardState, step: str | None = None) -> t
             errors.append("Projektname darf nicht leer sein.")
     if selected_step in {STEP_SOURCES, STEP_CRS_FORMAT, STEP_REVIEW, STEP_UPLOAD_LOG} and not source_paths:
         errors.append("Mindestens eine Punktwolkenquelle auswählen.")
+    if selected_step in {STEP_SOURCES, STEP_CRS_FORMAT, STEP_REVIEW, STEP_UPLOAD_LOG} and any(
+        path.lower().endswith(".copc.laz") for path in source_paths
+    ):
+        errors.append("COPC-Dateien werden nicht unterstützt. Bitte LAS/LAZ oder einen Potree-Ordner auswählen.")
     if selected_step in {STEP_CRS_FORMAT, STEP_REVIEW, STEP_UPLOAD_LOG} and any(
         source_needs_conversion(path) for path in source_paths
     ):
@@ -245,7 +249,7 @@ def upload_source_preview_from_path(source_path: str) -> UploadSourcePreview:
 def source_format_label(source_path: str) -> str:
     lower_path = source_path.lower()
     if lower_path.endswith(".copc.laz"):
-        return "COPC"
+        return "Nicht unterstützt"
     if lower_path.endswith(".laz"):
         return "LAZ"
     if lower_path.endswith(".las"):
@@ -254,27 +258,25 @@ def source_format_label(source_path: str) -> str:
 
 
 def source_handling_label(source_path: str) -> str:
+    if source_path.lower().endswith(".copc.laz"):
+        return "Nicht unterstützt"
     if source_needs_conversion(source_path):
         return "Potree-Konvertierung"
-    if source_path.lower().endswith(".copc.laz"):
-        return "Direktupload"
     return "Vorhandener Potree-Ordner"
 
 
 def source_needs_conversion(source_path: str) -> bool:
     lower_path = source_path.lower()
-    return (lower_path.endswith(".las") or lower_path.endswith(".laz")) and not lower_path.endswith(".copc.laz")
+    return lower_path.endswith(".las") or lower_path.endswith(".laz")
 
 
 def format_output_mode(sources: tuple[UploadSourcePreview, ...]) -> str:
     formats = {source.format for source in sources}
     if not formats:
         return "Keine Quellen"
-    if formats == {"COPC"}:
-        return "COPC-Direktupload"
     if formats <= {"LAS", "LAZ", "Potree"}:
         return "Potree"
-    return "Gemischt: Potree + COPC"
+    return "Nicht unterstützt"
 
 
 def example_upload_wizard_preview() -> UploadWizardPreview:
@@ -289,11 +291,11 @@ def example_upload_wizard_preview() -> UploadWizardPreview:
             handling="Potree-Konvertierung",
         ),
         UploadSourcePreview(
-            name="Fassade_Nord.copc.laz",
-            path="D:/Projekte/Nord/Fassade_Nord.copc.laz",
+            name="Fassade_Nord.laz",
+            path="D:/Projekte/Nord/Fassade_Nord.laz",
             size="7.4 Mio. Punkte",
-            format="COPC",
-            handling="Direktupload",
+            format="LAZ",
+            handling="Potree-Konvertierung",
         ),
         UploadSourcePreview(
             name="Dachaufmass.las",
@@ -313,13 +315,13 @@ def example_upload_wizard_preview() -> UploadWizardPreview:
         crs_format=CrsFormatReview(
             horizontal_crs="EPSG:25832 - ETRS89 / UTM Zone 32N",
             vertical_crs="DHHN2016 / NHN",
-            output_format="Gemischt: Potree + COPC",
+            output_format="Potree",
             upload_mode="S3-Projektupload mit Metadatenupdate",
             metadata_target="projects_index.json, metadata.json, cloud.js",
         ),
         log_entries=(
             UploadLogEntry("Info", "Projekt- und Kundendaten vollständig."),
-            UploadLogEntry("Info", "3 Quellen erkannt, davon 1 COPC-Direktupload."),
+            UploadLogEntry("Info", "3 LAS/LAZ-Quellen für die Potree-Konvertierung erkannt."),
             UploadLogEntry("Info", "Review bereit; Upload startet nach expliziter Bestätigung im Dialog."),
         ),
     )

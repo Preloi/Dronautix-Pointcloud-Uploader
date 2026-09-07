@@ -81,7 +81,7 @@ def test_upload_new_project_accepts_dialog_state_and_routes_validated_request(
     state = dialog_models.UploadDialogState(
         customer="  Kunde  ",
         project="  Projekt  ",
-        source_paths=(" scan.copc.laz ",),
+        source_paths=(" potree-scan ",),
         horizontal_crs="EPSG:25832",
     )
 
@@ -91,11 +91,11 @@ def test_upload_new_project_accepts_dialog_state_and_routes_validated_request(
     assert service.calls == [
         (
             NewProjectUploadWorkflowRequest(
-                source_paths=("scan.copc.laz",),
+                source_paths=("potree-scan",),
                 kunde="Kunde",
                 projekt="Projekt",
                 crs_info_by_source_path={
-                    "scan.copc.laz": {
+                    "potree-scan": {
                         "value": "EPSG:25832",
                         "projection": "EPSG:25832",
                     }

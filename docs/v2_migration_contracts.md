@@ -11,8 +11,7 @@ moving behavior out of `dronautix_uploader/main.py`. The first fixture set must
 cover:
 
 - Single LAS/LAZ upload with Potree output.
-- Single COPC direct upload.
-- Multi-cloud upload with mixed Potree/COPC sources.
+- Multi-cloud upload with multiple Potree sources.
 - Horizontal CRS plus vertical CRS/datum.
 - Existing Potree output folder.
 - Project management operations: duplicate, delete, rename, single replace,
@@ -83,7 +82,7 @@ first:
 python tools/init_golden_capture.py multi_replace --legacy-app-version 1.7.10 --legacy-git-ref dronautix/develop@<commit>
 ```
 
-To prepare the complete 11-scenario capture matrix in one pass, use:
+To prepare the complete 10-scenario capture matrix in one pass, use:
 
 ```text
 python tools/init_golden_capture.py --all --legacy-app-version 1.7.10 --legacy-git-ref dronautix/develop@<commit>
@@ -144,7 +143,7 @@ Generate deterministic raw V2 staging output with the V2 core services,
 ProjectManagementService, and Fake-S3:
 
 ```text
-python tools/generate_v2_golden_output.py --scenario single_copc_upload
+python tools/generate_v2_golden_output.py --scenario single_potree_upload
 ```
 
 Running without `--scenario` generates every supported V2 scenario under
@@ -222,12 +221,6 @@ ExtraArgs={
 
 Replacement uploads use a fresh `versions/<data_version>` prefix so immutable
 objects are never overwritten. `projects_index.json` remains uncached.
-
-COPC direct uploads always target:
-
-```text
-{s3_prefix}/source.copc.laz
-```
 
 Potree uploads recursively preserve relative paths under the output directory
 and sort `metadata.json` last. Upload workflows must keep a ledger of S3 keys
@@ -311,9 +304,11 @@ user can still inspect the URL, while open is blocked for disabled projects.
 
 Upload and replace inputs share one preparation pipeline:
 
-- `*.copc.laz` is uploaded directly as COPC.
-- Existing Potree folders are accepted when `metadata.json` or `cloud.js` is
-  present.
+- `*.copc.laz` is rejected; supported inputs are LAS/LAZ files and existing
+  Potree folders.
+- Existing Potree folders require complete Potree 2 output: `metadata.json`,
+  `hierarchy.bin`, and `octree.bin`. Potree 1 folders with only `cloud.js` are
+  rejected before upload.
 - Raw `.las`/`.laz` sources are converted through the frozen PotreeConverter
   boundary before upload.
 - Source names and slugs are derived once during preparation and then reused by

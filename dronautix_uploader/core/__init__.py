@@ -85,7 +85,9 @@ from .project_index_service import (
 from .project_repository import (
     DELETED_PROJECTS_DEFAULT,
     PROJECTS_INDEX_DEFAULT,
+    ProjectMetadataConflictError,
     ProjectMetadataRepository,
+    ProjectMetadataWriteUncertainError,
     prepare_deleted_projects_for_save,
     prepare_projects_index_for_save,
 )
@@ -212,6 +214,8 @@ __all__ = [
     "ProjectLinkStateUpdate",
     "ProjectManagementService",
     "ProjectMetadataRepository",
+    "ProjectMetadataConflictError",
+    "ProjectMetadataWriteUncertainError",
     "ProjectMetadataUpdate",
     "ProjectOperationResult",
     "PREVIEW_KEYRING_SERVICE",

@@ -2,7 +2,7 @@
 
 Usage:
     python tools/normalize_golden_captures.py
-    python tools/normalize_golden_captures.py --scenario single_copc_upload
+    python tools/normalize_golden_captures.py --scenario single_potree_upload
 """
 
 from __future__ import annotations

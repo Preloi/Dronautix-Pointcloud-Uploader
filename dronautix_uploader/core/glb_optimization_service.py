@@ -460,7 +460,8 @@ class GLBOptimizationService:
                     temporary_root = tempfile.TemporaryDirectory(prefix="glb-decoder-")
                     output_dir = Path(temporary_root.name)
                 else:
-                    output_dir = decode_root / ".decoded"
+                    path_token = hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()[:16]
+                    output_dir = decode_root / ".decoded" / path_token
                     output_dir.mkdir(parents=True, exist_ok=True)
                 decoded_path = Path(
                     self.compressed_decoder.decode(path, compressed_extensions, output_dir, cancel_requested)

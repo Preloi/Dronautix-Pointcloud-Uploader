@@ -1,13 +1,13 @@
 cloud.js = {
   "spacing": 0.125,
-  "source": "Raw",
-  "projection": "EPSG:4326",
-  "crs": "EPSG:4326",
-  "epsg": "EPSG:4326",
+  "source": "Scan Potree",
+  "projection": "EPSG:25832",
+  "crs": "EPSG:25832",
+  "epsg": "EPSG:25832",
   "crs_info": {
-    "value": "EPSG:4326",
-    "projection": "EPSG:4326",
-    "epsg": "EPSG:4326",
-    "code": "4326"
+    "value": "EPSG:25832",
+    "projection": "EPSG:25832",
+    "epsg": "EPSG:25832",
+    "code": "25832"
   }
 };

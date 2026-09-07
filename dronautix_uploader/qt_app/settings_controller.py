@@ -115,15 +115,15 @@ class SettingsController:
                 "update_channel": state.update_channel.strip() or UPDATE_CHANNEL_STABLE,
             }
         )
-        config.pop("aws_secret_access_key", None)
-        config.pop("aws_secret", None)
+        for key in ("aws_secret_access_key", "aws_secret", "aws_secret_key", "secret_key"):
+            config.pop(key, None)
         config.pop("converter_path", None)
         config.pop("potree_converter_path", None)
-        self.config_saver(self.config_path, config)
         if state.aws_access_key_id.strip():
             self.credential_writer(self.keyring_service, "aws_access", state.aws_access_key_id.strip())
         if state.aws_secret_access_key.strip():
             self.credential_writer(self.keyring_service, "aws_secret", state.aws_secret_access_key.strip())
+        self.config_saver(self.config_path, config)
         return ProjectOperationSummary(status=SUCCESS_STATUS, message="Einstellungen gespeichert.")
 
     def test_connection(self, state: SettingsFormState | None = None) -> ProjectOperationSummary:

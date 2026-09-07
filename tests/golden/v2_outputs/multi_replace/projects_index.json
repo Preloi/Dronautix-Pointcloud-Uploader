@@ -19,10 +19,10 @@
       "pointcloud_count": 2,
       "pointclouds": [
         {
-          "name": "Scan",
-          "format": "copc",
-          "viewer_path": "golden/replace_multi/versions/golden-data/scan/source.copc.laz",
-          "s3_path": "pointclouds/golden/replace_multi/versions/golden-data/scan/source.copc.laz",
+          "name": "Scan Potree",
+          "format": "potree",
+          "viewer_path": "golden/replace_multi/versions/golden-data/scan_potree",
+          "s3_path": "pointclouds/golden/replace_multi/versions/golden-data/scan_potree",
           "visible": true,
           "crs": "EPSG:25832",
           "projection": "EPSG:25832",

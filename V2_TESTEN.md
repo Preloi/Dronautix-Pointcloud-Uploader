@@ -30,20 +30,19 @@ ersetzen. Fuer funktionale Tests zuerst den Quellcode-Start verwenden.
 - Update-System: Auto-Check beim Start (Kanal "Stable"), Download mit
   SHA-256-Pruefung und Installer-Start ueber "Update pruefen" bzw. Dialog
 - Ohne S3-Verbindung: keine Beispieldaten mehr; App oeffnet die Einstellungen
-- S3-Akzeptanzsmoke: 11/11 Szenarien bestanden
+- S3-Akzeptanzsmoke: 10/10 Szenarien bestanden
 - Testsuite: 493 passed, 11 skipped (Golden-Capture-Platzhalter)
 
 ## Noch nicht fuer Release erledigt
 
-- Legacy Golden Masters: 0/11
-- V2-vs-Golden-Vergleich: 0/11
+- Legacy Golden Masters: 0/10
+- V2-vs-Golden-Vergleich: 0/10
 - GitHub Asset SHA: wartet auf Release-Asset v2.0
 - Altversions-Update-Test: wartet auf veroeffentlichtes Release-Asset
 
 ## Wichtige Testfaelle
 
 - Upload LAS/LAZ mit Konvertierung
-- Upload COPC
 - Multi-Cloud-Projekt
 - Projektverwaltung: duplizieren, loeschen, umbenennen, Link deaktivieren
 - Punktwolkendaten austauschen: einzelne Cloud und komplette Multi-Cloud-Liste

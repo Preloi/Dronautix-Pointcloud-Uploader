@@ -39,22 +39,27 @@ def test_apply_crs_metadata_writes_horizontal_and_vertical_fields():
 def test_create_pointcloud_index_entry_matches_viewer_shape():
     entry = create_pointcloud_index_entry(
         "Scan 1",
-        "copc",
-        "kunde/id/projekt/scan/source.copc.laz",
-        "pointclouds/kunde/id/projekt/scan/source.copc.laz",
+        "potree",
+        "kunde/id/projekt/scan",
+        "pointclouds/kunde/id/projekt/scan",
         {"value": "EPSG:25832"},
     )
 
     assert entry == {
         "name": "Scan 1",
-        "format": "copc",
-        "viewer_path": "kunde/id/projekt/scan/source.copc.laz",
-        "s3_path": "pointclouds/kunde/id/projekt/scan/source.copc.laz",
+        "format": "potree",
+        "viewer_path": "kunde/id/projekt/scan",
+        "s3_path": "pointclouds/kunde/id/projekt/scan",
         "visible": True,
         "crs": "EPSG:25832",
         "projection": "EPSG:25832",
         "crs_info": {"value": "EPSG:25832"},
     }
+
+
+def test_create_pointcloud_index_entry_rejects_unsupported_format():
+    with pytest.raises(ValueError, match="Nicht unterstuetztes Punktwolkenformat"):
+        create_pointcloud_index_entry("Scan 1", "copc", "viewer", "s3")
 
 
 def test_get_common_crs_info_requires_all_clouds_to_match():

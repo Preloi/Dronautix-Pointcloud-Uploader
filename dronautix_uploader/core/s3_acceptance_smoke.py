@@ -10,11 +10,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import struct
 import tempfile
 from typing import Any
 from uuid import uuid4
 
-from .constants import COPC_OBJECT_NAME
 from .cutover_acceptance import DEFAULT_S3_ACCEPTANCE_SCENARIOS, REAL_S3_ACCEPTANCE
 from .metadata_service import write_potree_metadata_crs
 from .naming_service import sanitize_folder_name
@@ -285,29 +285,16 @@ def _run_upload_scenarios(
         _record_success("single_potree_upload", result, scenarios_passed, uploaded_keys)
         context["single_potree_upload"] = result
 
-    if "single_copc_upload" in requested_scenarios:
-        source = _write_file(workspace / "Single COPC.copc.laz", b"copc")
-        result = upload_service.upload_new_project(
-            NewProjectUploadWorkflowRequest(
-                source_paths=(str(source),),
-                kunde=customer,
-                projekt="Single COPC",
-                crs_info_by_source_path={str(source): {"value": "EPSG:25832", "projection": "EPSG:25832"}},
-            )
-        )
-        _record_success("single_copc_upload", result, scenarios_passed, uploaded_keys)
-        context["single_copc_upload"] = result
-
     if "multi_mix_upload" in requested_scenarios or {"duplicate_project", "multi_replace"} & set(requested_scenarios):
-        copc = _write_file(workspace / "Fassade.copc.laz", b"copc")
+        facade = _write_potree_fixture(workspace / "Fassade Potree", source_name="Fassade Potree")
         potree = _write_potree_fixture(workspace / "Bestand Potree", source_name="Bestand Potree")
         result = upload_service.upload_new_project(
             NewProjectUploadWorkflowRequest(
-                source_paths=(str(copc), str(potree)),
+                source_paths=(str(facade), str(potree)),
                 kunde=customer,
                 projekt="Multi Mix",
                 crs_info_by_source_path={
-                    str(copc): {"value": "EPSG:25832", "projection": "EPSG:25832"},
+                    str(facade): {"value": "EPSG:25832", "projection": "EPSG:25832"},
                     str(potree): {"value": "EPSG:25832", "projection": "EPSG:25832"},
                 },
             )
@@ -389,7 +376,7 @@ def _run_project_management_scenarios(
         deleted_keys.extend(result.deleted_keys)
 
     if "rename_project" in requested_scenarios:
-        target = context.get("single_copc_upload") or context["multi_mix_upload"]
+        target = context["multi_mix_upload"]
         result = project_service.rename_project(target.project_id, customer, "Renamed Project")
         _record_success("rename_project", result, scenarios_passed, uploaded_keys)
 
@@ -412,18 +399,18 @@ def _run_project_management_scenarios(
 
     if "multi_replace" in requested_scenarios:
         target = context["multi_mix_upload"]
-        copc = _write_file(workspace / "Multi Replacement.copc.laz", b"copc")
+        potree = _write_potree_fixture(workspace / "Multi Replacement Potree", source_name="Multi Replacement Potree")
         raw = _write_file(workspace / "Multi Replacement Raw.laz", b"raw")
         converter = _write_file(workspace / "MultiReplacementConverter.exe", b"converter")
         result = project_service.replace_project_pointclouds_from_sources(
             target.project_id,
-            (str(copc), str(raw)),
+            (str(potree), str(raw)),
             converter_path=str(converter),
             output_base_dir=str(workspace / "multi-replacement-converted"),
             overwrite=True,
             converter_runner=_smoke_converter_runner,
             crs_info_by_source_path={
-                str(copc): {"value": "EPSG:25832", "projection": "EPSG:25832", "epsg": "EPSG:25832"},
+                str(potree): {"value": "EPSG:25832", "projection": "EPSG:25832", "epsg": "EPSG:25832"},
                 str(raw): {"value": "EPSG:4326", "projection": "EPSG:4326", "epsg": "EPSG:4326"},
             },
         )
@@ -434,7 +421,7 @@ def _run_project_management_scenarios(
         target = context["existing_potree_folder_upload"]
         project_service.set_project_link_state(target.project_id, True)
         project_service.rename_project(target.project_id, customer, "Disabled Renamed")
-        replacement = _write_file(workspace / "Disabled Replacement.copc.laz", b"copc")
+        replacement = _write_potree_fixture(workspace / "Disabled Replacement", source_name="Disabled Replacement")
         result = project_service.replace_single_project_pointcloud_from_source(
             target.project_id,
             target.s3_prefix,
@@ -502,10 +489,23 @@ def _write_potree_files(path: Path, *, source_name: str) -> None:
         'cloud.js = {"spacing": 0.125, "source": ' + json.dumps(source_name, ensure_ascii=False) + "};",
         encoding="utf-8",
     )
+    octree = source_name.encode("utf-8") or b"fixture-point"
     (path / "metadata.json").write_text(
-        json.dumps({"spacing": 0.125, "source": source_name, "points": 12345}, ensure_ascii=False),
+        json.dumps({
+            "version": "2.0", "encoding": "BROTLI", "spacing": 0.125,
+            "source": source_name, "points": 12345,
+            "offset": [0, 0, 0], "scale": [0.001, 0.001, 0.001],
+            "hierarchy": {"firstChunkSize": 22, "stepSize": 4, "depth": 0},
+            "attributes": [{
+                "name": "position", "type": "int32", "numElements": 3,
+                "elementSize": 4, "size": 12,
+            }],
+            "boundingBox": {"min": [0, 0, 0], "max": [1, 1, 1]},
+        }, ensure_ascii=False),
         encoding="utf-8",
     )
+    (path / "hierarchy.bin").write_bytes(struct.pack("<BBIQQ", 1, 0, 12345, 0, len(octree)))
+    (path / "octree.bin").write_bytes(octree)
     write_potree_metadata_crs(
         path / "metadata.json",
         {"value": "EPSG:25832", "projection": "EPSG:25832", "epsg": "EPSG:25832"},

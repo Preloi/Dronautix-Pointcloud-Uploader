@@ -64,19 +64,13 @@ Beispiel:
       "format": "potree",
       "viewer_path": "demo/multi123/leitung_gesamtprojekt/neuplanung",
       "s3_path": "pointclouds/demo/multi123/leitung_gesamtprojekt/neuplanung"
-    },
-    {
-      "name": "Kontrolle COPC",
-      "format": "copc",
-      "viewer_path": "demo/multi123/leitung_gesamtprojekt/kontrolle/source.copc.laz",
-      "s3_path": "pointclouds/demo/multi123/leitung_gesamtprojekt/kontrolle/source.copc.laz"
     }
   ]
 }
 ```
 
 ## Pfadregeln
-Der Uploader soll pro Punktwolke einen eigenen Unterordner oder eine eigene COPC-Datei erzeugen.
+Der Uploader soll pro Punktwolke einen eigenen Potree-Unterordner erzeugen.
 
 Potree-Beispiel:
 
@@ -84,12 +78,6 @@ Potree-Beispiel:
 pointclouds/<kunde_slug>/<projekt_id>/<projekt_slug>/<cloud_slug>/metadata.json
 pointclouds/<kunde_slug>/<projekt_id>/<projekt_slug>/<cloud_slug>/octree.bin
 pointclouds/<kunde_slug>/<projekt_id>/<projekt_slug>/<cloud_slug>/hierarchy.bin
-```
-
-COPC-Beispiel:
-
-```text
-pointclouds/<kunde_slug>/<projekt_id>/<projekt_slug>/<cloud_slug>/source.copc.laz
 ```
 
 `viewer_path` soll ohne fuehrendes `pointclouds/` gespeichert werden. `s3_path` darf weiterhin den vollstaendigen S3/Hosting-Pfad inklusive `pointclouds/` enthalten.
@@ -106,7 +94,7 @@ Minimaler sinnvoller Workflow:
 5. Pro Punktwolke erfassen:
    - Anzeigename, z. B. `Bestand`, `Neuplanung`, `Befliegung 1`, `Kontrolle`.
    - Eingabedatei oder Eingabeordner.
-   - Format/Zieltyp: `potree` oder `copc`.
+   - Format/Zieltyp: `potree`.
    - Optional: Start sichtbar ja/nein, falls spaeter vom Viewer genutzt.
 6. Jede Punktwolke einzeln konvertieren/validieren/hochladen.
 7. Danach genau einen Projektlink fuer das Gesamtprojekt erzeugen.
@@ -119,7 +107,6 @@ Vor dem Upload pruefen:
 - Jeder Punktwolken-Eintrag hat einen stabilen `cloud_slug`/Zielordner.
 - Kein Zielordner wird von zwei Punktwolken gleichzeitig genutzt.
 - Fuer Potree-Ziele existiert nach der Konvertierung `metadata.json`.
-- Fuer COPC-Ziele existiert nach der Konvertierung `source.copc.laz` oder der konkrete `.copc.laz`-Pfad.
 - Warnung anzeigen, wenn mehrere Punktwolken vermutlich unterschiedliche Koordinatensysteme/Offsets haben.
 
 Wichtig: Der Viewer kann mehrere Punktwolken nur sinnvoll gemeinsam anzeigen, wenn sie raeumlich im gleichen Koordinaten-/Referenzsystem liegen oder passende Transformationen hinterlegt werden.
@@ -186,19 +173,17 @@ Die Umsetzung im Uploader ist fertig, wenn:
 
 ## Empfohlene Testfaelle
 1. Einzelupload Potree wie bisher.
-2. Einzelupload COPC wie bisher.
-3. Multi-Projekt mit zwei Potree-Punktwolken.
-4. Multi-Projekt mit Potree + COPC gemischt.
-5. Multi-Projekt loeschen und pruefen, ob alle Child-Pfade korrekt behandelt werden.
-6. Bestehende alte `projects_index.json` ohne `pointclouds[]` laden und unveraendert speichern.
-7. Fehlerfall: zwei Punktwolken mit gleichem Anzeigenamen.
-8. Fehlerfall: zwei Punktwolken mit gleichem Zielordner.
+2. Multi-Projekt mit zwei Potree-Punktwolken.
+3. Multi-Projekt loeschen und pruefen, ob alle Child-Pfade korrekt behandelt werden.
+4. Bestehende alte `projects_index.json` ohne `pointclouds[]` laden und unveraendert speichern.
+5. Fehlerfall: zwei Punktwolken mit gleichem Anzeigenamen.
+6. Fehlerfall: zwei Punktwolken mit gleichem Zielordner.
 
 ## Implementationshinweis fuer Codex
 Vor Codeaenderungen im Uploader zuerst die bestehenden Funktionen finden, die aktuell diese Aufgaben erledigen:
 
 - Projekt-ID/Slug erzeugen.
-- Potree/COPC-Konvertierung starten.
+- Potree-Konvertierung starten.
 - Upload-Zielpfade bauen.
 - `projects_index.json` lesen/schreiben.
 - `deleted_projects.json` lesen/schreiben.

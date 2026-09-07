@@ -232,7 +232,10 @@ def _normalize_pointcloud_names(
 
 
 def _normalize_source_paths(source_paths: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(path.strip() for path in source_paths if path.strip())
+    normalized = tuple(path.strip() for path in source_paths if path.strip())
+    if any(path.lower().endswith(".copc.laz") for path in normalized):
+        raise ValueError("COPC-Dateien werden nicht unterstützt. Bitte LAS/LAZ oder einen Potree-Ordner auswählen.")
+    return normalized
 
 
 def _validate_conversion_settings(source_paths: tuple[str, ...], converter_path: str, output_base_dir: str) -> None:
@@ -260,7 +263,7 @@ def _build_crs_info(horizontal_crs: str, vertical_crs: str) -> dict[str, str]:
 
 def _source_needs_conversion(source_path: str) -> bool:
     lower_path = source_path.lower()
-    return (lower_path.endswith(".las") or lower_path.endswith(".laz")) and not lower_path.endswith(".copc.laz")
+    return lower_path.endswith(".las") or lower_path.endswith(".laz")
 
 
 __all__ = [

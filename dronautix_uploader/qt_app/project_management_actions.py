@@ -167,9 +167,13 @@ def action_availability(
         return ActionAvailability(action, False, "Projekt-Link ist bereits aktiv.")
     if action_id == ACTION_REPLACE_SINGLE_POINTCLOUD and not isinstance(resource, PointcloudPreview):
         return ActionAvailability(action, False, "Keine konkrete Punktwolke ausgewählt.")
+    if action_id == ACTION_ADD_POINTCLOUDS and any(
+        pointcloud.format.strip().casefold() != "potree" for pointcloud in project.pointclouds
+    ):
+        return ActionAvailability(action, False, "Punktwolken können nur zu reinen Potree-Projekten hinzugefügt werden.")
     if action_id in {ACTION_REPLACE_SINGLE_MODEL, ACTION_REMOVE_MODEL} and not isinstance(resource, ModelPreview):
         return ActionAvailability(action, False, "Kein konkretes GLB ausgewählt.")
-    if action_id in {ACTION_ADD_POINTCLOUDS, ACTION_REMOVE_POINTCLOUD} and not project.has_explicit_pointclouds:
+    if action_id == ACTION_REMOVE_POINTCLOUD and not project.has_explicit_pointclouds:
         return ActionAvailability(action, False, "Nur Projekte mit expliziter pointclouds[]-Liste können Punktwolken verwalten.")
     if action_id == ACTION_REMOVE_POINTCLOUD:
         if not isinstance(resource, PointcloudPreview):

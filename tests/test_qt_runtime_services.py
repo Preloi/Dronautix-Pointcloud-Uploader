@@ -265,7 +265,7 @@ class FakeS3Client:
     def get_object(self, Bucket, Key):
         assert Bucket == "runtime-bucket"
         data = json.dumps(self.objects[Key]).encode("utf-8")
-        return {"Body": io.BytesIO(data)}
+        return {"Body": io.BytesIO(data), "ETag": '"runtime-etag"'}
 
 
 class FakeSession:

@@ -87,13 +87,9 @@ class FakePartialDownloadS3Client(FakeObjectS3Client):
         self.downloads.append((bucket, key, local_path))
 
 
-def test_collect_upload_files_uses_legacy_copc_target(tmp_path):
-    source = tmp_path / "survey.copc.laz"
-    source.write_bytes(b"copc")
-
-    assert collect_upload_files("copc", "pointclouds/k/id/p", source_file=str(source)) == [
-        (str(source), "pointclouds/k/id/p/source.copc.laz")
-    ]
+def test_collect_upload_files_rejects_non_potree_format():
+    with pytest.raises(ValueError, match="Uploadformat"):
+        collect_upload_files("raw", "pointclouds/k/id/p")
 
 
 def test_collect_upload_files_sorts_metadata_json_last(tmp_path):
@@ -199,7 +195,13 @@ def test_model_head_verification_fails_closed_for_a_missing_or_wrong_hash(tmp_pa
 def test_collect_project_object_entries_reads_paginator_pages():
     fake_s3 = FakeObjectS3Client(
         pages=[
-            {"Contents": [{"Key": "prefix/a.bin", "Size": 4}, {"Key": "", "Size": 1}]},
+            {
+                "Contents": [
+                    {"Key": "prefix/a.bin", "Size": 4},
+                    {"Key": "prefix-backup/a.bin", "Size": 99},
+                    {"Key": "", "Size": 1},
+                ]
+            },
             {"Contents": [{"Key": "prefix/b.bin"}]},
         ]
     )
@@ -208,7 +210,7 @@ def test_collect_project_object_entries_reads_paginator_pages():
         {"Key": "prefix/a.bin", "Size": 4},
         {"Key": "prefix/b.bin", "Size": 0},
     ]
-    assert fake_s3.paginator.calls == [{"Bucket": "bucket", "Prefix": "prefix"}]
+    assert fake_s3.paginator.calls == [{"Bucket": "bucket", "Prefix": "prefix/"}]
 
 
 def test_delete_s3_objects_raises_on_partial_errors():
@@ -280,10 +282,22 @@ def test_managed_copy_replaces_model_metadata_with_explicit_mime_type():
     ]
 
 
-def test_build_safe_download_path_removes_traversal_segments(tmp_path):
-    path = build_safe_download_path(str(tmp_path), "prefix", "prefix/../safe/cloud.js")
-
-    assert path == str(tmp_path / "safe" / "cloud.js")
+@pytest.mark.parametrize(
+    "key",
+    (
+        "prefix/../safe/cloud.js",
+        "prefix/D:/outside/payload.txt",
+        "prefix/file.txt:stream",
+        "prefix/folder/.. /.. /escaped.txt",
+        "prefix/NUL",
+        "prefix/con.txt",
+        "prefix/COM1/data.bin",
+        "prefix/trailing./data.bin",
+    ),
+)
+def test_build_safe_download_path_rejects_unsafe_windows_components(tmp_path, key):
+    with pytest.raises(ValueError):
+        build_safe_download_path(str(tmp_path), "prefix", key)
 
 
 def test_download_project_objects_writes_safe_local_paths(tmp_path):
@@ -342,6 +356,8 @@ def test_download_project_objects_can_cancel_from_progress_callback(tmp_path):
 def test_download_project_objects_removes_active_partial_file_when_cancelled(tmp_path):
     fake_s3 = FakePartialDownloadS3Client()
     events = []
+    target = tmp_path / "cloud.js"
+    target.write_bytes(b"complete previous download")
 
     with pytest.raises(DownloadCancelledError):
         download_project_objects(
@@ -354,5 +370,6 @@ def test_download_project_objects_removes_active_partial_file_when_cancelled(tmp
             cancel_requested=lambda: any(event.kind == "progress" for event in events),
         )
 
-    assert not (tmp_path / "cloud.js").exists()
+    assert target.read_bytes() == b"complete previous download"
+    assert not list(tmp_path.glob("*.part"))
     assert fake_s3.downloads == []

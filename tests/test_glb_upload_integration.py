@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import struct
 
 import pytest
 
@@ -129,20 +130,41 @@ class FakeGLBService:
         )
 
 
-def make_request(copc_path):
+def make_request(source_path):
+    potree_path = source_path.parent / "pointcloud"
+    potree_path.mkdir(exist_ok=True)
+    (potree_path / "cloud.js").write_text("cloud.js = {};", encoding="utf-8")
+    octree = b"fixture-point"
+    (potree_path / "metadata.json").write_text(
+        json.dumps(
+            {
+                "version": "2.0", "encoding": "BROTLI", "points": 1,
+                "offset": [0, 0, 0], "scale": [0.001, 0.001, 0.001],
+                "hierarchy": {"firstChunkSize": 22, "stepSize": 4, "depth": 0},
+                "attributes": [{
+                    "name": "position", "type": "int32", "numElements": 3,
+                    "elementSize": 4, "size": 12,
+                }],
+                "boundingBox": {"min": [0, 0, 0], "max": [100, 100, 100]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (potree_path / "hierarchy.bin").write_bytes(struct.pack("<BBIQQ", 1, 0, 1, 0, len(octree)))
+    (potree_path / "octree.bin").write_bytes(octree)
     return NewProjectUploadWorkflowRequest(
-        source_paths=(str(copc_path),),
+        source_paths=(str(potree_path),),
         kunde="Kunde",
         projekt="Projekt",
-        output_base_dir=str(copc_path.parent),
+        output_base_dir=str(source_path.parent),
         crs_info_by_source_path={
-            str(copc_path): {
+            str(potree_path): {
                 "value": "EPSG:25832",
                 "vertical_crs": "EPSG:7837",
                 "vertical_datum": "DHHN2016 height",
             }
         },
-        model_inputs=(ModelUploadInput(source_path=str(copc_path.parent / "halle.glb")),),
+        model_inputs=(ModelUploadInput(source_path=str(source_path.parent / "halle.glb")),),
     )
 
 
@@ -359,7 +381,7 @@ def test_mixed_upload_cancellation_after_model_scene_rolls_back_and_cleans_stage
 
     result = service.upload_new_project(
         make_request(copc),
-        cancel_requested=lambda: len(s3.uploads) >= 2,
+        cancel_requested=lambda: len(s3.uploads) >= 5,
     )
 
     assert result.status == "cancelled"

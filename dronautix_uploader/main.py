@@ -1227,7 +1227,7 @@ def download_and_start_update_worker(manifest, installer_url, installer_name):
 
 def validate_file(filepath):
 
-    """Prueft, ob die Datei eine gueltige LAS/LAZ- oder COPC-Datei ist."""
+    """Prueft, ob die Datei eine gueltige LAS/LAZ-Datei ist."""
 
     if not os.path.exists(filepath):
 
@@ -1237,13 +1237,13 @@ def validate_file(filepath):
 
     ext = os.path.splitext(filepath)[1].lower()
 
-    if ext not in ['.laz', '.las']:
-
-        return False, "Nur .copc.laz, .laz und .las Dateien werden unterstuetzt"
-
     if filename.endswith('.copc.laz'):
 
-        return True, "COPC"
+        return False, "COPC-Dateien werden nicht unterstuetzt. Bitte LAS/LAZ auswaehlen."
+
+    if ext not in ['.laz', '.las']:
+
+        return False, "Nur .laz und .las Dateien werden unterstuetzt"
 
     return True, "OK"
 
@@ -1253,11 +1253,9 @@ def validate_file(filepath):
 
 def detect_input_format(filepath):
 
-    """Ermittelt ob eine Datei direkt als COPC hochgeladen werden kann."""
+    """Ordnet unterstuetzte Rohdateien dem Potree-Konvertierungspfad zu."""
 
-    filename = os.path.basename(filepath).lower()
-
-    return "copc" if filename.endswith(".copc.laz") else "potree"
+    return "potree"
 
 
 
@@ -1272,12 +1270,6 @@ def validate_replacement_file(filepath):
     if not valid:
 
         return False, message
-
-
-
-    if os.path.basename(filepath).lower().endswith(".copc.laz"):
-
-        return False, "Für den Projektaustausch sind nur klassische .las oder .laz Dateien erlaubt"
 
 
 
@@ -2009,7 +2001,7 @@ def detect_potree_crs(directory_path):
 
 def detect_pointcloud_crs(source_path):
 
-    """Erkennt EPSG/WKT-CRS aus LAS/LAZ/COPC-Headern, wenn die Datei referenziert ist."""
+    """Erkennt EPSG/WKT-CRS aus LAS/LAZ-Headern, wenn die Datei referenziert ist."""
 
     if source_path and os.path.isdir(source_path):
 
@@ -2511,12 +2503,6 @@ def get_pointcloud_display_name(source_path):
 
     filename = os.path.basename(source_path or "").strip()
 
-    lower_name = filename.lower()
-
-    if lower_name.endswith(".copc.laz"):
-
-        return filename[:-9] or "Punktwolke"
-
     name, _ = os.path.splitext(filename)
 
     return name or "Punktwolke"
@@ -2535,11 +2521,15 @@ def create_pointcloud_index_entry(name, input_format, viewer_path, s3_path, crs_
 
     """Erzeugt den Viewer-kompatiblen Indexeintrag fuer eine Punktwolke."""
 
+    if str(input_format or "").strip().lower() != "potree":
+
+        raise ValueError(f"Nicht unterstuetztes Punktwolkenformat: {input_format}")
+
     entry = {
 
         "name": name,
 
-        "format": input_format,
+        "format": "potree",
 
         "viewer_path": viewer_path,
 
@@ -3154,9 +3144,17 @@ def collect_project_object_entries(s3_client, s3_path):
 
     """Sammelt S3-Objekte inklusive Groesse unter einem Projektpraefix."""
 
+    normalized_prefix = str(s3_path or "").strip().replace("\\", "/").strip("/")
+
+    if not normalized_prefix:
+
+        raise ValueError("S3-Projektpraefix darf nicht leer sein.")
+
     paginator = s3_client.get_paginator('list_objects_v2')
 
-    pages = paginator.paginate(Bucket=BUCKET_NAME, Prefix=s3_path)
+    directory_prefix = f"{normalized_prefix}/"
+
+    pages = paginator.paginate(Bucket=BUCKET_NAME, Prefix=directory_prefix)
 
 
 
@@ -3168,7 +3166,7 @@ def collect_project_object_entries(s3_client, s3_path):
 
             object_key = obj.get('Key')
 
-            if not object_key:
+            if not object_key or not str(object_key).startswith(directory_prefix):
 
                 continue
 
@@ -3456,13 +3454,7 @@ def build_project_url(folder_kunde, folder_id, folder_projekt, input_format):
 
     """Erstellt den Viewer-Link für ein Projekt."""
 
-    if input_format == "copc":
-
-        path_param = f"{folder_kunde}/{folder_id}/{folder_projekt}/source.copc.laz"
-
-    else:
-
-        path_param = f"{folder_kunde}/{folder_id}/{folder_projekt}"
+    path_param = f"{folder_kunde}/{folder_id}/{folder_projekt}"
 
 
 
@@ -3576,7 +3568,7 @@ def find_project_in_index(index_data, project_id="", project_link="", include_di
 
 
 
-def collect_upload_files(input_format, s3_prefix, source_file=None, output_dir=None):
+def collect_upload_files(input_format, s3_prefix, output_dir=None):
 
     """Sammelt alle hochzuladenden Dateien für einen Upload."""
 
@@ -3584,11 +3576,9 @@ def collect_upload_files(input_format, s3_prefix, source_file=None, output_dir=N
 
 
 
-    if input_format == "copc":
+    if input_format != "potree":
 
-        files_to_upload.append((source_file, f"{s3_prefix}/source.copc.laz"))
-
-        return files_to_upload
+        raise ValueError(f"Nicht unterstuetztes Punktwolkenformat: {input_format}")
 
 
 
@@ -3629,10 +3619,6 @@ def infer_cloud_name(source_path):
         return os.path.basename(normalized_source.rstrip("\\/")) or "Punktwolke"
 
     base_name = os.path.basename(normalized_source or source_path)
-
-    if base_name.lower().endswith(".copc.laz"):
-
-        return base_name[:-len(".copc.laz")]
 
     return os.path.splitext(base_name)[0] or "Punktwolke"
 
@@ -3700,7 +3686,7 @@ def prepare_multi_replacement_sources(source_entries):
 
         else:
 
-            valid, message = False, "Quelle muss eine LAS/LAZ/COPC-Datei oder ein Potree-Ordner sein."
+            valid, message = False, "Quelle muss eine LAS/LAZ-Datei oder ein Potree-Ordner sein."
 
             input_format = ""
 
@@ -4127,39 +4113,25 @@ def run_multi_upload_process(upload_sources, kunde, projekt, aws_access, aws_sec
 
             log(f"[MULTI] Punktwolke {index}/{len(validated_sources)}: {cloud_name}")
 
-            if input_format == "copc":
+            output_dir = os.path.join(output_base_dir, folder_kunde, folder_id, folder_projekt, cloud_slug)
 
-                log("[COPC] Direkter Upload ohne Potree Converter")
+            temp_output_dirs.append(output_dir)
 
-                copc_s3_key = f"{cloud_s3_prefix}/source.copc.laz"
+            run_potree_conversion(source_path, converter_path, output_dir)
 
-                files_to_upload.append((source_path, copc_s3_key))
+            valid_output, output_message = validate_potree_output_dir(output_dir)
 
-                viewer_path = f"{cloud_viewer_path}/source.copc.laz"
+            if not valid_output:
 
-                pointcloud_s3_path = copc_s3_key
+                raise RuntimeError(f"{cloud_name}: {output_message}")
 
-            else:
+            write_potree_metadata_crs(output_dir, crs_info)
 
-                output_dir = os.path.join(output_base_dir, folder_kunde, folder_id, folder_projekt, cloud_slug)
+            files_to_upload.extend(collect_upload_files("potree", cloud_s3_prefix, output_dir=output_dir))
 
-                temp_output_dirs.append(output_dir)
+            viewer_path = cloud_viewer_path
 
-                run_potree_conversion(source_path, converter_path, output_dir)
-
-                valid_output, output_message = validate_potree_output_dir(output_dir)
-
-                if not valid_output:
-
-                    raise RuntimeError(f"{cloud_name}: {output_message}")
-
-                write_potree_metadata_crs(output_dir, crs_info)
-
-                files_to_upload.extend(collect_upload_files("potree", cloud_s3_prefix, output_dir=output_dir))
-
-                viewer_path = cloud_viewer_path
-
-                pointcloud_s3_path = cloud_s3_prefix
+            pointcloud_s3_path = cloud_s3_prefix
 
             pointcloud_entries.append(create_pointcloud_index_entry(
 
@@ -4399,8 +4371,6 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input="", 
 
         input_format = detect_input_format(laz_file)
 
-        is_copc = input_format == "copc"
-
         crs_info = resolve_pointcloud_crs(laz_file, crs_input, vertical_input)
 
         crs_display = get_crs_summary_text(crs_info)
@@ -4425,7 +4395,7 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input="", 
 
 
 
-        if not is_copc and not converter_path:
+        if not converter_path:
 
             log("[FEHLER] Kein Potree Converter verfügbar")
 
@@ -4443,7 +4413,7 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input="", 
 
 
 
-        if not is_copc and not output_base_dir:
+        if not output_base_dir:
 
             log("[FEHLER] Output-Ordner nicht konfiguriert!")
 
@@ -4455,7 +4425,7 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input="", 
 
         log(f"[DATEI] Datei ist gueltig: {os.path.basename(laz_file)}")
 
-        log(f"[FORMAT] {'COPC Direkt-Upload' if is_copc else 'LAS/LAZ mit Potree Converter'}")
+        log("[FORMAT] LAS/LAZ mit Potree Converter")
 
         log(f"[KUNDE] {kunde}")
 
@@ -4477,39 +4447,25 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input="", 
 
 
 
-        output_dir = None
-
-
-
         # 2. Dateien vorbereiten
 
-        if is_copc:
+        root.after(0, lambda: update_step("Konvertiere mit Potree...", 2))
 
-            root.after(0, lambda: update_step("Bereite COPC für Upload vor...", 2))
-
-            root.after(0, lambda: progress_bar.set(1))
-
-            log("[COPC] Direkter Upload ohne Potree Converter")
-
-        else:
-
-            root.after(0, lambda: update_step("Konvertiere mit Potree...", 2))
-
-            root.after(0, lambda: progress_bar.set(0))
+        root.after(0, lambda: progress_bar.set(0))
 
 
 
-            # Temporaerer Output-Ordner: kunde/id/projekt
+        # Temporaerer Output-Ordner: kunde/id/projekt
 
-            output_dir = os.path.join(output_base_dir, folder_kunde, folder_id, folder_projekt)
+        output_dir = os.path.join(output_base_dir, folder_kunde, folder_id, folder_projekt)
 
-            os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
 
 
 
-            run_potree_conversion(laz_file, converter_path, output_dir)
+        run_potree_conversion(laz_file, converter_path, output_dir)
 
-            write_potree_metadata_crs(output_dir, crs_info)
+        write_potree_metadata_crs(output_dir, crs_info)
 
 
 
@@ -4549,23 +4505,17 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input="", 
 
         files_to_upload = []
 
-        if is_copc:
+        for root_dir, dirs, files in os.walk(output_dir):
 
-            files_to_upload.append((laz_file, f"{s3_prefix}/source.copc.laz"))
+            for file in files:
 
-        else:
+                local_path = os.path.join(root_dir, file)
 
-            for root_dir, dirs, files in os.walk(output_dir):
+                rel_path = os.path.relpath(local_path, output_dir)
 
-                for file in files:
+                s3_key = f"{s3_prefix}/{rel_path}".replace("\\", "/")
 
-                    local_path = os.path.join(root_dir, file)
-
-                    rel_path = os.path.relpath(local_path, output_dir)
-
-                    s3_key = f"{s3_prefix}/{rel_path}".replace("\\", "/")
-
-                    files_to_upload.append((local_path, s3_key))
+                files_to_upload.append((local_path, s3_key))
 
 
 
@@ -4671,13 +4621,7 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input="", 
 
         # Viewer-Pfad bleibt sprechend im Index, aber der oeffentliche Link nutzt nur die technische Kurz-ID.
 
-        if is_copc:
-
-            path_param = f"{folder_kunde}/{folder_id}/{folder_projekt}/source.copc.laz"
-
-        else:
-
-            path_param = f"{folder_kunde}/{folder_id}/{folder_projekt}"
+        path_param = f"{folder_kunde}/{folder_id}/{folder_projekt}"
         project_url = f"{DOMAIN_URL}?id={folder_id}"
 
 
@@ -4738,25 +4682,19 @@ def run_process(laz_file, kunde, projekt, aws_access, aws_secret, crs_input="", 
 
         root.after(0, lambda: update_step("Raeume auf...", 5))
 
-        if is_copc:
+        log("[CLEANUP] Loesche temporaere Dateien...")
 
-            log("[CLEANUP] Kein lokaler Cleanup nötig für COPC Upload")
+
+
+        cleanup_success = cleanup_local_files(output_dir)
+
+        if cleanup_success:
+
+            log("[CLEANUP] Temporärer Ordner erfolgreich gelöscht")
 
         else:
 
-            log("[CLEANUP] Loesche temporaere Dateien...")
-
-
-
-            cleanup_success = cleanup_local_files(output_dir)
-
-            if cleanup_success:
-
-                log("[CLEANUP] Temporärer Ordner erfolgreich gelöscht")
-
-            else:
-
-                log("[CLEANUP] Temporärer Ordner konnte nicht vollstaendig gelöscht werden")
+            log("[CLEANUP] Temporärer Ordner konnte nicht vollstaendig gelöscht werden")
 
 
 
@@ -4842,9 +4780,9 @@ def select_file():
 
     files = filedialog.askopenfilenames(
 
-        title="LAS/LAZ/COPC Datei(en) auswählen",
+        title="LAS/LAZ Datei(en) auswählen",
 
-        filetypes=[("Point Cloud", "*.copc.laz *.laz *.las"), ("Alle Dateien", "*.*")]
+        filetypes=[("Point Cloud", "*.laz *.las"), ("Alle Dateien", "*.*")]
 
     )
 
@@ -4888,7 +4826,7 @@ def set_selected_upload_files(file_paths, append=False):
 
 def update_crs_entry_from_selection(file_paths, force=False):
 
-    """Fuellt das CRS-Feld aus der LAS/LAZ/COPC-Metadatenreferenz, sofern eindeutig."""
+    """Fuellt das CRS-Feld aus der LAS/LAZ-Metadatenreferenz, sofern eindeutig."""
 
     global last_auto_crs_entry_value
 
@@ -5023,7 +4961,7 @@ def extract_dropped_files(event_data):
 
         split_candidates = re.findall(
 
-            r"[A-Za-z]:[\\/].*?\.(?:copc\.laz|laz|las)(?=\s+[A-Za-z]:[\\/]|$)",
+            r"[A-Za-z]:[\\/].*?\.(?:laz|las)(?=\s+[A-Za-z]:[\\/]|$)",
 
             raw_value,
 
@@ -5182,7 +5120,7 @@ def start_thread():
 
     if not upload_sources:
 
-        messagebox.showwarning("Fehler", "Bitte mindestens eine LAZ/LAS/COPC Datei auswählen!")
+        messagebox.showwarning("Fehler", "Bitte mindestens eine LAZ/LAS-Datei auswählen!")
 
         return
 
@@ -5856,16 +5794,6 @@ def replace_project_with_multi_pointclouds(project_info, replacement_entries, aw
 
                 ui_log(f"[MULTI] Verwende Potree-Ordner: {upload_source_dir}", ui)
 
-            elif source["format"] == "copc":
-
-                upload_source_dir = ""
-
-                input_format = "copc"
-
-                child_viewer_path = f"{child_viewer_path}/source.copc.laz"
-
-                ui_log(f"[MULTI] Verwende COPC-Direktupload: {os.path.basename(source_path)}", ui)
-
             else:
 
                 input_format = "potree"
@@ -5898,13 +5826,7 @@ def replace_project_with_multi_pointclouds(project_info, replacement_entries, aw
 
             ui_set_step(f"Lade Punktwolke {source_index}/{total_sources} hoch...", 3, ui)
 
-            if input_format == "copc":
-
-                files_to_upload = collect_upload_files("copc", child_s3_prefix, source_file=source_path)
-
-            else:
-
-                files_to_upload = collect_upload_files("potree", child_s3_prefix, output_dir=upload_source_dir)
+            files_to_upload = collect_upload_files("potree", child_s3_prefix, output_dir=upload_source_dir)
 
             if not files_to_upload:
 
@@ -5922,7 +5844,7 @@ def replace_project_with_multi_pointclouds(project_info, replacement_entries, aw
 
                 child_viewer_path,
 
-                child_s3_prefix if input_format != "copc" else f"{child_s3_prefix}/source.copc.laz",
+                child_s3_prefix,
 
                 crs_info
 
@@ -7864,7 +7786,7 @@ def show_projects_view():
 
             drop_label_replace.configure(
 
-                text="Eine oder mehrere Punktwolken hier hineinziehen\n\n.las, .laz, .copc.laz oder Potree-Ordner"
+                text="Eine oder mehrere Punktwolken hier hineinziehen\n\n.las, .laz oder Potree-Ordner"
 
             )
 
@@ -7878,7 +7800,7 @@ def show_projects_view():
 
                 title="Punktwolke(n) auswählen",
 
-                filetypes=[("Point Cloud", "*.copc.laz *.laz *.las"), ("Alle Dateien", "*.*")]
+                filetypes=[("Point Cloud", "*.laz *.las"), ("Alle Dateien", "*.*")]
 
             )
 
@@ -7988,7 +7910,7 @@ def show_projects_view():
 
             drop_frame_replace,
 
-            text="Eine oder mehrere Punktwolken hier hineinziehen\n\n.las, .laz, .copc.laz oder Potree-Ordner",
+            text="Eine oder mehrere Punktwolken hier hineinziehen\n\n.las, .laz oder Potree-Ordner",
 
             bg="#1e1e2e",
 
@@ -8046,7 +7968,7 @@ def show_projects_view():
 
             crs_card,
 
-            text="Automatisch aus LAS/LAZ/COPC lesen oder manuell eintragen. Leer lassen, wenn die Punktwolke nicht referenziert ist.",
+            text="Automatisch aus LAS/LAZ lesen oder manuell eintragen. Leer lassen, wenn die Punktwolke nicht referenziert ist.",
 
             font=ctk.CTkFont(size=11),
 
@@ -10788,7 +10710,7 @@ ctk.CTkLabel(
 
 ctk.CTkButton(
 
-    card_data, text="LAZ / LAS / COPC Datei(en) wählen...",
+    card_data, text="LAZ / LAS Datei(en) wählen...",
 
     fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
 

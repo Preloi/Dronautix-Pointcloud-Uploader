@@ -185,6 +185,7 @@ def test_settings_controller_removes_legacy_converter_overrides_on_save(tmp_path
     controller = settings_controller.SettingsController(
         config_path=config_path,
         credential_loader=lambda service, user: "",
+        credential_writer=lambda service, user, value: None,
     )
 
     controller.save_state(
@@ -200,6 +201,56 @@ def test_settings_controller_removes_legacy_converter_overrides_on_save(tmp_path
     saved = load_config_file(config_path)
     assert "converter_path" not in saved
     assert "potree_converter_path" not in saved
+
+
+def test_settings_controller_removes_every_plaintext_secret_alias_after_keyring_write(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        '{"aws_secret_access_key":"a","aws_secret":"b","aws_secret_key":"c","secret_key":"d"}',
+        encoding="utf-8",
+    )
+    writes = []
+    controller = SettingsController(
+        config_path=config_path,
+        credential_loader=lambda service, user: "",
+        credential_writer=lambda service, user, value: writes.append((service, user, value)),
+    )
+
+    controller.save_state(SettingsFormState(
+        aws_access_key_id="access", aws_secret_access_key="new-secret",
+        region_name="eu-central-1", bucket_name="bucket",
+    ))
+
+    saved = load_config_file(config_path)
+    assert not {"aws_secret_access_key", "aws_secret", "aws_secret_key", "secret_key"} & saved.keys()
+    assert (PREVIEW_KEYRING_SERVICE, "aws_secret", "new-secret") in writes
+
+
+def test_settings_controller_does_not_save_config_when_keyring_write_fails(tmp_path):
+    config_path = tmp_path / "config.json"
+    original = '{"secret_key":"legacy","region_name":"old"}'
+    config_path.write_text(original, encoding="utf-8")
+    saves = []
+
+    def fail_secret(_service, user, _value):
+        if user == "aws_secret":
+            raise RuntimeError("keyring unavailable")
+
+    controller = SettingsController(
+        config_path=config_path,
+        credential_loader=lambda service, user: "",
+        credential_writer=fail_secret,
+        config_saver=lambda path, config: saves.append((path, config)),
+    )
+
+    with pytest.raises(RuntimeError, match="keyring unavailable"):
+        controller.save_state(SettingsFormState(
+            aws_access_key_id="access", aws_secret_access_key="new-secret",
+            region_name="eu-central-1", bucket_name="bucket",
+        ))
+
+    assert saves == []
+    assert config_path.read_text(encoding="utf-8") == original
 
 
 def test_settings_controller_rejects_missing_region_or_bucket(tmp_path):

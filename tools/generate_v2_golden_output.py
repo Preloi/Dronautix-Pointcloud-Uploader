@@ -2,7 +2,7 @@
 
 Usage:
     python tools/generate_v2_golden_output.py
-    python tools/generate_v2_golden_output.py --scenario single_copc_upload
+    python tools/generate_v2_golden_output.py --scenario single_potree_upload
 """
 
 from __future__ import annotations

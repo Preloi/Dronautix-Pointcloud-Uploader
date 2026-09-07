@@ -2,6 +2,7 @@ import copy
 import io
 import json
 import os
+import struct
 
 import pytest
 
@@ -111,6 +112,29 @@ def make_api(repository, s3_client=None):
         timestamp_factory=lambda: "2026-06-21T12:00:00",
     )
     return CoreServiceApi(upload_service=upload_service, project_service=project_service), client
+
+
+def write_potree(tmp_path, name):
+    directory = tmp_path / name
+    directory.mkdir()
+    (directory / "cloud.js").write_text("cloud.js = {};", encoding="utf-8")
+    octree = b"fixture-point"
+    (directory / "metadata.json").write_text(
+        json.dumps({
+            "version": "2.0", "encoding": "BROTLI", "points": 1,
+            "offset": [0, 0, 0], "scale": [0.001, 0.001, 0.001],
+            "hierarchy": {"firstChunkSize": 22, "stepSize": 4, "depth": 0},
+            "attributes": [{
+                "name": "position", "type": "int32", "numElements": 3,
+                "elementSize": 4, "size": 12,
+            }],
+            "boundingBox": {"min": [0, 0, 0], "max": [1, 1, 1]},
+        }),
+        encoding="utf-8",
+    )
+    (directory / "hierarchy.bin").write_bytes(struct.pack("<BBIQQ", 1, 0, 1, 0, len(octree)))
+    (directory / "octree.bin").write_bytes(octree)
+    return directory
 
 
 class CapturingUploadService:
@@ -265,8 +289,7 @@ def test_core_service_api_routes_add_and_remove_pointcloud_contracts():
 
 
 def test_core_service_api_upload_project_uses_contract_dataclass_and_existing_pipeline(tmp_path):
-    source = tmp_path / "scan.copc.laz"
-    source.write_bytes(b"copc")
+    source = write_potree(tmp_path, "scan")
     repository = FakeRepository()
     api, s3_client = make_api(repository)
 
@@ -283,7 +306,7 @@ def test_core_service_api_upload_project_uses_contract_dataclass_and_existing_pi
     assert result.status == "success"
     assert repository.index_data["projects"][0]["id"] == "newid"
     assert repository.index_data["projects"][0]["crs"] == "EPSG:25832"
-    assert s3_client.uploads[0][2] == "pointclouds/kunde/newid/projekt/source.copc.laz"
+    assert s3_client.uploads[0][2] == "pointclouds/kunde/newid/projekt/cloud.js"
 
 
 def test_core_service_api_routes_metadata_update_and_download_contracts(tmp_path):
@@ -404,10 +427,8 @@ def test_core_service_api_routes_delete_and_link_state_contracts():
 
 
 def test_core_service_api_routes_single_and_multi_replacement_contracts(tmp_path):
-    single_source = tmp_path / "single.copc.laz"
-    single_source.write_bytes(b"single")
-    multi_source = tmp_path / "multi.copc.laz"
-    multi_source.write_bytes(b"multi")
+    single_source = write_potree(tmp_path, "single")
+    multi_source = write_potree(tmp_path, "multi")
     repository = FakeRepository(
         {
             "projects": [
@@ -466,8 +487,8 @@ def test_core_service_api_routes_single_and_multi_replacement_contracts(tmp_path
     assert repository.index_data["projects"][0]["pointclouds"][0]["name"] == "Benannte Cloud"
     assert repository.index_data["projects"][0]["pointclouds"][0]["crs"] == "EPSG:4326"
     uploaded_keys = [upload[2] for upload in s3_client.uploads]
-    assert any(key.endswith("/single/source.copc.laz") and "/versions/" in key for key in uploaded_keys)
-    assert any(key.endswith("/custom_slug/source.copc.laz") and "/versions/" in key for key in uploaded_keys)
+    assert any(key.endswith("/single/cloud.js") and "/versions/" in key for key in uploaded_keys)
+    assert any(key.endswith("/custom_slug/cloud.js") and "/versions/" in key for key in uploaded_keys)
 
 
 def test_core_service_api_requires_explicit_target_for_multi_cloud_single_replacement(tmp_path):

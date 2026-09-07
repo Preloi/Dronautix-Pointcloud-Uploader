@@ -208,17 +208,17 @@ def test_validate_download_dialog_state_rejects_empty_target_dir(dialog_models):
 
 def test_validate_replace_all_dialog_state_accepts_multiple_trimmed_sources(dialog_models):
     state = dialog_models.ProjectReplaceDialogState(
-        source_paths=("  scan.copc.laz  ", "", " potree-output "),
+        source_paths=("  potree-scan  ", "", " potree-output "),
     )
 
     payload = dialog_models.validate_replace_all_dialog_state(state)
 
-    assert payload == ReplaceAllPointcloudsInput(source_paths=("scan.copc.laz", "potree-output"))
+    assert payload == ReplaceAllPointcloudsInput(source_paths=("potree-scan", "potree-output"))
 
 
 def test_validate_replace_all_dialog_state_maps_crs_to_each_replacement_source(dialog_models):
     state = dialog_models.ProjectReplaceDialogState(
-        source_paths=(" scan-a.copc.laz ", " scan-b.copc.laz "),
+        source_paths=(" potree-a ", " potree-b "),
         horizontal_crs=" EPSG:25832 ",
         vertical_crs=" DHHN2016 ",
     )
@@ -226,14 +226,14 @@ def test_validate_replace_all_dialog_state_maps_crs_to_each_replacement_source(d
     payload = dialog_models.validate_replace_all_dialog_state(state)
 
     assert payload.crs_info_by_source_path == {
-        "scan-a.copc.laz": {
+        "potree-a": {
             "value": "EPSG:25832",
             "projection": "EPSG:25832",
             "vertical_crs": "DHHN2016",
             "vertical_epsg": "DHHN2016",
             "vertical_projection": "DHHN2016",
         },
-        "scan-b.copc.laz": {
+        "potree-b": {
             "value": "EPSG:25832",
             "projection": "EPSG:25832",
             "vertical_crs": "DHHN2016",
@@ -246,16 +246,16 @@ def test_validate_replace_all_dialog_state_maps_crs_to_each_replacement_source(d
 def test_validate_add_dialog_state_reuses_multi_source_selection_and_conversion_settings(dialog_models):
     payload = dialog_models.validate_add_pointclouds_dialog_state(
         dialog_models.ProjectReplaceDialogState(
-            source_paths=(" scan-a.copc.laz ", "scan-b.copc.laz"),
+            source_paths=(" potree-a ", "potree-b"),
             horizontal_crs="EPSG:25832",
         )
     )
 
     assert payload == AddPointcloudsInput(
-        source_paths=("scan-a.copc.laz", "scan-b.copc.laz"),
+        source_paths=("potree-a", "potree-b"),
         crs_info_by_source_path={
-            "scan-a.copc.laz": {"value": "EPSG:25832", "projection": "EPSG:25832"},
-            "scan-b.copc.laz": {"value": "EPSG:25832", "projection": "EPSG:25832"},
+            "potree-a": {"value": "EPSG:25832", "projection": "EPSG:25832"},
+            "potree-b": {"value": "EPSG:25832", "projection": "EPSG:25832"},
         },
     )
 
@@ -284,15 +284,15 @@ def test_validate_replace_single_dialog_state_requires_exactly_one_source(dialog
 
     with pytest.raises(ValueError, match="genau eine"):
         dialog_models.validate_replace_single_dialog_state(
-            dialog_models.ProjectReplaceDialogState(source_paths=("a.copc.laz", "b.copc.laz"))
+            dialog_models.ProjectReplaceDialogState(source_paths=("potree-a", "potree-b"))
         )
 
     payload = dialog_models.validate_replace_single_dialog_state(
-        dialog_models.ProjectReplaceDialogState(source_paths=(" a.copc.laz ",), horizontal_crs="EPSG:25832")
+        dialog_models.ProjectReplaceDialogState(source_paths=(" potree-a ",), horizontal_crs="EPSG:25832")
     )
 
     assert payload == ReplaceSinglePointcloudInput(
-        source_path="a.copc.laz",
+        source_path="potree-a",
         crs_info={"value": "EPSG:25832", "projection": "EPSG:25832"},
     )
 

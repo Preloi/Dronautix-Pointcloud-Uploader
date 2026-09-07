@@ -30,10 +30,6 @@ def test_generate_v2_golden_outputs_writes_manifest_required_files(tmp_path):
         assert result.side_effects_path == result.output_dir / SIDE_EFFECTS_JSON
         assert result.side_effects_path.is_file()
 
-    single_copc_dir = tmp_path / "single_copc_upload"
-    assert (single_copc_dir / "projects_index.json").is_file()
-    assert not (single_copc_dir / "metadata.json").exists()
-    assert not (single_copc_dir / "cloud.js").exists()
     assert not (tmp_path / "_work").exists()
 
 
@@ -114,7 +110,8 @@ def test_generate_v2_duplicate_project_output_preserves_disabled_source_and_adds
     assert result.uploaded_keys == (
         "pointclouds/golden_kunde/abc12d01/duplicate_clone/cloud_a/cloud.js",
         "pointclouds/golden_kunde/abc12d01/duplicate_clone/cloud_a/metadata.json",
-        "pointclouds/golden_kunde/abc12d01/duplicate_clone/cloud_b/source.copc.laz",
+        "pointclouds/golden_kunde/abc12d01/duplicate_clone/cloud_b/cloud.js",
+        "pointclouds/golden_kunde/abc12d01/duplicate_clone/cloud_b/metadata.json",
     )
 
 
@@ -135,10 +132,10 @@ def test_generate_v2_multi_replace_output_clears_common_crs_on_mismatch(tmp_path
     assert project["format"] == "multi"
     assert "crs" not in project
     assert "projection" not in project
-    assert [cloud["format"] for cloud in project["pointclouds"]] == ["copc", "potree"]
+    assert [cloud["format"] for cloud in project["pointclouds"]] == ["potree", "potree"]
     assert [cloud["crs"] for cloud in project["pointclouds"]] == ["EPSG:25832", "EPSG:4326"]
-    assert metadata["projection"] == "EPSG:4326"
-    assert cloudjs["projection"] == "EPSG:4326"
+    assert metadata["projection"] == "EPSG:25832"
+    assert cloudjs["projection"] == "EPSG:25832"
 
 
 def test_generate_v2_multi_replace_records_index_save_before_orphan_cleanup(tmp_path):
@@ -161,7 +158,8 @@ def test_generate_v2_multi_replace_records_index_save_before_orphan_cleanup(tmp_
     assert cleanup_delete["keys"] == [
         "pointclouds/golden/replace_multi/old_a/cloud.js",
         "pointclouds/golden/replace_multi/old_a/metadata.json",
-        "pointclouds/golden/replace_multi/old_b/source.copc.laz",
+        "pointclouds/golden/replace_multi/old_b/cloud.js",
+        "pointclouds/golden/replace_multi/old_b/metadata.json",
         "pointclouds/golden/replace_multi/old_orphan.bin",
     ]
 
@@ -227,7 +225,7 @@ def test_generate_v2_golden_output_cli_generates_selected_scenario(tmp_path, cap
     exit_code = generate_v2_golden_output_cli(
         [
             "--scenario",
-            "single_copc_upload",
+            "single_potree_upload",
             "--output-root",
             str(tmp_path),
         ]
@@ -236,14 +234,14 @@ def test_generate_v2_golden_output_cli_generates_selected_scenario(tmp_path, cap
     output = capsys.readouterr().out
     assert exit_code == 0
     assert "Generated V2 Golden output: 1 scenario(s)" in output
-    assert (tmp_path / "single_copc_upload" / "projects_index.json").is_file()
+    assert (tmp_path / "single_potree_upload" / "projects_index.json").is_file()
 
 
 def test_generate_v2_golden_outputs_refuses_existing_files_without_overwrite(tmp_path):
-    generate_v2_golden_outputs(MANIFEST_PATH, output_root=tmp_path, scenario_id="single_copc_upload")
+    generate_v2_golden_outputs(MANIFEST_PATH, output_root=tmp_path, scenario_id="single_potree_upload")
 
     try:
-        generate_v2_golden_outputs(MANIFEST_PATH, output_root=tmp_path, scenario_id="single_copc_upload")
+        generate_v2_golden_outputs(MANIFEST_PATH, output_root=tmp_path, scenario_id="single_potree_upload")
     except FileExistsError as exc:
         assert "projects_index.json" in str(exc)
     else:

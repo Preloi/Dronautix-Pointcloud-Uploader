@@ -7,6 +7,24 @@ import time
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_window_settings_and_startup_cleanup(request, tmp_path, monkeypatch):
+    if request.node.name.startswith("test_startup_cleanup_"):
+        yield
+        return
+    QtCore, _QtGui, _QtWidgets = _import_qt()
+    from dronautix_uploader.qt_app import main_window
+
+    previous_format = QtCore.QSettings.defaultFormat()
+    QtCore.QSettings.setDefaultFormat(QtCore.QSettings.IniFormat)
+    QtCore.QSettings.setPath(QtCore.QSettings.IniFormat, QtCore.QSettings.UserScope, str(tmp_path / "settings"))
+    monkeypatch.setattr(main_window, "cleanup_stale_upload_temp_dirs", lambda: ())
+    try:
+        yield
+    finally:
+        QtCore.QSettings.setDefaultFormat(previous_format)
+
+
 def _import_qt():
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     QtCore = pytest.importorskip("PySide6.QtCore")
@@ -80,7 +98,7 @@ def test_startup_cleanup_retries_locked_dedicated_glb_stages_and_reports_failure
 
 def test_main_window_constructs_with_service_backed_fake_runtime_when_qt_available():
     QtCore, QtGui, QtWidgets = _import_qt()
-    _app(QtWidgets)
+    app = _app(QtWidgets)
 
     from dronautix_uploader.qt_app.main_window import create_main_window
     from dronautix_uploader.qt_app.runtime_services import (
@@ -113,6 +131,7 @@ def test_main_window_constructs_with_service_backed_fake_runtime_when_qt_availab
         assert window.stack.currentWidget() is window._pages["Upload"]
         window._projects_page.reload_projects()
     finally:
+        _process_until(app, lambda: not window._has_active_background_tasks())
         window.deleteLater()
 
 
@@ -190,7 +209,7 @@ def test_crs_repair_confirmation_is_marshaled_to_modal_dialog_with_no_as_default
 
 def test_main_window_survives_project_provider_errors_when_qt_available():
     QtCore, QtGui, QtWidgets = _import_qt()
-    _app(QtWidgets)
+    app = _app(QtWidgets)
 
     from dronautix_uploader.qt_app.main_window import create_main_window
 
@@ -206,6 +225,7 @@ def test_main_window_survives_project_provider_errors_when_qt_available():
         assert window.objectName() == "MainWindow"
         window._projects_page.reload_projects()
     finally:
+        _process_until(app, lambda: not window._has_active_background_tasks())
         window.deleteLater()
 
 
@@ -244,7 +264,7 @@ def test_projects_page_keeps_all_matching_rows_visible_after_selection_when_qt_a
         ]
         assert [model.index(row, 1).data() for row in range(model.rowCount())] == [
             "Beispielprojekt Nord",
-            "COPC Demo",
+                "Potree Demo",
             "Deaktivierter Upload",
         ]
         assert model.index(0, 3).data(QtCore.Qt.ForegroundRole).color().name() == "#2ecc71"
@@ -763,3 +783,316 @@ class FakeS3Client:
 class FailingProvider:
     def list_projects_for_management(self):
         raise RuntimeError("S3 unavailable")
+
+
+def _process_until(app, predicate, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and not predicate():
+        app.processEvents()
+        time.sleep(0.01)
+    return predicate()
+
+
+def _project_preview(project_id, name):
+    from dronautix_uploader.qt_app.project_management import ProjectPreview
+
+    return ProjectPreview(project_id, name, "Kunde", "potree", "Heute", "", False, ())
+
+
+def test_projects_provider_load_is_async_and_error_keeps_previous_rows(tmp_path):
+    QtCore, _QtGui, QtWidgets = _import_qt()
+    app = _app(QtWidgets)
+    from dronautix_uploader.qt_app.pages import create_projects_page
+
+    release = threading.Event()
+    timer_ticks = []
+
+    class Provider:
+        def list_projects_for_management(self):
+            release.wait(2)
+            raise RuntimeError("delayed S3 error")
+
+    page = create_projects_page(
+        QtCore, _QtGui, QtWidgets,
+        project_previews=(_project_preview("existing", "Vorhanden"),),
+        project_provider=Provider(),
+    )
+    timer = QtCore.QTimer(page)
+    timer.timeout.connect(lambda: timer_ticks.append(1))
+    timer.start(10)
+    try:
+        assert _process_until(app, lambda: bool(page._active_project_loads))
+        assert _process_until(app, lambda: len(timer_ticks) >= 3)
+        table = page.findChild(QtWidgets.QTableView, "ProjectsTable")
+        assert table.model().rowCount() == 1
+        release.set()
+        assert _process_until(app, lambda: not page._active_project_loads)
+        assert table.model().rowCount() == 1
+        assert table.model().index(0, 1).data() == "Vorhanden"
+        assert page.project_load_error_label.isVisibleTo(page)
+        assert "delayed S3 error" in page.project_load_error_label.text()
+    finally:
+        release.set()
+        _process_until(app, lambda: not page._active_project_loads)
+        page.deleteLater()
+
+
+def test_rapid_project_refresh_ignores_late_stale_result():
+    QtCore, QtGui, QtWidgets = _import_qt()
+    app = _app(QtWidgets)
+    from dronautix_uploader.qt_app.pages import create_projects_page
+
+    releases = (threading.Event(), threading.Event())
+    calls = []
+    lock = threading.Lock()
+
+    def provider():
+        with lock:
+            index = len(calls)
+            calls.append(index)
+        releases[index].wait(2)
+        name = "Alt" if index == 0 else "Neu"
+        return [({"id": str(index), "projekt": name, "kunde": "Kunde", "format": "potree"}, False)]
+
+    page = create_projects_page(QtCore, QtGui, QtWidgets, project_provider=provider)
+    try:
+        assert _process_until(app, lambda: len(calls) == 1)
+        page.reload_projects()
+        assert _process_until(app, lambda: len(calls) == 2)
+        releases[1].set()
+        table = page.findChild(QtWidgets.QTableView, "ProjectsTable")
+        loaded = _process_until(app, lambda: table.model().rowCount() == 1)
+        assert loaded, (
+            len(page._active_project_loads),
+            page.project_load_error_label.text(),
+            table.model().sourceModel().rowCount(),
+        )
+        assert table.model().index(0, 1).data() == "Neu"
+        releases[0].set()
+        assert _process_until(app, lambda: not page._active_project_loads)
+        assert table.model().index(0, 1).data() == "Neu"
+    finally:
+        for release in releases:
+            release.set()
+        _process_until(app, lambda: not page._active_project_loads)
+        page.deleteLater()
+
+
+def test_pending_update_resumes_after_project_loader_finishes(tmp_path, monkeypatch):
+    QtCore, QtGui, QtWidgets = _import_qt()
+    app = _app(QtWidgets)
+    from dronautix_uploader.qt_app import main_window
+    from dronautix_uploader.qt_app.project_management_actions import ProjectOperationSummary
+    from dronautix_uploader.qt_app.update_controller import UpdateCheckResult
+
+    release = threading.Event()
+
+    class Provider:
+        def list_projects_for_management(self):
+            release.wait(2)
+            return []
+
+    class Updater:
+        def __init__(self):
+            self.downloads = 0
+
+        def download_and_install(self, _manifest):
+            self.downloads += 1
+            return ProjectOperationSummary(status="failed", message="simulated")
+
+    updater = Updater()
+    monkeypatch.setattr(main_window, "cleanup_stale_upload_temp_dirs", lambda: ())
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question", lambda *args, **kwargs: QtWidgets.QMessageBox.Yes)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
+    window = main_window.create_main_window(
+        QtCore, QtGui, QtWidgets, project_provider=Provider(), update_controller=updater,
+    )
+    result = UpdateCheckResult("success", "available", True, "9.9", "setup.exe", "url", {"version": "9.9"})
+    try:
+        assert _process_until(app, lambda: bool(window._projects_page._active_project_loads))
+        window._offer_update_install(result)
+        assert window._pending_update_result is result
+        assert updater.downloads == 0
+        release.set()
+        assert _process_until(app, lambda: updater.downloads == 1)
+        assert _process_until(app, lambda: not window._has_active_background_tasks())
+        assert window._pending_update_result is None
+    finally:
+        release.set()
+        _process_until(app, lambda: not window._has_active_background_tasks())
+        window.deleteLater()
+
+
+def test_update_worker_exception_allows_a_later_install_attempt(monkeypatch):
+    QtCore, QtGui, QtWidgets = _import_qt()
+    app = _app(QtWidgets)
+    from dronautix_uploader.qt_app import main_window
+    from dronautix_uploader.qt_app.update_controller import UpdateCheckResult
+
+    class Updater:
+        def __init__(self):
+            self.downloads = 0
+
+        def download_and_install(self, _manifest):
+            self.downloads += 1
+            raise RuntimeError("installer failed unexpectedly")
+
+    updater = Updater()
+    monkeypatch.setattr(main_window, "cleanup_stale_upload_temp_dirs", lambda: ())
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question", lambda *args, **kwargs: QtWidgets.QMessageBox.Yes)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
+    window = main_window.create_main_window(QtCore, QtGui, QtWidgets, update_controller=updater)
+    result = UpdateCheckResult("success", "available", True, "9.9", "setup.exe", "url", {"version": "9.9"})
+    try:
+        window._offer_update_install(result)
+        assert _process_until(app, lambda: updater.downloads == 1 and not window._has_active_background_tasks())
+        assert window._update_install_started is False
+        window._offer_update_install(result)
+        assert _process_until(app, lambda: updater.downloads == 2 and not window._has_active_background_tasks())
+    finally:
+        _process_until(app, lambda: not window._has_active_background_tasks())
+        window.deleteLater()
+
+
+def test_update_check_and_install_are_deferred_during_active_operation(monkeypatch):
+    QtCore, QtGui, QtWidgets = _import_qt()
+    _app(QtWidgets)
+    from dronautix_uploader.qt_app import main_window
+    from dronautix_uploader.qt_app.update_controller import UpdateCheckResult
+
+    class Updater:
+        def __init__(self):
+            self.checks = 0
+            self.downloads = 0
+
+        def check_for_updates(self):
+            self.checks += 1
+
+        def download_and_install(self, _manifest):
+            self.downloads += 1
+
+    updater = Updater()
+    monkeypatch.setattr(main_window, "cleanup_stale_upload_temp_dirs", lambda: ())
+    window = main_window.create_main_window(QtCore, QtGui, QtWidgets, update_controller=updater)
+    active_operation = object()
+    window._active_tasks.append(active_operation)
+    result = UpdateCheckResult("success", "available", True, "9.9", "setup.exe", "url", {"version": "9.9"})
+    try:
+        window._run_update_check(silent=False)
+        window._offer_update_install(result)
+        window._offer_update_install(result)
+        assert updater.checks == 0 and updater.downloads == 0
+        assert window._pending_update_result is result
+        assert "wartet" in window.statusBar().currentMessage()
+    finally:
+        window._active_tasks.remove(active_operation)
+        window._pending_update_result = None
+        window.deleteLater()
+
+
+def test_update_download_blocks_refresh_and_connection_test(monkeypatch):
+    QtCore, QtGui, QtWidgets = _import_qt()
+    app = _app(QtWidgets)
+    from dronautix_uploader.qt_app import main_window
+    from dronautix_uploader.qt_app.project_management_actions import ProjectOperationSummary
+    from dronautix_uploader.qt_app.update_controller import UpdateCheckResult
+
+    release = threading.Event()
+
+    class Updater:
+        def download_and_install(self, _manifest):
+            release.wait(2)
+            return ProjectOperationSummary(status="failed", message="simulated")
+
+    class Settings:
+        calls = 0
+
+        def load_state(self):
+            from dronautix_uploader.qt_app.settings_controller import SettingsFormState
+            return SettingsFormState()
+
+        def preview(self):
+            from dronautix_uploader.qt_app.dashboard_settings_model import example_settings_preview
+            return example_settings_preview()
+
+        def test_connection(self, _state):
+            self.calls += 1
+
+    settings = Settings()
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question", lambda *args, **kwargs: QtWidgets.QMessageBox.Yes)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
+    window = main_window.create_main_window(
+        QtCore, QtGui, QtWidgets, update_controller=Updater(), settings_controller=settings,
+    )
+    result = UpdateCheckResult("success", "available", True, "9.9", "setup.exe", "url", {"version": "9.9"})
+    try:
+        assert _process_until(app, lambda: not window._has_active_background_tasks())
+        window._offer_update_install(result)
+        assert _process_until(app, lambda: window._update_install_started)
+        project_load_count = len(window._projects_page._active_project_loads)
+        window._projects_page.reload_projects()
+        window._handle_settings_action("test_connection", object())
+        app.processEvents()
+        assert len(window._projects_page._active_project_loads) == project_load_count == 0
+        assert settings.calls == 0
+    finally:
+        release.set()
+        _process_until(app, lambda: not window._has_active_background_tasks())
+        window.deleteLater()
+
+
+def test_update_rechecks_busy_state_after_confirmation(monkeypatch):
+    QtCore, QtGui, QtWidgets = _import_qt()
+    _app(QtWidgets)
+    from dronautix_uploader.qt_app import main_window
+    from dronautix_uploader.qt_app.update_controller import UpdateCheckResult
+
+    downloads = []
+
+    class Updater:
+        def download_and_install(self, manifest):
+            downloads.append(manifest)
+
+    window = main_window.create_main_window(QtCore, QtGui, QtWidgets, update_controller=Updater())
+    nested_task = object()
+
+    def nested_confirmation(*_args, **_kwargs):
+        window._active_tasks.append(nested_task)
+        return QtWidgets.QMessageBox.Yes
+
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question", nested_confirmation)
+    result = UpdateCheckResult("success", "available", True, "9.9", "setup.exe", "url", {"version": "9.9"})
+    try:
+        window._offer_update_install(result)
+        assert window._pending_update_result is result
+        assert window._update_install_started is False
+        assert downloads == []
+    finally:
+        window._active_tasks.remove(nested_task)
+        window._pending_update_result = None
+        window.deleteLater()
+
+
+def test_close_is_ignored_while_project_loader_is_running(monkeypatch):
+    QtCore, QtGui, QtWidgets = _import_qt()
+    app = _app(QtWidgets)
+    from dronautix_uploader.qt_app import main_window
+
+    release = threading.Event()
+    warnings = []
+    monkeypatch.setattr(main_window, "cleanup_stale_upload_temp_dirs", lambda: ())
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: warnings.append(args[2]))
+    window = main_window.create_main_window(
+        QtCore, QtGui, QtWidgets,
+        project_provider=lambda: release.wait(2) or (),
+    )
+    try:
+        assert _process_until(app, lambda: bool(window._projects_page._active_project_loads))
+        event = QtGui.QCloseEvent()
+        window.closeEvent(event)
+        assert event.isAccepted() is False
+        assert warnings and "zuerst abbrechen" in warnings[0]
+    finally:
+        release.set()
+        _process_until(app, lambda: not window._has_active_background_tasks())
+        window.deleteLater()

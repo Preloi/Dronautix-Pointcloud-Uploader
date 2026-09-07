@@ -197,7 +197,7 @@ def build_cutover_readiness(
             CutoverChecklistItem(
                 "Echter S3-Akzeptanztest",
                 real_s3_acceptance_passed,
-                "LAS/LAZ, COPC, Multi-Projekt und Projektverwaltung wurden gegen S3 getestet.",
+                "LAS/LAZ, Potree, Multi-Projekt und Projektverwaltung wurden gegen S3 getestet.",
             ),
             CutoverChecklistItem(
                 "GitHub Asset SHA",

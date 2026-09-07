@@ -1,6 +1,6 @@
-"""Dependency-free CRS auto-detection from LAS/LAZ/COPC headers and Potree metadata.
+"""Dependency-free CRS auto-detection from LAS/LAZ headers and Potree metadata.
 
-This is a UI-free port of the legacy detection logic. It parses LAS/LAZ/COPC VLR
+This is a UI-free port of the legacy detection logic. It parses LAS/LAZ VLR
 and EVLR records directly (no laspy/pyproj), so it works on compressed files
 without decompressing point data, and reads CRS from existing Potree projects.
 """
@@ -210,7 +210,7 @@ def _decode_geo_key_value(entry, ascii_params: str, double_params: list):
 
 
 def detect_las_crs(source_path: str) -> dict | None:
-    """Detect EPSG/WKT CRS from a LAS/LAZ/COPC header."""
+    """Detect EPSG/WKT CRS from a LAS/LAZ header."""
 
     records = read_las_projection_records(source_path)
     if not records:
@@ -382,7 +382,7 @@ def detect_potree_crs(directory_path: str) -> dict | None:
 
 
 def detect_pointcloud_crs(source_path: str) -> dict | None:
-    """Detect CRS from a LAS/LAZ/COPC file or an existing Potree directory."""
+    """Detect CRS from a LAS/LAZ file or an existing Potree directory."""
 
     if source_path and os.path.isdir(source_path):
         return detect_potree_crs(source_path)

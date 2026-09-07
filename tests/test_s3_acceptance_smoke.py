@@ -143,6 +143,8 @@ class FakeS3Client:
 
     def __init__(self):
         self.objects = {}
+        self.etags = {}
+        self.etag_sequence = 0
         self.put_keys = []
         self.puts = []
         self.uploads = []
@@ -151,9 +153,18 @@ class FakeS3Client:
     def get_object(self, Bucket, Key):
         if Key not in self.objects:
             raise self.exceptions.NoSuchKey(Key)
-        return {"Body": io.BytesIO(self.objects[Key])}
+        return {"Body": io.BytesIO(self.objects[Key]), "ETag": self.etags.setdefault(Key, '"seed"')}
 
-    def put_object(self, Bucket, Key, Body, ContentType=None, CacheControl=None):
+    def put_object(self, Bucket, Key, Body, ContentType=None, CacheControl=None, **conditions):
+        current_etag = self.etags.get(Key, '"seed"' if Key in self.objects else None)
+        if conditions.get("IfMatch") is not None and conditions["IfMatch"] != current_etag:
+            error = RuntimeError("PreconditionFailed")
+            error.response = {"Error": {"Code": "PreconditionFailed"}}
+            raise error
+        if conditions.get("IfNoneMatch") == "*" and Key in self.objects:
+            error = RuntimeError("PreconditionFailed")
+            error.response = {"Error": {"Code": "PreconditionFailed"}}
+            raise error
         self.put_keys.append(Key)
         self.puts.append(
             {
@@ -165,7 +176,9 @@ class FakeS3Client:
         )
         body = Body if isinstance(Body, bytes) else str(Body).encode("utf-8")
         self.objects[Key] = body
-        return {"ETag": '"fake"'}
+        self.etag_sequence += 1
+        self.etags[Key] = f'"fake-{self.etag_sequence}"'
+        return {"ETag": self.etags[Key]}
 
     def upload_file(self, local_path, bucket, key, ExtraArgs=None, Callback=None):
         data = Path(local_path).read_bytes()

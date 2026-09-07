@@ -1,19 +1,56 @@
 {
+  "version": "2.0",
+  "encoding": "BROTLI",
   "spacing": 0.125,
-  "source": "Raw",
+  "source": "Scan Potree",
   "points": 12345,
-  "name": "Raw",
-  "projection": "EPSG:4326",
-  "crs": "EPSG:4326",
-  "epsg": "EPSG:4326",
+  "offset": [
+    0,
+    0,
+    0
+  ],
+  "scale": [
+    0.001,
+    0.001,
+    0.001
+  ],
+  "hierarchy": {
+    "firstChunkSize": 22,
+    "stepSize": 4,
+    "depth": 0
+  },
+  "attributes": [
+    {
+      "name": "position",
+      "type": "int32",
+      "numElements": 3,
+      "elementSize": 4,
+      "size": 12
+    }
+  ],
+  "boundingBox": {
+    "min": [
+      0,
+      0,
+      0
+    ],
+    "max": [
+      1,
+      1,
+      1
+    ]
+  },
+  "projection": "EPSG:25832",
+  "crs": "EPSG:25832",
+  "epsg": "EPSG:25832",
   "crs_info": {
-    "value": "EPSG:4326",
-    "projection": "EPSG:4326",
-    "epsg": "EPSG:4326",
-    "code": "4326"
+    "value": "EPSG:25832",
+    "projection": "EPSG:25832",
+    "epsg": "EPSG:25832",
+    "code": "25832"
   },
   "srs": {
     "authority": "EPSG",
-    "horizontal": "4326"
+    "horizontal": "25832"
   }
 }

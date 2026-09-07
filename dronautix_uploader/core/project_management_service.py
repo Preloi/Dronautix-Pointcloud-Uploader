@@ -3,24 +3,25 @@
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 import json
 import math
 import os
-import struct
+import shutil
 import tempfile
 from typing import Any, Callable
 from uuid import uuid4
 
-from .constants import BUCKET_NAME, COPC_OBJECT_NAME, S3_INDEX_CACHE_CONTROL
+from .constants import BUCKET_NAME, S3_INDEX_CACHE_CONTROL
 from .contracts import CancelCallback, DownloadResult, ModelUploadInput, ProgressEvent, ProjectOperationResult
-from .crs_detection import detect_crs_from_metadata_dict, detect_las_crs
+from .crs_detection import detect_crs_from_metadata_dict
 from .crs_service import CrsValidationError, extract_pointcloud_crs_metadata, normalize_crs_metadata
 from .glb_optimization_service import GLBOptimizationService
 from .naming_service import sanitize_folder_name
 from .naming_service import build_project_paths
-from .metadata_service import write_potree_metadata_crs_for_sources
+from .metadata_service import stage_potree_metadata_crs_for_sources
 from .pointcloud_preparation_service import PointcloudPreparationRequest, prepare_pointcloud_sources
 from .project_index_service import (
     append_project_history,
@@ -48,9 +49,12 @@ from .project_operations import (
     replace_single_project_pointcloud as replace_single_project_pointcloud_operation,
     replace_single_project_model as replace_single_project_model_operation,
     resolve_unique_multi_project_child,
-    validate_explicit_multi_project,
+    validate_project_pointcloud_add_target,
 )
-from .project_repository import ProjectMetadataRepository
+from .project_repository import (
+    ProjectMetadataRepository,
+    ProjectMetadataWriteUncertainError,
+)
 from .s3_service import collect_project_objects, delete_s3_objects
 from .upload_workflow_service import (
     build_model_pointcloud_spatial_warning_for_bounds,
@@ -149,12 +153,13 @@ class ProjectManagementService:
             if not update_project_in_index(index_data, project_id, apply_rename):
                 raise ValueError(f"Projekt mit ID '{project_id}' wurde nicht gefunden.")
             for update in metadata_updates:
-                _put_s3_metadata(
+                update["written_etag"] = _put_s3_metadata(
                     self.s3_client,
                     self._bucket_name,
                     update["key"],
                     update["updated"],
                     update["updated_headers"],
+                    expected_etag=update["original_etag"],
                 )
                 applied_metadata_updates.append(update)
             if not self._save_projects_index(index_data):
@@ -164,6 +169,8 @@ class ProjectManagementService:
             index_data.update(original_index)
             rollback_errors = []
             for update in reversed(applied_metadata_updates):
+                if _is_uncertain_index_write(error, self.repository):
+                    break
                 try:
                     _put_s3_metadata(
                         self.s3_client,
@@ -171,6 +178,7 @@ class ProjectManagementService:
                         update["key"],
                         update["original"],
                         update["original_headers"],
+                        expected_etag=update["written_etag"],
                     )
                 except Exception as rollback_error:
                     rollback_errors.append(f"{update['key']}: {rollback_error}")
@@ -188,7 +196,7 @@ class ProjectManagementService:
 
     def delete_project(self, project_id: str):
         index_data = self.repository.load_projects_index()
-        project_info, _is_disabled = self._find_project(index_data, project_id)
+        project_info, _is_disabled = self._find_project(index_data, project_id, allow_cleanup_pending=True)
         deleted_data = self.repository.load_deleted_projects()
 
         return delete_project_operation(
@@ -361,27 +369,27 @@ class ProjectManagementService:
         )
         prepared_sources = _attach_source_overrides(prepared_sources, source_overrides)
         prepared_sources = _attach_crs_info(prepared_sources, tuple(source_paths), crs_info_by_source_path)
-        write_potree_metadata_crs_for_sources(prepared_sources)
-        prepared_clouds = prepare_cloud_uploads(prepared_sources, version_viewer_root, version_s3_prefix)
-        existing_keys = collect_project_objects(
-            self.s3_client,
-            project_s3_prefix,
-            bucket_name=self._bucket_name,
-        )
-        return replace_project_pointclouds_operation(
-            s3_client=self.s3_client,
-            index_data=index_data,
-            project_id=project_id,
-            base_viewer_path=project_viewer_root,
-            s3_prefix=project_s3_prefix,
-            prepared_clouds=prepared_clouds,
-            existing_keys=tuple(existing_keys),
-            save_index=self._save_projects_index,
-            delete_keys=lambda keys: delete_s3_objects(self.s3_client, keys, bucket_name=self._bucket_name),
-            on_progress=on_progress,
-            bucket_name=self._bucket_name,
-            timestamp=self.timestamp_factory(),
-        )
+        with _staged_source_metadata(prepared_sources) as staged_sources:
+            prepared_clouds = prepare_cloud_uploads(staged_sources, version_viewer_root, version_s3_prefix)
+            existing_keys = collect_project_objects(
+                self.s3_client,
+                project_s3_prefix,
+                bucket_name=self._bucket_name,
+            )
+            return replace_project_pointclouds_operation(
+                s3_client=self.s3_client,
+                index_data=index_data,
+                project_id=project_id,
+                base_viewer_path=project_viewer_root,
+                s3_prefix=project_s3_prefix,
+                prepared_clouds=prepared_clouds,
+                existing_keys=tuple(existing_keys),
+                save_index=self._save_projects_index,
+                delete_keys=lambda keys: delete_s3_objects(self.s3_client, keys, bucket_name=self._bucket_name),
+                on_progress=on_progress,
+                bucket_name=self._bucket_name,
+                timestamp=self.timestamp_factory(),
+            )
 
     def add_project_pointclouds(
         self,
@@ -392,7 +400,7 @@ class ProjectManagementService:
         index_data = self.repository.load_projects_index()
         project_info, _is_disabled = self._find_project(index_data, project_id)
         project_viewer_root, project_s3_prefix = self._stable_project_roots(project_info)
-        validate_explicit_multi_project(project_info, project_viewer_root, project_s3_prefix)
+        validate_project_pointcloud_add_target(project_info, project_viewer_root, project_s3_prefix)
         version_viewer_root, version_s3_prefix = self._versioned_roots(project_info)
         versioned_clouds = tuple(
             rebase_prepared_cloud_upload(cloud, version_viewer_root, version_s3_prefix)
@@ -427,7 +435,7 @@ class ProjectManagementService:
         index_data = self.repository.load_projects_index()
         project_info, _is_disabled = self._find_project(index_data, project_id)
         project_viewer_root, project_s3_prefix = self._stable_project_roots(project_info)
-        validate_explicit_multi_project(project_info, project_viewer_root, project_s3_prefix)
+        validate_project_pointcloud_add_target(project_info, project_viewer_root, project_s3_prefix)
         prepared_sources = prepare_pointcloud_sources(
             PointcloudPreparationRequest(
                 sources=tuple(source_paths),
@@ -440,22 +448,22 @@ class ProjectManagementService:
         )
         prepared_sources = _attach_source_overrides(prepared_sources, source_overrides)
         prepared_sources = _attach_crs_info(prepared_sources, tuple(source_paths), crs_info_by_source_path)
-        write_potree_metadata_crs_for_sources(prepared_sources)
         version_viewer_root, version_s3_prefix = self._versioned_roots(project_info)
-        prepared_clouds = prepare_cloud_uploads(prepared_sources, version_viewer_root, version_s3_prefix)
-        return add_project_pointclouds_operation(
-            s3_client=self.s3_client,
-            index_data=index_data,
-            project_id=project_id,
-            project_viewer_root=project_viewer_root,
-            project_s3_prefix=project_s3_prefix,
-            prepared_clouds=prepared_clouds,
-            save_index=self._save_projects_index,
-            delete_keys=lambda keys: delete_s3_objects(self.s3_client, keys, bucket_name=self._bucket_name),
-            on_progress=on_progress,
-            bucket_name=self._bucket_name,
-            timestamp=self.timestamp_factory(),
-        )
+        with _staged_source_metadata(prepared_sources) as staged_sources:
+            prepared_clouds = prepare_cloud_uploads(staged_sources, version_viewer_root, version_s3_prefix)
+            return add_project_pointclouds_operation(
+                s3_client=self.s3_client,
+                index_data=index_data,
+                project_id=project_id,
+                project_viewer_root=project_viewer_root,
+                project_s3_prefix=project_s3_prefix,
+                prepared_clouds=prepared_clouds,
+                save_index=self._save_projects_index,
+                delete_keys=lambda keys: delete_s3_objects(self.s3_client, keys, bucket_name=self._bucket_name),
+                on_progress=on_progress,
+                bucket_name=self._bucket_name,
+                timestamp=self.timestamp_factory(),
+            )
 
     def remove_project_pointcloud(
         self,
@@ -498,6 +506,7 @@ class ProjectManagementService:
     def remove_project_model(self, project_id: str, target_model_s3_path: str):
         index_data = self.repository.load_projects_index()
         project_info, _is_disabled = self._find_project(index_data, project_id)
+        _ensure_potree_project(project_info)
         target_path = str(target_model_s3_path or "").strip().rstrip("/")
         models = project_info.get("models")
         if not isinstance(models, list) or not any(
@@ -597,42 +606,42 @@ class ProjectManagementService:
             (source_path,),
             {source_path: crs_info} if crs_info else None,
         )
-        write_potree_metadata_crs_for_sources(prepared_sources)
         project_viewer_root, project_s3_prefix = self._stable_project_roots(project_info)
         version_viewer_root, version_s3_prefix = self._versioned_roots(project_info)
-        prepared_cloud = prepare_cloud_uploads(
-            prepared_sources,
-            version_viewer_root,
-            version_s3_prefix,
-        )[0]
-        pointclouds = project_info.get("pointclouds")
-        has_explicit_pointclouds = isinstance(pointclouds, list) and bool(pointclouds)
-        if not has_explicit_pointclouds and self._has_pointcloud_s3_path(project_info, target_path):
-            prepared_cloud = prepare_single_project_upload(
-                prepared_sources[0],
+        with _staged_source_metadata(prepared_sources) as staged_sources:
+            prepared_cloud = prepare_cloud_uploads(
+                staged_sources,
                 version_viewer_root,
                 version_s3_prefix,
+            )[0]
+            pointclouds = project_info.get("pointclouds")
+            has_explicit_pointclouds = isinstance(pointclouds, list) and bool(pointclouds)
+            if not has_explicit_pointclouds and self._has_pointcloud_s3_path(project_info, target_path):
+                prepared_cloud = prepare_single_project_upload(
+                    staged_sources[0],
+                    version_viewer_root,
+                    version_s3_prefix,
+                )
+            existing_target_keys = collect_project_objects(
+                self.s3_client,
+                target_path,
+                bucket_name=self._bucket_name,
             )
-        existing_target_keys = collect_project_objects(
-            self.s3_client,
-            target_path,
-            bucket_name=self._bucket_name,
-        )
-        return replace_single_project_pointcloud_operation(
-            s3_client=self.s3_client,
-            index_data=index_data,
-            project_id=project_id,
-            base_viewer_path=project_viewer_root,
-            s3_prefix=project_s3_prefix,
-            prepared_cloud=prepared_cloud,
-            target_pointcloud_s3_path=target_path,
-            existing_target_keys=tuple(existing_target_keys),
-            save_index=self._save_projects_index,
-            delete_keys=lambda keys: delete_s3_objects(self.s3_client, keys, bucket_name=self._bucket_name),
-            on_progress=on_progress,
-            bucket_name=self._bucket_name,
-            timestamp=self.timestamp_factory(),
-        )
+            return replace_single_project_pointcloud_operation(
+                s3_client=self.s3_client,
+                index_data=index_data,
+                project_id=project_id,
+                base_viewer_path=project_viewer_root,
+                s3_prefix=project_s3_prefix,
+                prepared_cloud=prepared_cloud,
+                target_pointcloud_s3_path=target_path,
+                existing_target_keys=tuple(existing_target_keys),
+                save_index=self._save_projects_index,
+                delete_keys=lambda keys: delete_s3_objects(self.s3_client, keys, bucket_name=self._bucket_name),
+                on_progress=on_progress,
+                bucket_name=self._bucket_name,
+                timestamp=self.timestamp_factory(),
+            )
 
     def replace_single_project_model_from_source(
         self,
@@ -647,6 +656,7 @@ class ProjectManagementService:
     ):
         index_data = self.repository.load_projects_index()
         project_info, _is_disabled = self._find_project(index_data, project_id)
+        _ensure_potree_project(project_info)
         target_path = str(target_model_s3_path or "").strip().rstrip("/")
         models = project_info.get("models")
         matches = [
@@ -735,6 +745,8 @@ class ProjectManagementService:
                     self._bucket_name,
                     locals().get("remote_backups", ()),
                     repair_attempted=bool(crs_repair_plan),
+                    operation_error=error,
+                    projects_index_key=getattr(self.repository, "projects_index_key", "projects_index.json"),
                 )
                 if rollback_errors:
                     raise RuntimeError(f"CRS-Reparatur-Rollback unvollständig: {'; '.join(rollback_errors)}") from error
@@ -771,6 +783,7 @@ class ProjectManagementService:
 
         index_data = self.repository.load_projects_index()
         project_info, _is_disabled = self._find_project(index_data, project_id)
+        _ensure_potree_project(project_info)
         project_crs_info, crs_repair_plan = _resolve_project_model_crs(
             project_info, self.s3_client, bucket_name=self._bucket_name
         )
@@ -851,6 +864,8 @@ class ProjectManagementService:
                     self._bucket_name,
                     locals().get("remote_backups", ()),
                     repair_attempted=bool(crs_repair_plan),
+                    operation_error=error,
+                    projects_index_key=getattr(self.repository, "projects_index_key", "projects_index.json"),
                 )
                 if rollback_errors:
                     raise RuntimeError(f"CRS-Reparatur-Rollback unvollständig: {'; '.join(rollback_errors)}") from error
@@ -883,6 +898,7 @@ class ProjectManagementService:
             raise ValueError("Manuelle CRS-Reparatur benötigt ein eindeutiges horizontales und vertikales CRS.")
         index_data = self.repository.load_projects_index()
         project, _is_disabled = self._find_project(index_data, project_id)
+        _ensure_potree_project(project)
         plan = _manual_crs_repair_plan(
             project,
             self.s3_client,
@@ -923,30 +939,36 @@ class ProjectManagementService:
                 self._bucket_name,
                 remote_backups,
                 repair_attempted=True,
+                operation_error=error,
+                projects_index_key=getattr(self.repository, "projects_index_key", "projects_index.json"),
             )
             if rollback_errors:
                 raise RuntimeError(f"CRS-Reparatur-Rollback unvollständig: {'; '.join(rollback_errors)}") from error
             raise
         return ProjectOperationResult(status="success", project_id=project_id, message="CRS-Metadaten wurden repariert.")
 
-    def _find_project(self, index_data: dict[str, Any], project_id: str) -> tuple[dict[str, Any], bool]:
+    def _find_project(
+        self,
+        index_data: dict[str, Any],
+        project_id: str,
+        *,
+        allow_cleanup_pending: bool = False,
+    ) -> tuple[dict[str, Any], bool]:
         normalized_project_id = str(project_id).strip()
         for project, is_disabled in get_all_projects_for_management(index_data):
             if str(project.get("id", "")).strip() == normalized_project_id:
+                if project.get("cleanup_pending") and not allow_cleanup_pending:
+                    raise RuntimeError(
+                        "Projektloeschung ist noch nicht abgeschlossen; nur ein erneuter Loeschversuch ist erlaubt."
+                    )
                 return project, is_disabled
         raise ValueError(f"Projekt mit ID '{project_id}' wurde nicht gefunden.")
 
     def _project_viewer_root(self, project: dict[str, Any]) -> str:
-        viewer_path = str(project.get("viewer_path", "")).strip().rstrip("/")
-        if viewer_path.endswith(f"/{COPC_OBJECT_NAME}"):
-            return viewer_path[: -len(f"/{COPC_OBJECT_NAME}")]
-        return viewer_path
+        return str(project.get("viewer_path", "")).strip().rstrip("/")
 
     def _project_s3_prefix(self, project: dict[str, Any]) -> str:
-        s3_path = str(project.get("s3_path", "")).strip().rstrip("/")
-        if s3_path.endswith(f"/{COPC_OBJECT_NAME}"):
-            return s3_path[: -len(f"/{COPC_OBJECT_NAME}")]
-        return s3_path
+        return str(project.get("s3_path", "")).strip().rstrip("/")
 
     def _has_pointcloud_s3_path(self, project: dict[str, Any], target_s3_path: str) -> bool:
         pointclouds = project.get("pointclouds")
@@ -985,6 +1007,17 @@ class ProjectManagementService:
         return True if result is None else bool(result)
 
 
+@contextmanager
+def _staged_source_metadata(sources):
+    parent_root = get_glb_upload_staging_root()
+    os.makedirs(parent_root, exist_ok=True)
+    staging_root = tempfile.mkdtemp(prefix=".potree-metadata-", dir=parent_root)
+    try:
+        yield stage_potree_metadata_crs_for_sources(sources, staging_root)
+    finally:
+        shutil.rmtree(staging_root, ignore_errors=True)
+
+
 def _prepare_potree_name_updates(
     s3_client,
     bucket_name: str,
@@ -1015,8 +1048,8 @@ def _prepare_potree_name_updates(
             entry.get("format", "")
             or (project.get("format", "") if not has_explicit_pointclouds else "")
         ).strip().casefold()
-        if pointcloud_format not in {"potree", "copc"}:
-            pointcloud_format = "copc" if s3_path.casefold().endswith((".las", ".laz")) else "potree"
+        if pointcloud_format != "potree":
+            continue
         if pointcloud_format != "potree" or not s3_path:
             continue
 
@@ -1037,6 +1070,7 @@ def _prepare_potree_name_updates(
         metadata["name"] = display_name
         updated = (json.dumps(metadata, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
         original_headers = _s3_object_headers(response)
+        original_etag = _require_s3_etag(response, metadata_key)
         updated_headers = dict(original_headers)
         updated_headers["CacheControl"] = S3_INDEX_CACHE_CONTROL
         updates.append(
@@ -1046,6 +1080,7 @@ def _prepare_potree_name_updates(
                 "updated": updated,
                 "original_headers": original_headers,
                 "updated_headers": updated_headers,
+                "original_etag": original_etag,
             }
         )
     return tuple(updates)
@@ -1211,11 +1246,8 @@ def _bounds_from_metadata(entry: dict[str, Any]):
 
 
 def _s3_pointcloud_bounds(s3_client, bucket_name: str, cloud_path: str, cloud_format: str = ""):
-    if cloud_format == "copc" and not cloud_path.casefold().endswith((".las", ".laz")):
-        cloud_path = f"{cloud_path}/{COPC_OBJECT_NAME}"
-    if cloud_path.casefold().endswith((".las", ".laz")):
-        bounds = _read_s3_las_bounds(s3_client, bucket_name, cloud_path)
-        return (bounds,) if bounds is not None else ()
+    if cloud_format != "potree" or cloud_path.casefold().endswith((".las", ".laz")):
+        return ()
     return tuple(
         bounds
         for filename in ("metadata.json", "cloud.js")
@@ -1232,17 +1264,6 @@ def _read_s3_potree_bounds(s3_client, bucket_name: str, key: str):
     except Exception:
         return None
     return _bounds_from_metadata(document)
-
-
-def _read_s3_las_bounds(s3_client, bucket_name: str, key: str):
-    try:
-        data = _read_s3_body(s3_client.get_object(Bucket=bucket_name, Key=key, Range="bytes=0-226"))
-    except Exception:
-        return None
-    if len(data) < 227 or data[:4] != b"LASF":
-        return None
-    max_x, min_x, max_y, min_y, max_z, min_z = struct.unpack_from("<6d", data, 179)
-    return _validated_bounds((min_x, min_y, min_z), (max_x, max_y, max_z))
 
 
 def _read_s3_body(response) -> bytes:
@@ -1292,6 +1313,15 @@ def _cloud_entries(project: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     return tuple(entry for entry in pointclouds if isinstance(entry, dict)) if isinstance(pointclouds, list) else (project,)
 
 
+def _ensure_potree_project(project: dict[str, Any]) -> None:
+    formats = {
+        str(entry.get("format", project.get("format", ""))).strip().casefold()
+        for entry in _cloud_entries(project)
+    }
+    if any(cloud_format and cloud_format != "potree" for cloud_format in formats):
+        raise ValueError("Das Projekt enthaelt ein nicht unterstuetztes Punktwolkenformat.")
+
+
 def _cloud_label(entry: dict[str, Any], index: int) -> str:
     return str(entry.get("name") or entry.get("slug") or f"Punktwolke {index + 1}").strip()
 
@@ -1318,7 +1348,7 @@ def _is_missing_s3_object_error(error: Exception) -> bool:
 def _s3_potree_documents(s3_client, bucket_name: str, entry: dict[str, Any], project: dict[str, Any]):
     cloud_path = str(entry.get("s3_path", "")).strip().rstrip("/")
     cloud_format = str(entry.get("format", project.get("format", ""))).strip().casefold()
-    if not cloud_path or cloud_format == "copc" or cloud_path.casefold().endswith((".las", ".laz")):
+    if not cloud_path or cloud_format != "potree" or cloud_path.casefold().endswith((".las", ".laz")):
         return ()
     documents = []
     for filename in ("metadata.json", "cloud.js"):
@@ -1341,46 +1371,8 @@ def _s3_potree_documents(s3_client, bucket_name: str, entry: dict[str, Any], pro
             raise ValueError(f"Potree-Metadaten sind ungültig: {key}")
         headers = _s3_object_headers(response)
         headers.setdefault("ContentType", "application/javascript" if filename == "cloud.js" else "application/json")
-        documents.append((key, document, raw, filename == "cloud.js", headers))
+        documents.append((key, document, raw, filename == "cloud.js", headers, _require_s3_etag(response, key)))
     return tuple(documents)
-
-
-def _s3_copc_crs(s3_client, bucket_name: str, entry: dict[str, Any], project: dict[str, Any]):
-    cloud_path = str(entry.get("s3_path", "")).strip().rstrip("/")
-    cloud_format = str(entry.get("format", project.get("format", ""))).strip().casefold()
-    if cloud_format != "copc":
-        return None
-    if not cloud_path.casefold().endswith((".las", ".laz")):
-        cloud_path = f"{cloud_path}/{COPC_OBJECT_NAME}"
-    try:
-        header = _read_s3_body(s3_client.get_object(Bucket=bucket_name, Key=cloud_path, Range="bytes=0-374"))
-        if len(header) < 104 or header[:4] != b"LASF":
-            raise ValueError("ungültiger LAS/COPC-Header")
-        point_data_offset = struct.unpack_from("<I", header, 96)[0]
-        if not 0 < point_data_offset <= 1024 * 1024:
-            raise ValueError("ungültiger oder zu großer VLR-Bereich")
-        records = _read_s3_body(
-            s3_client.get_object(Bucket=bucket_name, Key=cloud_path, Range=f"bytes=0-{point_data_offset - 1}")
-        )
-    except Exception as error:
-        raise RuntimeError(f"COPC-CRS konnte nicht sicher gelesen werden: {cloud_path}: {error}") from error
-    temp_path = ""
-    try:
-        with tempfile.NamedTemporaryFile(prefix="dronautix-crs-", suffix=".copc.laz", delete=False) as temporary:
-            temporary.write(records)
-            temp_path = temporary.name
-        crs_info = detect_las_crs(temp_path)
-    except Exception as error:
-        raise RuntimeError(f"COPC-CRS konnte nicht sicher gelesen werden: {cloud_path}: {error}") from error
-    finally:
-        if temp_path:
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
-    if not crs_info:
-        raise ValueError(f"COPC-CRS enthält keine technische Referenz: {cloud_path}")
-    return crs_info
 
 
 def _resolve_project_model_crs(project: dict[str, Any], s3_client, *, bucket_name: str):
@@ -1405,9 +1397,8 @@ def _resolve_project_model_crs(project: dict[str, Any], s3_client, *, bucket_nam
     entry_sources: list[tuple[int, list[dict[str, Any]]]] = []
     for index, entry in enumerate(entries):
         sources = [indexed_crs[index]]
-        for _key, document, _raw, _cloudjs, _headers in _s3_potree_documents(s3_client, bucket_name, entry, project):
+        for _key, document, _raw, _cloudjs, _headers, _etag in _s3_potree_documents(s3_client, bucket_name, entry, project):
             sources.append(detect_crs_from_metadata_dict(document))
-        sources.append(_s3_copc_crs(s3_client, bucket_name, entry, project))
         valid_sources = [source for source in sources if source]
         for source in valid_sources:
             if (complete := _complete_crs_info(source)) is not None:
@@ -1461,9 +1452,8 @@ def _manual_crs_repair_plan(
     for index, entry in enumerate(entries):
         index_crs = extract_pointcloud_crs_metadata(entry)
         sources.append(index_crs)
-        for _key, document, _raw, _cloudjs, _headers in _s3_potree_documents(s3_client, bucket_name, entry, project):
+        for _key, document, _raw, _cloudjs, _headers, _etag in _s3_potree_documents(s3_client, bucket_name, entry, project):
             sources.append(detect_crs_from_metadata_dict(document))
-        sources.append(_s3_copc_crs(s3_client, bucket_name, entry, project))
         if _complete_crs_info(index_crs) is None or (allow_conflicting_overwrite and _crs_conflicts_with(index_crs, crs_info)):
             child_indices.append(index)
     if any(_crs_conflicts_with(source, crs_info) for source in sources if source) and not allow_conflicting_overwrite:
@@ -1570,7 +1560,9 @@ def _repair_s3_potree_crs_metadata(
         for index, entry in enumerate(_cloud_entries(project)):
             if index not in target_indices:
                 continue
-            for key, document, raw, cloudjs, headers in _s3_potree_documents(s3_client, bucket_name, entry, project):
+            for key, document, raw, cloudjs, headers, original_etag in _s3_potree_documents(
+                s3_client, bucket_name, entry, project
+            ):
                 existing_crs = detect_crs_from_metadata_dict(document)
                 if _complete_crs_info(existing_crs) is not None and not _crs_conflicts_with(existing_crs, crs_info):
                     continue
@@ -1584,8 +1576,15 @@ def _repair_s3_potree_crs_metadata(
                 )
                 if payload == raw:
                     continue
-                _put_s3_metadata(s3_client, bucket_name, key, payload, headers)
-                backups.append((key, raw, headers))
+                written_etag = _put_s3_metadata(
+                    s3_client,
+                    bucket_name,
+                    key,
+                    payload,
+                    headers,
+                    expected_etag=original_etag,
+                )
+                backups.append((key, raw, headers, written_etag))
     except Exception as error:
         try:
             _restore_s3_metadata(s3_client, bucket_name, backups)
@@ -1597,9 +1596,16 @@ def _repair_s3_potree_crs_metadata(
 
 def _restore_s3_metadata(s3_client, bucket_name: str, backups) -> None:
     failures = []
-    for key, raw, headers in reversed(tuple(backups)):
+    for key, raw, headers, written_etag in reversed(tuple(backups)):
         try:
-            _put_s3_metadata(s3_client, bucket_name, key, raw, headers)
+            _put_s3_metadata(
+                s3_client,
+                bucket_name,
+                key,
+                raw,
+                headers,
+                expected_etag=written_etag,
+            )
         except Exception as error:
             failures.append(f"{key}: {error}")
     if failures:
@@ -1616,15 +1622,42 @@ def _s3_object_headers(response) -> dict[str, Any]:
     }
 
 
-def _put_s3_metadata(s3_client, bucket_name: str, key: str, payload: bytes, headers: dict[str, Any]) -> None:
+def _require_s3_etag(response, key: str) -> str:
+    etag = str(response.get("ETag", "") or "").strip() if isinstance(response, dict) else ""
+    if not etag:
+        raise RuntimeError(f"S3-Metadaten liefern keinen ETag fuer sichere Aenderungen: {key}")
+    return etag
+
+
+def _put_s3_metadata(
+    s3_client,
+    bucket_name: str,
+    key: str,
+    payload: bytes,
+    headers: dict[str, Any],
+    *,
+    expected_etag: str,
+) -> str:
     arguments = dict(headers)
     arguments.setdefault("ContentType", "application/json")
-    s3_client.put_object(
-        Bucket=bucket_name,
-        Key=key,
-        Body=payload,
-        **arguments,
-    )
+    try:
+        response = s3_client.put_object(
+            Bucket=bucket_name,
+            Key=key,
+            Body=payload,
+            IfMatch=expected_etag,
+            **arguments,
+        )
+    except Exception as error:
+        response_data = getattr(error, "response", None)
+        code = str((response_data or {}).get("Error", {}).get("Code", "")) if isinstance(response_data, dict) else ""
+        if code in {"PreconditionFailed", "412", "ConditionalRequestConflict"}:
+            raise RuntimeError(f"S3-Metadatenkonflikt bei {key}; Datei wurde inzwischen geaendert.") from error
+        raise ProjectMetadataWriteUncertainError(key) from error
+    etag = str((response or {}).get("ETag", "") or "").strip()
+    if not etag:
+        raise ProjectMetadataWriteUncertainError(key)
+    return etag
 
 
 def _rollback_crs_repair_failure(
@@ -1635,22 +1668,28 @@ def _rollback_crs_repair_failure(
     remote_backups,
     *,
     repair_attempted: bool,
+    operation_error: Exception | None = None,
+    projects_index_key: str = "projects_index.json",
 ) -> tuple[str, ...]:
     """Best-effort restore without re-entering any model operation."""
 
     failures = []
-    if remote_backups:
+    if remote_backups and not (
+        isinstance(operation_error, ProjectMetadataWriteUncertainError)
+        and str(operation_error.key) == str(projects_index_key)
+    ):
         try:
             _restore_s3_metadata(s3_client, bucket_name, remote_backups)
         except RuntimeError as error:
             failures.append(f"S3-Metadaten: {error}")
-    if repair_attempted:
-        try:
-            if not save_index(index_data):
-                failures.append("projects_index: Speichern wurde abgelehnt")
-        except Exception as error:
-            failures.append(f"projects_index: {error}")
     return tuple(failures)
+
+
+def _is_uncertain_index_write(error: Exception, repository) -> bool:
+    return (
+        isinstance(error, ProjectMetadataWriteUncertainError)
+        and str(error.key) == str(getattr(repository, "projects_index_key", "projects_index.json"))
+    )
 
 
 def _restore_index_data(index_data: dict[str, Any], snapshot: dict[str, Any]) -> None:

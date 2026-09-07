@@ -23,7 +23,6 @@ EXPECTED_REPO = "Preloi/Dronautix-Pointcloud-Uploader"
 DEFAULT_CANDIDATE_MANIFEST_PATH = "artifacts/v2-final-candidate-release.json"
 DEFAULT_S3_ACCEPTANCE_SCENARIOS = (
     "single_potree_upload",
-    "single_copc_upload",
     "multi_mix_upload",
     "vertical_crs_upload",
     "existing_potree_folder_upload",

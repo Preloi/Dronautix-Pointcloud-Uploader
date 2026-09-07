@@ -28,7 +28,7 @@ from .contracts import (
 from .local_conversion_service import ConverterRunner
 from .glb_optimization_service import GLBOptimizationService
 from .metadata_service import get_common_crs_info
-from .metadata_service import write_potree_metadata_crs_for_sources
+from .metadata_service import stage_potree_metadata_crs_for_sources
 from .naming_service import build_project_paths
 from .pointcloud_preparation_service import (
     PointcloudPreparationRequest,
@@ -163,12 +163,11 @@ class UploadWorkflowService:
         if not request.projekt.strip():
             raise ValueError("Projektname ist fuer den Upload erforderlich.")
 
-        # Die Konvertierungsphase kennt keinen eigenen Abbruch-Parameter;
-        # der Guard prueft bei jedem Progress-Event (Potree loggt laufend).
         guarded_progress = make_cancel_guarded_progress(on_progress, cancel_requested)
         prepared_models = ()
         staging_root = get_glb_upload_staging_root()
         staging_run_root = ""
+        metadata_staging_root = ""
         try:
             prepared_sources = prepare_pointcloud_sources(
                 PointcloudPreparationRequest(
@@ -179,6 +178,7 @@ class UploadWorkflowService:
                 ),
                 on_progress=guarded_progress,
                 converter_runner=converter_runner,
+                cancel_requested=cancel_requested,
             )
             if cancel_requested is not None and cancel_requested():
                 raise OperationCancelledError()
@@ -187,7 +187,10 @@ class UploadWorkflowService:
                 request.source_paths,
                 request.crs_info_by_source_path,
             )
-            write_potree_metadata_crs_for_sources(prepared_sources)
+            temp_root = tempfile.gettempdir()
+            os.makedirs(temp_root, exist_ok=True)
+            metadata_staging_root = tempfile.mkdtemp(prefix=".potree-metadata-", dir=temp_root)
+            prepared_sources = stage_potree_metadata_crs_for_sources(prepared_sources, metadata_staging_root)
 
             project_id = self.id_factory()
             paths = build_project_paths(request.kunde, request.projekt, project_id)
@@ -247,6 +250,8 @@ class UploadWorkflowService:
                     staging_root=staging_root,
                     on_progress=on_progress,
                 )
+            if metadata_staging_root:
+                shutil.rmtree(metadata_staging_root, ignore_errors=True)
 
     def _save_projects_index(self, index_data: dict[str, Any]) -> bool:
         result = self.repository.save_projects_index(index_data)

@@ -43,17 +43,18 @@ class LocalConversionController:
         else:
             raise ValueError("LocalConversionDialogState oder LocalConversionRequest erforderlich.")
 
-        kwargs: dict[str, Any] = {"on_progress": make_cancel_guarded_progress(on_progress, cancel_requested)}
+        kwargs: dict[str, Any] = {
+            "on_progress": make_cancel_guarded_progress(on_progress, cancel_requested),
+            "cancel_requested": cancel_requested,
+        }
         if self.converter_runner is not None:
             kwargs["converter_runner"] = self.converter_runner
         try:
             result = run_local_conversion(request, **kwargs)
         except OperationCancelledError:
-            # Unvollstaendige Potree-Ausgabe nicht im Zielordner zuruecklassen.
-            shutil.rmtree(request.output_dir, ignore_errors=True)
             return ProjectOperationSummary(
                 status=CANCELLED_STATUS,
-                message="Konvertierung abgebrochen. Unvollständige Ausgabe wurde entfernt.",
+                message="Konvertierung abgebrochen. Das bisherige Ergebnis wurde erhalten.",
             )
         return ProjectOperationSummary(
             status=SUCCESS_STATUS,

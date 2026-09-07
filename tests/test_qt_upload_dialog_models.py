@@ -36,7 +36,7 @@ def test_validate_upload_dialog_state_trims_customer_project_sources_and_options
     state = dialog_models.UploadDialogState(
         customer="  Kunde A  ",
         project="  Projekt Nord  ",
-        source_paths=("  scan.copc.laz  ", "", "  potree-output  "),
+        source_paths=("  potree-scan  ", "", "  potree-output  "),
         converter_path="  C:/Tools/PotreeConverter.exe  ",
         output_base_dir="  C:/tmp/converted  ",
         overwrite=True,
@@ -45,7 +45,7 @@ def test_validate_upload_dialog_state_trims_customer_project_sources_and_options
     request = dialog_models.validate_upload_dialog_state(state)
 
     assert request == NewProjectUploadWorkflowRequest(
-        source_paths=("scan.copc.laz", "potree-output"),
+        source_paths=("potree-scan", "potree-output"),
         kunde="Kunde A",
         projekt="Projekt Nord",
         converter_path="C:/Tools/PotreeConverter.exe",
@@ -57,10 +57,10 @@ def test_validate_upload_dialog_state_trims_customer_project_sources_and_options
 @pytest.mark.parametrize(
     ("customer", "project", "sources", "message"),
     [
-        ("", "Projekt", ("scan.copc.laz",), "Kunde"),
-        ("   ", "Projekt", ("scan.copc.laz",), "Kunde"),
-        ("Kunde", "", ("scan.copc.laz",), "Projekt"),
-        ("Kunde", "   ", ("scan.copc.laz",), "Projekt"),
+        ("", "Projekt", ("potree-scan",), "Kunde"),
+        ("   ", "Projekt", ("potree-scan",), "Kunde"),
+        ("Kunde", "", ("potree-scan",), "Projekt"),
+        ("Kunde", "   ", ("potree-scan",), "Projekt"),
         ("Kunde", "Projekt", (), "Quelle|Punktwolke"),
         ("Kunde", "Projekt", ("", "  "), "Quelle|Punktwolke"),
     ],
@@ -105,25 +105,22 @@ def test_validate_upload_dialog_state_requires_converter_settings_for_raw_las_la
         dialog_models.validate_upload_dialog_state(state)
 
 
-def test_validate_upload_dialog_state_treats_copc_laz_as_direct_upload(dialog_models):
+def test_validate_upload_dialog_state_rejects_copc(dialog_models):
     state = dialog_models.UploadDialogState(
         customer="Kunde",
         project="Projekt",
         source_paths=("scan.copc.laz",),
     )
 
-    request = dialog_models.validate_upload_dialog_state(state)
-
-    assert request.source_paths == ("scan.copc.laz",)
-    assert request.converter_path == ""
-    assert request.output_base_dir == ""
+    with pytest.raises(ValueError, match="COPC-Dateien werden nicht unterstützt"):
+        dialog_models.validate_upload_dialog_state(state)
 
 
 def test_validate_upload_dialog_state_builds_crs_info_for_every_source(dialog_models):
     state = dialog_models.UploadDialogState(
         customer="Kunde",
         project="Projekt",
-        source_paths=("  scan.copc.laz  ", " potree-output "),
+        source_paths=("  potree-scan  ", " potree-output "),
         horizontal_crs="  EPSG:25832  ",
         vertical_crs="  EPSG:7837  ",
     )
@@ -131,7 +128,7 @@ def test_validate_upload_dialog_state_builds_crs_info_for_every_source(dialog_mo
     request = dialog_models.validate_upload_dialog_state(state)
 
     assert request.crs_info_by_source_path == {
-        "scan.copc.laz": {
+        "potree-scan": {
             "value": "EPSG:25832",
             "projection": "EPSG:25832",
             "vertical_crs": "EPSG:7837",
@@ -152,7 +149,7 @@ def test_validate_upload_dialog_state_omits_empty_crs_info(dialog_models):
     state = dialog_models.UploadDialogState(
         customer="Kunde",
         project="Projekt",
-        source_paths=("scan.copc.laz",),
+        source_paths=("potree-scan",),
         horizontal_crs="  ",
         vertical_crs="",
     )
@@ -170,7 +167,7 @@ def test_validate_upload_dialog_state_preserves_optional_model_inputs(dialog_mod
         dialog_models.UploadDialogState(
             customer="Kunde",
             project="Projekt",
-            source_paths=("scan.copc.laz",),
+            source_paths=("potree-scan",),
             model_inputs=(model_input,),
         )
     )

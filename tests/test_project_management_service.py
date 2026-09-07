@@ -10,7 +10,12 @@ import pytest
 
 from dronautix_uploader.core.constants import S3_DISABLED_PROJECTS_KEY
 from dronautix_uploader.core.contracts import GLBOptimizationResult, ModelIndexEntry, PreparedModelUpload
-from dronautix_uploader.core.project_management_service import ProjectManagementService, _put_s3_metadata
+from dronautix_uploader.core.project_management_service import (
+    ProjectManagementService,
+    _prepare_potree_name_updates,
+    _put_s3_metadata,
+)
+from dronautix_uploader.core.project_repository import ProjectMetadataWriteUncertainError
 
 
 class FakePaginator:
@@ -32,6 +37,8 @@ class FakeS3Client:
         self.read_objects = {}
         self.gets = []
         self.puts = []
+        self.etags = {}
+        self._etag_counter = 0
 
     def get_paginator(self, name):
         assert name == "list_objects_v2"
@@ -74,12 +81,21 @@ class FakeS3Client:
         if Range:
             start, end = (int(part) for part in Range.removeprefix("bytes=").split("-", 1))
             data = data[start : end + 1]
-        return {"Body": io.BytesIO(data)}
+        return {"Body": io.BytesIO(data), "ETag": self.etags.setdefault(Key, '"etag-0"')}
 
     def put_object(self, Bucket, Key, Body, ContentType=None, **kwargs):
         data = Body.read() if hasattr(Body, "read") else Body
+        expected_etag = kwargs.get("IfMatch")
+        current_etag = self.etags.setdefault(Key, '"etag-0"')
+        if expected_etag is not None and expected_etag != current_etag:
+            error = RuntimeError("PreconditionFailed")
+            error.response = {"Error": {"Code": "PreconditionFailed"}}
+            raise error
         self.puts.append((Bucket, Key, data, ContentType, kwargs))
         self.read_objects[Key] = data
+        self._etag_counter += 1
+        self.etags[Key] = f'"etag-{self._etag_counter}"'
+        return {"ETag": self.etags[Key]}
 
 
 class FakeRepository:
@@ -417,10 +433,11 @@ def test_add_project_models_rejects_distant_model_before_s3_upload(tmp_path, mon
     assert s3_client.uploads == []
     assert repository.saved_indexes == []
     assert source.read_bytes() == b"user-original"
+    assert staging_root.is_dir()
     assert tuple(staging_root.iterdir()) == ()
 
 
-def test_replace_project_model_reads_copc_header_with_range_and_defaults_to_reject(tmp_path, monkeypatch):
+def test_replace_project_model_rejects_unsupported_pointcloud_format_without_reads(tmp_path, monkeypatch):
     old_prefix = "pointclouds/kunde/project/projekt/models/fassade/versions/old"
     cloud_root = "pointclouds/kunde/project/projekt"
     cloud_path = f"{cloud_root}/source.copc.laz"
@@ -452,18 +469,18 @@ def test_replace_project_model_reads_copc_header_with_range_and_defaults_to_reje
         lambda: str(staging_root),
     )
 
-    result = ProjectManagementService(
-        repository=repository,
-        s3_client=s3_client,
-        glb_service=FakeGLBService(),
-    ).replace_single_project_model_from_source("project", old_prefix, str(source))
+    with pytest.raises(ValueError, match="nicht unterstuetztes Punktwolkenformat"):
+        ProjectManagementService(
+            repository=repository,
+            s3_client=s3_client,
+            glb_service=FakeGLBService(),
+        ).replace_single_project_model_from_source("project", old_prefix, str(source))
 
-    assert result.status == "cancelled"
-    assert ("test-bucket", cloud_path, "bytes=0-226") in s3_client.gets
+    assert s3_client.gets == []
     assert s3_client.uploads == []
     assert repository.saved_indexes == []
     assert source.read_bytes() == b"user-original"
-    assert tuple(staging_root.iterdir()) == ()
+    assert not staging_root.exists()
 
 
 def test_add_project_models_defaults_to_reject_when_existing_bounds_are_unreadable(tmp_path, monkeypatch):
@@ -734,11 +751,12 @@ def test_metadata_put_merges_default_content_type_with_existing_headers():
         "cloud/metadata.json",
         b"{}",
         {"CacheControl": "max-age=60", "Metadata": {"owner": "test"}},
+        expected_etag='"etag-0"',
     )
 
     _bucket, _key, _body, content_type, kwargs = s3_client.puts[0]
     assert content_type == "application/json"
-    assert kwargs == {"CacheControl": "max-age=60", "Metadata": {"owner": "test"}}
+    assert kwargs == {"CacheControl": "max-age=60", "Metadata": {"owner": "test"}, "IfMatch": '"etag-0"'}
 
 
 def test_crs_repair_uses_javascript_mime_for_cloud_js_without_existing_header():
@@ -762,6 +780,37 @@ def test_crs_repair_uses_javascript_mime_for_cloud_js_without_existing_header():
     assert len(s3_client.puts) == 1
     assert s3_client.puts[0][1] == f"{cloud_path}/cloud.js"
     assert s3_client.puts[0][3] == "application/javascript"
+
+
+def test_uncertain_index_commit_does_not_roll_back_repaired_potree_crs():
+    cloud_path = "pointclouds/kunde/project/projekt/cloud"
+    metadata_key = f"{cloud_path}/metadata.json"
+
+    class UncertainRepository(FakeRepository):
+        def save_projects_index(self, index_data):
+            self.saved_indexes.append(copy.deepcopy(index_data))
+            raise ProjectMetadataWriteUncertainError("projects_index.json")
+
+    repository = UncertainRepository(
+        {"projects": [{
+            "id": "project", "viewer_path": "kunde/project/projekt", "s3_path": "pointclouds/kunde/project/projekt",
+            "pointclouds": [{"name": "Cloud", "format": "potree", "s3_path": cloud_path}],
+        }]}
+    )
+    s3_client = FakeS3Client()
+    s3_client.read_objects[metadata_key] = b'{"name":"Cloud"}'
+
+    with pytest.raises(ProjectMetadataWriteUncertainError):
+        ProjectManagementService(repository=repository, s3_client=s3_client).repair_project_crs_metadata(
+            "project",
+            {"value": "EPSG:31255", "vertical_crs": "EPSG:5778"},
+            confirm_repair=lambda _message: True,
+        )
+
+    repaired = json.loads(s3_client.read_objects[metadata_key])
+    assert repaired["crs"] == "EPSG:31255"
+    assert repaired["vertical_crs"] == "EPSG:5778"
+    assert len(s3_client.puts) == 1
 
 
 def test_failed_crs_s3_restore_is_reported_with_original_error_as_cause(tmp_path, monkeypatch):
@@ -810,7 +859,7 @@ def test_failed_crs_s3_restore_is_reported_with_original_error_as_cause(tmp_path
 
 
 @pytest.mark.parametrize("failure", [RuntimeError("AccessDenied"), b"not-a-las-header"])
-def test_unreadable_or_invalid_copc_blocks_sibling_crs_repair_without_writes(tmp_path, monkeypatch, failure):
+def test_unsupported_pointcloud_format_blocks_sibling_crs_repair_without_writes(tmp_path, monkeypatch, failure):
     root = "pointclouds/kunde/project/projekt"
     copc_path = f"{root}/target/source.copc.laz"
     repository = FakeRepository(
@@ -840,7 +889,7 @@ def test_unreadable_or_invalid_copc_blocks_sibling_crs_repair_without_writes(tmp
         "dronautix_uploader.core.project_management_service.get_glb_upload_staging_root",
         lambda: str(tmp_path / "app-glb-staging"),
     )
-    with pytest.raises((RuntimeError, ValueError), match="COPC-CRS"):
+    with pytest.raises(ValueError, match="nicht unterstuetztes Punktwolkenformat"):
         ProjectManagementService(repository=repository, s3_client=s3_client, glb_service=FakeGLBService()).add_project_models_from_sources(
             "project", (str(source),)
         )
@@ -848,7 +897,7 @@ def test_unreadable_or_invalid_copc_blocks_sibling_crs_repair_without_writes(tmp
     assert s3_client.uploads == [] and s3_client.puts == [] and repository.saved_indexes == []
 
 
-def test_index_only_crs_repair_retries_original_index_snapshot_after_save_failure(tmp_path, monkeypatch):
+def test_index_only_crs_repair_does_not_retry_stale_index_after_save_failure(tmp_path, monkeypatch):
     root = "pointclouds/kunde/project/projekt"
     target_path = f"{root}/target"
     repository = FailingSaveRepository(
@@ -866,7 +915,7 @@ def test_index_only_crs_repair_retries_original_index_snapshot_after_save_failur
         "dronautix_uploader.core.project_management_service.get_glb_upload_staging_root",
         lambda: str(tmp_path / "app-glb-staging"),
     )
-    with pytest.raises(RuntimeError, match="projects_index"):
+    with pytest.raises(RuntimeError, match="index write denied"):
         ProjectManagementService(repository=repository, s3_client=s3_client, glb_service=FakeGLBService()).add_project_models_from_sources(
             "project",
             (str(source),),
@@ -874,7 +923,7 @@ def test_index_only_crs_repair_retries_original_index_snapshot_after_save_failur
             confirm_crs_repair=lambda _warning: True,
         )
 
-    assert len(repository.saved_indexes) == 2
+    assert len(repository.saved_indexes) == 1
     assert s3_client.puts == []
     assert "crs" not in repository.index_data["projects"][0]["pointclouds"][0]
 
@@ -1035,6 +1084,104 @@ def test_rename_project_rolls_back_potree_metadata_when_index_save_fails():
     assert repository.index_data["projects"][0]["name"] == "Alt"
     assert s3_client.read_objects[metadata_key] == original_metadata
     assert len(s3_client.puts) == 2
+
+
+def test_concurrent_potree_rename_rejects_stale_metadata_snapshot():
+    metadata_key = "pointclouds/kunde/project/cloud/metadata.json"
+    project = {
+        "projekt": "Alt",
+        "pointclouds": [{"name": "Alt", "format": "potree", "s3_path": "pointclouds/kunde/project/cloud"}],
+    }
+    s3_client = FakeS3Client()
+    s3_client.read_objects[metadata_key] = b'{"name":"Alt","points":123}'
+    update_a = _prepare_potree_name_updates(s3_client, "test-bucket", project, ("Name A",))[0]
+    update_b = _prepare_potree_name_updates(s3_client, "test-bucket", project, ("Name B",))[0]
+
+    _put_s3_metadata(
+        s3_client,
+        "test-bucket",
+        metadata_key,
+        update_a["updated"],
+        update_a["updated_headers"],
+        expected_etag=update_a["original_etag"],
+    )
+    with pytest.raises(RuntimeError, match="Metadatenkonflikt"):
+        _put_s3_metadata(
+            s3_client,
+            "test-bucket",
+            metadata_key,
+            update_b["updated"],
+            update_b["updated_headers"],
+            expected_etag=update_b["original_etag"],
+        )
+
+    assert json.loads(s3_client.read_objects[metadata_key])["name"] == "Name A"
+
+
+def test_uncertain_index_commit_does_not_roll_back_renamed_potree_metadata():
+    metadata_key = "pointclouds/kunde/legacy/projekt/metadata.json"
+    s3_client = FakeS3Client()
+    s3_client.read_objects[metadata_key] = b'{"name":"Alt","points":123}'
+
+    class UncertainRepository(FakeRepository):
+        def save_projects_index(self, index_data):
+            self.saved_indexes.append(copy.deepcopy(index_data))
+            raise ProjectMetadataWriteUncertainError("projects_index.json")
+
+    repository = UncertainRepository(
+        {
+            "projects": [{
+                "id": "legacy", "kunde": "Kunde", "projekt": "Projekt", "name": "Alt", "format": "potree",
+                "viewer_path": "kunde/legacy/projekt", "s3_path": "pointclouds/kunde/legacy/projekt",
+            }],
+            S3_DISABLED_PROJECTS_KEY: [],
+        }
+    )
+
+    with pytest.raises(ProjectMetadataWriteUncertainError):
+        make_service(repository, s3_client=s3_client).rename_project(
+            "legacy", "Kunde", "Projekt", ("Neu",)
+        )
+
+    assert json.loads(s3_client.read_objects[metadata_key])["name"] == "Neu"
+    assert len(s3_client.puts) == 1
+
+
+def test_uncertain_second_metadata_write_rolls_back_prior_known_rename():
+    first_path = "pointclouds/kunde/project/first"
+    second_path = "pointclouds/kunde/project/second"
+    first_key = f"{first_path}/metadata.json"
+    second_key = f"{second_path}/metadata.json"
+
+    class SecondWriteUncertainS3(FakeS3Client):
+        def put_object(self, Bucket, Key, Body, ContentType=None, **kwargs):
+            if Key == second_key:
+                raise RuntimeError("AccessDenied")
+            return super().put_object(Bucket, Key, Body, ContentType=ContentType, **kwargs)
+
+    s3_client = SecondWriteUncertainS3()
+    original_first = b'{"name":"First"}'
+    s3_client.read_objects[first_key] = original_first
+    s3_client.read_objects[second_key] = b'{"name":"Second"}'
+    repository = FakeRepository(
+        {"projects": [{
+            "id": "project", "kunde": "Kunde", "projekt": "Projekt",
+            "viewer_path": "kunde/project/projekt", "s3_path": "pointclouds/kunde/project",
+            "pointclouds": [
+                {"name": "First", "format": "potree", "s3_path": first_path},
+                {"name": "Second", "format": "potree", "s3_path": second_path},
+            ],
+        }]}
+    )
+
+    with pytest.raises(ProjectMetadataWriteUncertainError):
+        make_service(repository, s3_client=s3_client).rename_project(
+            "project", "Kunde", "Projekt", ("First New", "Second New")
+        )
+
+    assert s3_client.read_objects[first_key] == original_first
+    assert json.loads(s3_client.read_objects[second_key])["name"] == "Second"
+    assert repository.saved_indexes == []
 
 
 def test_rename_project_updates_disabled_project_and_preserves_disabled_status():
@@ -1310,6 +1457,24 @@ def test_set_project_link_state_noops_when_status_already_matches():
     assert repository.saved_indexes == []
 
 
+def test_cleanup_pending_project_blocks_activation_and_replacement_without_s3_writes(tmp_path):
+    project = {
+        "id": "pending", "s3_path": "pointclouds/pending", "viewer_path": "pending",
+        "cleanup_pending": True,
+    }
+    repository = FakeRepository({"projects": [], S3_DISABLED_PROJECTS_KEY: [project]})
+    s3_client = FakeS3Client()
+    service = make_service(repository, s3_client=s3_client)
+
+    with pytest.raises(RuntimeError, match="Loeschversuch"):
+        service.set_project_link_state("pending", False)
+    with pytest.raises(RuntimeError, match="Loeschversuch"):
+        service.replace_project_pointclouds("pending", ())
+
+    assert repository.saved_indexes == []
+    assert s3_client.uploads == [] and s3_client.deleted == []
+
+
 @pytest.mark.parametrize("method,args", [
     ("rename_project", ("missing", "Kunde", "Projekt")),
     ("delete_project", ("missing",)),
@@ -1323,3 +1488,100 @@ def test_unknown_project_id_raises_value_error(method, args):
 
     with pytest.raises(ValueError, match="missing"):
         getattr(service, method)(*args)
+
+
+@pytest.fixture
+def model_cloud_change(tmp_path):
+    from dronautix_uploader.core.contracts import PointcloudSource
+    from dronautix_uploader.core.project_operations import prepare_cloud_uploads
+
+    root = "kunde/project/projekt"
+    crs = {"value": "EPSG:25832", "vertical_crs": "EPSG:7837"}
+    model = {"id": "mesh", "name": "Bestand", "format": "glb", "crs": crs["value"], "vertical_crs": crs["vertical_crs"]}
+    project = {
+        "id": "project", "format": "potree", "viewer_path": root,
+        "s3_path": f"pointclouds/{root}", "models": [model], **crs,
+    }
+    repository = FakeRepository({"projects": [project], S3_DISABLED_PROJECTS_KEY: []})
+    client = FakeS3Client()
+    service = make_service(repository, client)
+    source = tmp_path / "replacement"
+    source.mkdir()
+    (source / "octree.bin").write_bytes(b"points")
+    (source / "hierarchy.bin").write_bytes(struct.pack("<BBIQQ", 1, 0, 1, 0, 6))
+
+    def run(operation, cloud_crs, *, file_crs=None):
+        document = {
+            "version": "2.0", "encoding": "BROTLI", "points": 1,
+            "offset": [0, 0, 0], "scale": [0.001, 0.001, 0.001],
+            "hierarchy": {"firstChunkSize": 22, "stepSize": 4, "depth": 0},
+            "attributes": [{"name": "position", "type": "int32", "numElements": 3, "elementSize": 4, "size": 12}],
+            "boundingBox": {"min": [0, 0, 0], "max": [1, 1, 1]},
+        }
+        references = cloud_crs if file_crs is None else file_crs
+        if references:
+            document.update({"projection": references.get("value", ""), "vertical_crs": references.get("vertical_crs", "")})
+        (source / "metadata.json").write_text(json.dumps(document), encoding="utf-8")
+        target = f"pointclouds/{root}"
+        if operation == "add_sources":
+            return service.add_project_pointclouds_from_sources("project", (str(source),), crs_info_by_source_path={str(source): cloud_crs})
+        if operation == "replace_all_sources":
+            return service.replace_project_pointclouds_from_sources("project", (str(source),), crs_info_by_source_path={str(source): cloud_crs})
+        if operation == "replace_single_source":
+            return service.replace_single_project_pointcloud_from_source("project", target, str(source), crs_info=cloud_crs)
+        prepared = prepare_cloud_uploads(
+            (PointcloudSource(str(source), name="Ersatz", slug="ersatz", input_format="potree", crs_info=cloud_crs),), root, target,
+        )
+        if operation == "add":
+            return service.add_project_pointclouds("project", prepared)
+        if operation == "replace_all":
+            return service.replace_project_pointclouds("project", prepared)
+        return service.replace_single_project_pointcloud("project", target, prepared[0])
+
+    return repository, client, run
+
+
+@pytest.mark.parametrize("operation", ["add", "replace_all", "replace_single", "add_sources", "replace_all_sources", "replace_single_source"])
+@pytest.mark.parametrize("cloud_crs", [
+    {"value": "EPSG:25833", "vertical_crs": "EPSG:7837"},
+    {"value": "EPSG:25832", "vertical_crs": "EPSG:5773"},
+    {"value": "EPSG:25832"},
+])
+def test_pointcloud_change_rejects_model_crs_conflict_before_any_write(model_cloud_change, operation, cloud_crs):
+    repository, client, run = model_cloud_change
+    before = copy.deepcopy(repository.index_data)
+    with pytest.raises(ValueError, match="CRS|Höhenbezug"):
+        run(operation, cloud_crs)
+    assert repository.index_data == before
+    assert repository.saved_indexes == []
+    assert client.uploads == client.puts == client.deleted == []
+
+
+@pytest.mark.parametrize("operation", ["add", "replace_all", "replace_single", "add_sources", "replace_all_sources", "replace_single_source"])
+def test_pointcloud_change_keeps_compatible_models(model_cloud_change, operation):
+    repository, client, run = model_cloud_change
+    models = copy.deepcopy(repository.index_data["projects"][0]["models"])
+    result = run(operation, {"value": "urn:ogc:def:crs:EPSG::25832", "vertical_crs": "EPSG:7837"})
+    assert result.status == "success"
+    assert repository.index_data["projects"][0]["models"] == models
+    assert len(repository.saved_indexes) == 1
+    assert client.uploads
+
+
+@pytest.mark.parametrize("operation", ["add", "replace_all", "replace_single"])
+def test_pointcloud_change_checks_uploaded_metadata_not_just_index(model_cloud_change, operation):
+    repository, client, run = model_cloud_change
+    with pytest.raises(ValueError, match="widerspricht"):
+        run(operation, {"value": "EPSG:25832", "vertical_crs": "EPSG:7837"},
+            file_crs={"value": "EPSG:25833", "vertical_crs": "EPSG:7837"})
+    assert repository.saved_indexes == []
+    assert client.uploads == client.puts == client.deleted == []
+
+
+def test_pointcloud_change_rejects_unknown_model_reference(model_cloud_change):
+    repository, client, run = model_cloud_change
+    repository.index_data["projects"][0]["models"][0].pop("vertical_crs")
+    with pytest.raises(ValueError, match="Modell.*fehlt"):
+        run("replace_single_source", {"value": "EPSG:25832", "vertical_crs": "EPSG:7837"})
+    assert repository.saved_indexes == []
+    assert client.uploads == client.puts == client.deleted == []

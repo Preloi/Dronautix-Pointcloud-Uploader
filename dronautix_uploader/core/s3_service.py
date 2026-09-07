@@ -6,10 +6,12 @@ import base64
 import hashlib
 import hmac
 import mimetypes
+import ntpath
 import os
 import re
+import tempfile
 
-from .constants import BUCKET_NAME, COPC_OBJECT_NAME, S3_CACHE_CONTROL, S3_DELETE_BATCH_SIZE
+from .constants import BUCKET_NAME, S3_CACHE_CONTROL, S3_DELETE_BATCH_SIZE
 from .contracts import (
     CancelCallback,
     OperationCancelledError,
@@ -42,6 +44,19 @@ class DownloadCancelledError(RuntimeError):
         self.downloaded_paths = downloaded_paths
 
 
+class ProjectCopyError(RuntimeError):
+    def __init__(self, message: str, copied_keys: tuple[str, ...]) -> None:
+        super().__init__(message)
+        self.copied_keys = copied_keys
+
+
+class S3DeleteError(RuntimeError):
+    def __init__(self, message: str, deleted_keys: tuple[str, ...], failed_keys: tuple[str, ...]) -> None:
+        super().__init__(message)
+        self.deleted_keys = deleted_keys
+        self.failed_keys = failed_keys
+
+
 def get_total_size(files_list: list[str] | tuple[str, ...]) -> int:
     total = 0
     for file_path in files_list:
@@ -63,17 +78,13 @@ def format_bytes(bytes_size: int) -> str:
 def collect_upload_files(
     input_format: str,
     s3_prefix: str,
-    source_file: str | None = None,
     output_dir: str | None = None,
 ) -> list[UploadFile]:
-    """Collect local files and S3 keys with legacy ordering and COPC naming."""
+    """Collect files from one prepared Potree directory in upload order."""
 
     files_to_upload: list[UploadFile] = []
-    if input_format == "copc":
-        if not source_file:
-            return files_to_upload
-        files_to_upload.append((source_file, f"{s3_prefix}/{COPC_OBJECT_NAME}"))
-        return files_to_upload
+    if input_format != "potree":
+        raise ValueError(f"Nicht unterstuetztes Uploadformat: {input_format}")
 
     if not output_dir:
         return files_to_upload
@@ -255,13 +266,17 @@ def collect_project_object_entries(
     s3_path: str,
     bucket_name: str = BUCKET_NAME,
 ) -> list[dict[str, int | str]]:
+    normalized_prefix = str(s3_path or "").strip().replace("\\", "/").strip("/")
+    if not normalized_prefix:
+        raise ValueError("S3-Projektpraefix darf nicht leer sein.")
     paginator = s3_client.get_paginator("list_objects_v2")
-    pages = paginator.paginate(Bucket=bucket_name, Prefix=s3_path)
+    directory_prefix = f"{normalized_prefix}/"
+    pages = paginator.paginate(Bucket=bucket_name, Prefix=directory_prefix)
     object_entries: list[dict[str, int | str]] = []
     for page in pages:
         for obj in page.get("Contents", []):
             object_key = obj.get("Key")
-            if not object_key:
+            if not object_key or not str(object_key).startswith(directory_prefix):
                 continue
             object_entries.append({"Key": object_key, "Size": int(obj.get("Size", 0) or 0)})
     return object_entries
@@ -289,31 +304,49 @@ def delete_s3_objects(
             Bucket=bucket_name,
             Delete={"Objects": [{"Key": key} for key in batch_keys]},
         )
+        deleted_keys = tuple(str(item.get("Key", "")) for item in response.get("Deleted", []) if item.get("Key"))
         errors = response.get("Errors", [])
         if errors:
             first_error = errors[0]
-            raise RuntimeError(
+            raise S3DeleteError(
                 f"S3 DeleteObjects Fehler für {first_error.get('Key', 'unbekannt')}: "
-                f"{first_error.get('Code', 'Unknown')} - {first_error.get('Message', '')}"
+                f"{first_error.get('Code', 'Unknown')} - {first_error.get('Message', '')}",
+                tuple(object_keys[:start_index]) + deleted_keys,
+                tuple(str(item.get("Key", "")) for item in errors if item.get("Key")),
             )
-        deleted_count += len(batch_keys)
+        deleted_count += len(deleted_keys) if "Deleted" in response else len(batch_keys)
     return deleted_count
 
 
 def build_safe_download_path(base_dir: str, s3_prefix: str, object_key: str) -> str:
-    relative_path = object_key[len(s3_prefix) :] if object_key.startswith(s3_prefix) else os.path.basename(object_key)
-    relative_path = relative_path.lstrip("/\\")
-    safe_parts = []
-    for path_part in re.split(r"[/\\]+", relative_path):
-        if not path_part or path_part in (".", ".."):
-            continue
-        safe_parts.append(path_part)
-    if not safe_parts:
-        fallback_name = os.path.basename(object_key.rstrip("/\\"))
-        if not fallback_name:
-            return ""
-        safe_parts.append(fallback_name)
-    return os.path.join(base_dir, *safe_parts)
+    prefix = str(s3_prefix or "").replace("\\", "/").strip("/")
+    key = str(object_key or "").replace("\\", "/")
+    required_prefix = f"{prefix}/"
+    if not prefix or not key.startswith(required_prefix):
+        raise ValueError("S3-Objektschluessel liegt ausserhalb des Projektpraefixes.")
+    relative_path = key[len(required_prefix) :]
+    if not relative_path or relative_path.startswith(("/", "\\")) or ntpath.splitdrive(relative_path)[0]:
+        raise ValueError("S3-Objektschluessel enthaelt einen ungueltigen Windows-Pfad.")
+    safe_parts = re.split(r"[/\\]+", relative_path)
+    if any(_is_unsafe_windows_component(part) for part in safe_parts):
+        raise ValueError("S3-Objektschluessel enthaelt Traversal oder einen Windows-Datenstrom.")
+    base_path = os.path.realpath(os.path.abspath(base_dir))
+    target_path = os.path.realpath(os.path.join(base_path, *safe_parts))
+    try:
+        if os.path.commonpath([base_path, target_path]) != base_path:
+            raise ValueError("Downloadpfad liegt ausserhalb des Zielordners.")
+    except ValueError as error:
+        raise ValueError("Downloadpfad liegt ausserhalb des Zielordners.") from error
+    return target_path
+
+
+def _is_unsafe_windows_component(part: str) -> bool:
+    if not part or part in {".", ".."} or ":" in part or part.rstrip(" .") != part:
+        return True
+    if any(ord(character) < 32 for character in part):
+        return True
+    stem = part.split(".", 1)[0].upper()
+    return stem in {"CON", "PRN", "AUX", "NUL"} or bool(re.fullmatch(r"(?:COM|LPT)[1-9]", stem))
 
 
 def copy_project_objects(
@@ -367,36 +400,42 @@ def copy_project_objects(
             else f"{destination_prefix}/{os.path.basename(source_key)}"
         )
         file_size = int(sizes.get(source_key, 0) or 0)
-        if on_progress is not None and callable(managed_copy) and total_bytes > 0 and file_size > 0:
-            # Managed Copy meldet Byte-Chunks auch waehrend einer einzelnen
-            # grossen Datei, statt erst nach deren Abschluss.
-            file_progress = {"bytes": 0}
+        try:
+            if on_progress is not None and callable(managed_copy) and total_bytes > 0 and file_size > 0:
+                # Managed Copy meldet Byte-Chunks auch waehrend einer einzelnen
+                # grossen Datei, statt erst nach deren Abschluss.
+                file_progress = {"bytes": 0}
 
-            def report_copy_chunk(bytes_chunk, _state=file_progress, _base=copied_bytes, _index=index):
-                _state["bytes"] += int(bytes_chunk or 0)
-                emit_copy_progress(_base + _state["bytes"], _index)
+                def report_copy_chunk(bytes_chunk, _state=file_progress, _base=copied_bytes, _index=index):
+                    _state["bytes"] += int(bytes_chunk or 0)
+                    emit_copy_progress(_base + _state["bytes"], _index)
 
-            content_type = _content_type_for_path(destination_key)
-            managed_copy(
-                {"Bucket": bucket_name, "Key": source_key},
-                bucket_name,
-                destination_key,
-                ExtraArgs={
-                    "CacheControl": S3_CACHE_CONTROL,
-                    "ContentType": content_type,
-                    "MetadataDirective": "REPLACE",
-                },
-                Callback=report_copy_chunk,
-            )
-        else:
-            s3_client.copy_object(
-                Bucket=bucket_name,
-                CopySource={"Bucket": bucket_name, "Key": source_key},
-                Key=destination_key,
-                CacheControl=S3_CACHE_CONTROL,
-                ContentType=_content_type_for_path(destination_key),
-                MetadataDirective="REPLACE",
-            )
+                content_type = _content_type_for_path(destination_key)
+                managed_copy(
+                    {"Bucket": bucket_name, "Key": source_key},
+                    bucket_name,
+                    destination_key,
+                    ExtraArgs={
+                        "CacheControl": S3_CACHE_CONTROL,
+                        "ContentType": content_type,
+                        "MetadataDirective": "REPLACE",
+                    },
+                    Callback=report_copy_chunk,
+                )
+            else:
+                s3_client.copy_object(
+                    Bucket=bucket_name,
+                    CopySource={"Bucket": bucket_name, "Key": source_key},
+                    Key=destination_key,
+                    CacheControl=S3_CACHE_CONTROL,
+                    ContentType=_content_type_for_path(destination_key),
+                    MetadataDirective="REPLACE",
+                )
+        except Exception as error:
+            raise ProjectCopyError(
+                f"S3-Kopie fehlgeschlagen: {source_key} -> {destination_key}: {error}",
+                tuple(copied_keys),
+            ) from error
         copied_keys.append(destination_key)
         copied_bytes += file_size
         emit_copy_progress(copied_bytes, index)
@@ -460,14 +499,17 @@ def download_project_objects(
                 detail=f"Lade Datei {index}/{total_files}: {os.path.basename(local_path)}",
             ),
         )
+        handle, temp_path = tempfile.mkstemp(prefix=f".{os.path.basename(local_path)}.", suffix=".part", dir=os.path.dirname(local_path))
+        os.close(handle)
+        os.remove(temp_path)
         try:
-            s3_client.download_file(bucket_name, object_key, local_path, Callback=progress_callback)
-        except DownloadCancelledError:
-            if os.path.exists(local_path):
-                try:
-                    os.remove(local_path)
-                except OSError:
-                    pass
+            s3_client.download_file(bucket_name, object_key, temp_path, Callback=progress_callback)
+            os.replace(temp_path, local_path)
+        except BaseException:
+            try:
+                os.remove(temp_path)
+            except FileNotFoundError:
+                pass
             raise
         if total_bytes <= 0 and total_files:
             _emit(

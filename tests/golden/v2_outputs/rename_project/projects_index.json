@@ -27,9 +27,9 @@
         },
         {
           "name": "Cloud Neu B",
-          "format": "copc",
-          "viewer_path": "golden/rename_target/cloud_b/source.copc.laz",
-          "s3_path": "pointclouds/golden/rename_target/cloud_b/source.copc.laz",
+          "format": "potree",
+          "viewer_path": "golden/rename_target/cloud_b",
+          "s3_path": "pointclouds/golden/rename_target/cloud_b",
           "visible": false
         }
       ],

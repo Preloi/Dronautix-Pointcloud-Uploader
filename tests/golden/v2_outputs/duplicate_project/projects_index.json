@@ -20,9 +20,9 @@
         },
         {
           "name": "Cloud B",
-          "format": "copc",
-          "viewer_path": "golden_kunde/abc12d01/duplicate_clone/cloud_b/source.copc.laz",
-          "s3_path": "pointclouds/golden_kunde/abc12d01/duplicate_clone/cloud_b/source.copc.laz",
+          "format": "potree",
+          "viewer_path": "golden_kunde/abc12d01/duplicate_clone/cloud_b",
+          "s3_path": "pointclouds/golden_kunde/abc12d01/duplicate_clone/cloud_b",
           "visible": false
         }
       ]
@@ -60,9 +60,9 @@
         },
         {
           "name": "Cloud B",
-          "format": "copc",
-          "viewer_path": "golden/dup_source/original/cloud_b/source.copc.laz",
-          "s3_path": "pointclouds/golden/dup_source/original/cloud_b/source.copc.laz",
+          "format": "potree",
+          "viewer_path": "golden/dup_source/original/cloud_b",
+          "s3_path": "pointclouds/golden/dup_source/original/cloud_b",
           "visible": false
         }
       ]

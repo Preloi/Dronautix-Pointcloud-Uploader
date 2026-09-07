@@ -21,8 +21,8 @@ def _write_manifest(tmp_path: Path, *, provenance_file: str = "", v2_output_root
         v2_output_root=v2_output_root,
         scenarios=[
             {
-                "id": "single_copc_upload",
-                "description": "Single COPC direct upload.",
+                "id": "single_potree_upload",
+                "description": "Single Potree upload.",
                 "required_files": ["projects_index.json"],
             }
         ],
@@ -58,20 +58,20 @@ def test_golden_readiness_reports_missing_legacy_captures(tmp_path):
     assert not report.ready
     assert report.scenario_count == 1
     assert report.captured_count == 0
-    assert report.issues[0].scenario_id == "single_copc_upload"
+    assert report.issues[0].scenario_id == "single_potree_upload"
     assert "fehlt" in report.issues[0].message
 
 
 def test_golden_readiness_does_not_count_empty_capture_skeleton_as_captured(tmp_path):
     manifest_path = _write_manifest(tmp_path, provenance_file="provenance.json")
-    captured_dir = tmp_path / "captured" / "single_copc_upload"
-    normalized_dir = tmp_path / "normalized" / "single_copc_upload"
+    captured_dir = tmp_path / "captured" / "single_potree_upload"
+    normalized_dir = tmp_path / "normalized" / "single_potree_upload"
     captured_dir.mkdir(parents=True)
     normalized_dir.mkdir(parents=True)
     (captured_dir / "provenance.json").write_text(
         json.dumps(
             {
-                "scenario_id": "single_copc_upload",
+                "scenario_id": "single_potree_upload",
                 "legacy_app_version": "1.7.10",
                 "legacy_git_ref": "dronautix/develop@test",
                 "captured_at_utc": "2026-06-21T00:00:00Z",
@@ -91,8 +91,8 @@ def test_golden_readiness_does_not_count_empty_capture_skeleton_as_captured(tmp_
 
 def test_golden_readiness_accepts_matching_normalized_capture(tmp_path):
     manifest_path = _write_manifest(tmp_path)
-    captured_dir = tmp_path / "captured" / "single_copc_upload"
-    normalized_dir = tmp_path / "normalized" / "single_copc_upload"
+    captured_dir = tmp_path / "captured" / "single_potree_upload"
+    normalized_dir = tmp_path / "normalized" / "single_potree_upload"
     captured_dir.mkdir(parents=True)
     normalized_dir.mkdir(parents=True)
     raw = '{"projekt":"Muenchen","value":1}'
@@ -109,8 +109,8 @@ def test_golden_readiness_accepts_matching_normalized_capture(tmp_path):
 
 def test_golden_readiness_requires_valid_provenance_when_manifest_declares_it(tmp_path):
     manifest_path = _write_manifest(tmp_path, provenance_file="provenance.json")
-    captured_dir = tmp_path / "captured" / "single_copc_upload"
-    normalized_dir = tmp_path / "normalized" / "single_copc_upload"
+    captured_dir = tmp_path / "captured" / "single_potree_upload"
+    normalized_dir = tmp_path / "normalized" / "single_potree_upload"
     captured_dir.mkdir(parents=True)
     normalized_dir.mkdir(parents=True)
     (captured_dir / "projects_index.json").write_text('{"projekt":"Muenchen"}', encoding="utf-8")
@@ -127,7 +127,7 @@ def test_golden_readiness_requires_valid_provenance_when_manifest_declares_it(tm
     (captured_dir / "provenance.json").write_text(
         json.dumps(
             {
-                "scenario_id": "single_copc_upload",
+                "scenario_id": "single_potree_upload",
                 "legacy_app_version": "1.7.10",
                 "legacy_git_ref": "dronautix/develop@test",
                 "captured_at_utc": "2026-06-21T00:00:00Z",
@@ -317,8 +317,8 @@ def test_golden_readiness_rejects_unfilled_disabled_link_state_provenance(tmp_pa
 
 def test_golden_readiness_detects_normalized_drift(tmp_path):
     manifest_path = _write_manifest(tmp_path)
-    captured_dir = tmp_path / "captured" / "single_copc_upload"
-    normalized_dir = tmp_path / "normalized" / "single_copc_upload"
+    captured_dir = tmp_path / "captured" / "single_potree_upload"
+    normalized_dir = tmp_path / "normalized" / "single_potree_upload"
     captured_dir.mkdir(parents=True)
     normalized_dir.mkdir(parents=True)
     (captured_dir / "projects_index.json").write_text('{"value":1}', encoding="utf-8")
@@ -341,20 +341,20 @@ def test_v2_output_readiness_reports_present_and_missing_required_files(tmp_path
                 "required_files": ["projects_index.json", "metadata.json", "cloud.js"],
             },
             {
-                "id": "single_copc_upload",
-                "description": "Single COPC.",
+                "id": "secondary_project",
+                "description": "Secondary project.",
                 "required_files": ["projects_index.json"],
             },
         ],
     )
     potree_dir = tmp_path / "v2" / "single_potree_upload"
-    copc_dir = tmp_path / "v2" / "single_copc_upload"
+    secondary_dir = tmp_path / "v2" / "secondary_project"
     potree_dir.mkdir(parents=True)
-    copc_dir.mkdir(parents=True)
+    secondary_dir.mkdir(parents=True)
     (potree_dir / "projects_index.json").write_text('{"value":1}', encoding="utf-8")
     (potree_dir / "metadata.json").write_text('{"points":1}', encoding="utf-8")
     (potree_dir / "cloud.js").write_text('cloud.js = {"spacing": 1};', encoding="utf-8")
-    (copc_dir / "projects_index.json").write_text('{"value":2}', encoding="utf-8")
+    (secondary_dir / "projects_index.json").write_text('{"value":2}', encoding="utf-8")
 
     ready_report = check_v2_output_readiness(manifest_path)
 
@@ -398,13 +398,13 @@ def test_v2_output_freshness_detects_stale_imported_output(tmp_path):
         v2_output_root=str(tmp_path / "v2"),
         scenarios=[
             {
-                "id": "single_copc_upload",
-                "description": "Single COPC.",
+                "id": "single_potree_upload",
+                "description": "Single Potree.",
                 "required_files": ["projects_index.json"],
             },
         ],
     )
-    output_dir = tmp_path / "v2" / "single_copc_upload"
+    output_dir = tmp_path / "v2" / "single_potree_upload"
     output_dir.mkdir(parents=True)
     (output_dir / "projects_index.json").write_text('{"projects":[{"id":"stale"}]}', encoding="utf-8")
 
@@ -429,8 +429,8 @@ def test_cutover_ready_cli_returns_nonzero_for_missing_captures(tmp_path, capsys
 
 def test_cutover_ready_cli_blocks_when_v2_outputs_do_not_match_ready_golden(tmp_path, capsys):
     manifest_path = _write_manifest(tmp_path, v2_output_root=str(tmp_path / "v2"))
-    captured_dir = tmp_path / "captured" / "single_copc_upload"
-    normalized_dir = tmp_path / "normalized" / "single_copc_upload"
+    captured_dir = tmp_path / "captured" / "single_potree_upload"
+    normalized_dir = tmp_path / "normalized" / "single_potree_upload"
     captured_dir.mkdir(parents=True)
     normalized_dir.mkdir(parents=True)
     (captured_dir / "projects_index.json").write_text('{"value":1}', encoding="utf-8")
@@ -448,7 +448,7 @@ def test_cutover_ready_cli_blocks_when_v2_outputs_do_not_match_ready_golden(tmp_
 
 def test_cutover_ready_cli_requires_matching_v2_outputs_for_success(tmp_path, capsys):
     manifest_path = _write_manifest(tmp_path, v2_output_root=str(tmp_path / "v2"))
-    _seed_current_single_copc_v2_and_golden(tmp_path, manifest_path, v2_root=tmp_path / "v2")
+    _seed_current_single_potree_v2_and_golden(tmp_path, manifest_path, v2_root=tmp_path / "v2")
     candidate_manifest_path = tmp_path / "candidate.json"
     acceptance_path = tmp_path / "acceptance.json"
     evidence = _complete_acceptance_evidence(candidate_manifest_path=candidate_manifest_path)
@@ -477,9 +477,9 @@ def test_cutover_ready_cli_requires_matching_v2_outputs_for_success(tmp_path, ca
 
 def test_cutover_ready_cli_blocks_when_imported_v2_outputs_are_stale(tmp_path, capsys):
     manifest_path = _write_manifest(tmp_path, v2_output_root=str(tmp_path / "v2"))
-    captured_dir = tmp_path / "captured" / "single_copc_upload"
-    normalized_dir = tmp_path / "normalized" / "single_copc_upload"
-    v2_dir = tmp_path / "v2" / "single_copc_upload"
+    captured_dir = tmp_path / "captured" / "single_potree_upload"
+    normalized_dir = tmp_path / "normalized" / "single_potree_upload"
+    v2_dir = tmp_path / "v2" / "single_potree_upload"
     captured_dir.mkdir(parents=True)
     normalized_dir.mkdir(parents=True)
     v2_dir.mkdir(parents=True)
@@ -516,7 +516,7 @@ def test_cutover_ready_cli_blocks_when_imported_v2_outputs_are_stale(tmp_path, c
 
 def test_cutover_ready_cli_blocks_when_candidate_manifest_is_missing(tmp_path, capsys):
     manifest_path = _write_manifest(tmp_path, v2_output_root=str(tmp_path / "v2"))
-    _seed_current_single_copc_v2_and_golden(tmp_path, manifest_path, v2_root=tmp_path / "v2")
+    _seed_current_single_potree_v2_and_golden(tmp_path, manifest_path, v2_root=tmp_path / "v2")
     candidate_manifest_path = tmp_path / "missing-candidate.json"
     acceptance_path = tmp_path / "acceptance.json"
     evidence = _complete_acceptance_evidence(candidate_manifest_path=candidate_manifest_path)
@@ -547,8 +547,8 @@ def test_cutover_ready_cli_blocks_when_s3_acceptance_misses_manifest_scenario(tm
         v2_output_root=str(tmp_path / "v2"),
         scenarios=[
             {
-                "id": "single_copc_upload",
-                "description": "Single COPC direct upload.",
+                "id": "single_potree_upload",
+                "description": "Single Potree upload.",
                 "required_files": ["projects_index.json"],
             },
             {
@@ -558,7 +558,7 @@ def test_cutover_ready_cli_blocks_when_s3_acceptance_misses_manifest_scenario(tm
             },
         ],
     )
-    for scenario_id in ("single_copc_upload", "multi_replace"):
+    for scenario_id in ("single_potree_upload", "multi_replace"):
         captured_dir = tmp_path / "captured" / scenario_id
         normalized_dir = tmp_path / "normalized" / scenario_id
         v2_dir = tmp_path / "v2" / scenario_id
@@ -570,7 +570,7 @@ def test_cutover_ready_cli_blocks_when_s3_acceptance_misses_manifest_scenario(tm
         (v2_dir / "projects_index.json").write_text('{"value":1}', encoding="utf-8")
     acceptance_path = tmp_path / "acceptance.json"
     evidence = _complete_acceptance_evidence()
-    evidence["gates"]["real_s3_acceptance"]["scenarios_passed"] = ["single_copc_upload"]
+    evidence["gates"]["real_s3_acceptance"]["scenarios_passed"] = ["single_potree_upload"]
     acceptance_path.write_text(json.dumps(evidence), encoding="utf-8")
 
     exit_code = check_cutover_ready(["--manifest", str(manifest_path), "--acceptance", str(acceptance_path)])
@@ -584,8 +584,8 @@ def test_cutover_ready_cli_blocks_when_s3_acceptance_misses_manifest_scenario(tm
 
 def test_cutover_ready_cli_does_not_allow_v2_outputs_to_substitute_legacy_captures(tmp_path, capsys):
     manifest_path = _write_manifest(tmp_path, v2_output_root=str(tmp_path / "v2"))
-    normalized_dir = tmp_path / "normalized" / "single_copc_upload"
-    v2_dir = tmp_path / "v2" / "single_copc_upload"
+    normalized_dir = tmp_path / "normalized" / "single_potree_upload"
+    v2_dir = tmp_path / "v2" / "single_potree_upload"
     normalized_dir.mkdir(parents=True)
     v2_dir.mkdir(parents=True)
     (normalized_dir / "projects_index.normalized.json").write_text('{\n  "value": 1\n}\n', encoding="utf-8")
@@ -604,7 +604,7 @@ def test_cutover_ready_cli_does_not_allow_v2_outputs_to_substitute_legacy_captur
 
 def test_cutover_ready_cli_accepts_v2_output_root_override(tmp_path, capsys):
     manifest_path = _write_manifest(tmp_path, v2_output_root=str(tmp_path / "missing_manifest_v2_root"))
-    _seed_current_single_copc_v2_and_golden(tmp_path, manifest_path, v2_root=tmp_path / "override_v2")
+    _seed_current_single_potree_v2_and_golden(tmp_path, manifest_path, v2_root=tmp_path / "override_v2")
     candidate_manifest_path = tmp_path / "candidate.json"
     acceptance_path = tmp_path / "acceptance.json"
     evidence = _complete_acceptance_evidence(candidate_manifest_path=candidate_manifest_path)
@@ -642,7 +642,7 @@ def test_cutover_ready_cli_can_write_acceptance_template(tmp_path, capsys):
     assert exit_code == 0
     assert acceptance_path.is_file()
     template = json.loads(acceptance_path.read_text(encoding="utf-8"))
-    assert template["gates"]["real_s3_acceptance"]["scenarios_passed"] == ["single_copc_upload"]
+    assert template["gates"]["real_s3_acceptance"]["scenarios_passed"] == ["single_potree_upload"]
     assert "template written" in captured.out
 
 
@@ -664,7 +664,7 @@ def _complete_acceptance_evidence(candidate_manifest_path=None):
                 "status": "passed",
                 "completed_at_utc": "2026-06-21T12:00:00Z",
                 "test_prefix": "v2-cutover-acceptance/test/",
-                "scenarios_passed": ["single_copc_upload"],
+                "scenarios_passed": ["single_potree_upload"],
                 "projects_index_verified": True,
                 "metadata_verified": True,
                 "cleanup_verified": True,
@@ -700,18 +700,18 @@ def _write_matching_candidate_manifest(path, evidence):
     write_candidate_manifest(contract, path)
 
 
-def _seed_current_single_copc_v2_and_golden(tmp_path, manifest_path, *, v2_root):
+def _seed_current_single_potree_v2_and_golden(tmp_path, manifest_path, *, v2_root):
     generated_root = tmp_path / "generated_current_v2"
     result = generate_v2_golden_outputs(
         manifest_path,
         output_root=generated_root,
-        scenario_id="single_copc_upload",
+        scenario_id="single_potree_upload",
     )[0]
     raw_text = (result.output_dir / "projects_index.json").read_text(encoding="utf-8")
 
-    captured_dir = tmp_path / "captured" / "single_copc_upload"
-    normalized_dir = tmp_path / "normalized" / "single_copc_upload"
-    v2_dir = v2_root / "single_copc_upload"
+    captured_dir = tmp_path / "captured" / "single_potree_upload"
+    normalized_dir = tmp_path / "normalized" / "single_potree_upload"
+    v2_dir = v2_root / "single_potree_upload"
     captured_dir.mkdir(parents=True)
     normalized_dir.mkdir(parents=True)
     v2_dir.mkdir(parents=True)
@@ -737,9 +737,9 @@ def _filled_multi_replace_provenance(captured_files):
             "original_disabled_state": "disabled_projects",
             "sources": [
                 {
-                    "source": "Scan.copc.laz",
+                    "source": "Scan.laz",
                     "source_type": "raw_file",
-                    "format": "copc",
+                    "format": "potree",
                     "name": "Scan",
                     "slug": "scan",
                 }

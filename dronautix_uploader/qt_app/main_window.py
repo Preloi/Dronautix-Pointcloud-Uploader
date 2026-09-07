@@ -231,6 +231,8 @@ def create_main_window(
             self._crs_repair_emitter = _CrsRepairEmitter()
             self._crs_repair_emitter.requested.connect(self._show_crs_repair_confirmation)
             self._closing_for_update = False
+            self._pending_update_result = None
+            self._update_install_started = False
             cleanup_stale_upload_temp_dirs()
             root = QtWidgets.QWidget()
             root.setObjectName("AppRoot")
@@ -267,6 +269,8 @@ def create_main_window(
                     project_previews=project_previews,
                     project_provider=self._runtime_project_rows,
                     on_project_action=on_project_action or self._handle_project_action,
+                    on_load_state_changed=self._resume_pending_update_if_idle,
+                    can_start_load=lambda: not self._update_install_started,
                 ),
             )
             self._activity_page = None
@@ -336,27 +340,14 @@ def create_main_window(
 
         def closeEvent(self, event):
             if self._has_active_background_tasks() and not getattr(self, "_closing_for_update", False):
-                answer = QtWidgets.QMessageBox.warning(
+                QtWidgets.QMessageBox.warning(
                     self,
                     "Vorgang läuft noch",
-                    "Ein Vorgang (z. B. Upload) läuft noch.\n\n"
-                    "Wenn du jetzt schließt, wird er abgebrochen - unvollständige Daten "
-                    "können im Bucket verbleiben und temporäre Dateien zurückbleiben.\n\n"
-                    "Trotzdem schließen?",
-                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                    QtWidgets.QMessageBox.No,
+                    "Ein Vorgang (z. B. Upload) läuft noch. Bitte den Vorgang zuerst abbrechen "
+                    "oder vollständig abschließen lassen.",
                 )
-                if answer != QtWidgets.QMessageBox.Yes:
-                    event.ignore()
-                    return
-                # Let running worker threads settle so the process does not abort
-                # with "QThread destroyed while running".
-                for thread in list(self._task_records):
-                    try:
-                        thread.quit()
-                        thread.wait(3000)
-                    except Exception:
-                        pass
+                event.ignore()
+                return
             try:
                 self._settings_store.setValue("window_geometry", self.saveGeometry())
             except Exception:
@@ -427,6 +418,9 @@ def create_main_window(
             )
 
         def _handle_upload_action(self):
+            if self._update_install_started:
+                self.statusBar().showMessage("Update-Installation läuft; bitte warten.")
+                return
             if self._has_active_background_tasks():
                 self.statusBar().showMessage("Eine Aktion läuft bereits; bitte warten.")
                 return
@@ -653,6 +647,9 @@ def create_main_window(
         def _handle_project_action(self, action_id: str, project: ProjectPreview | None = None, pointcloud=None):
             if action_id in {ACTION_OPEN_LINK, ACTION_COPY_LINK}:
                 self._handle_project_link_action(action_id, project)
+                return
+            if self._update_install_started:
+                self.statusBar().showMessage("Update-Installation läuft; bitte warten.")
                 return
             if self._has_active_background_tasks():
                 self.statusBar().showMessage("Eine Aktion läuft bereits; bitte warten.")
@@ -1079,7 +1076,15 @@ def create_main_window(
             return dataclasses.replace(payload, crs_info=info) if info else payload
 
         def _has_active_background_tasks(self) -> bool:
-            return bool(self._active_tasks)
+            page = getattr(self, "_projects_page", None)
+            return bool(self._active_tasks or getattr(page, "_active_project_loads", ()))
+
+        def _resume_pending_update_if_idle(self):
+            pending_update = self._pending_update_result
+            if pending_update is None or self._has_active_background_tasks() or self._update_install_started:
+                return
+            self._pending_update_result = None
+            QtCore.QTimer.singleShot(0, lambda result=pending_update: self._offer_update_install(result))
 
         def _handle_project_link_action(self, action_id: str, project: ProjectPreview | None):
             if project is None:
@@ -1121,6 +1126,9 @@ def create_main_window(
             if settings_controller is None:
                 self.statusBar().showMessage("Einstellungen sind in dieser Umgebung nicht verfügbar.")
                 return
+            if self._update_install_started:
+                self.statusBar().showMessage("Update-Installation läuft; bitte warten.")
+                return
 
             if action_id == "save":
                 try:
@@ -1155,6 +1163,9 @@ def create_main_window(
                 return
 
             if action_id == "test_connection":
+                if self._has_active_background_tasks():
+                    self.statusBar().showMessage("Eine Aktion läuft bereits; bitte warten.")
+                    return
                 self.statusBar().showMessage("S3-Verbindungstest gestartet...")
 
                 def show_test_result(summary):
@@ -1195,6 +1206,12 @@ def create_main_window(
             if update_controller is None:
                 self.statusBar().showMessage("Update-Prüfung nicht verfügbar.")
                 return
+            if self._update_install_started:
+                self.statusBar().showMessage("Update-Installation läuft; bitte warten.")
+                return
+            if self._has_active_background_tasks():
+                self.statusBar().showMessage("Update-Prüfung wird nach dem laufenden Vorgang erneut angeboten.")
+                return
             if not silent:
                 self.statusBar().showMessage("Update-Prüfung läuft...")
 
@@ -1222,6 +1239,12 @@ def create_main_window(
             )
 
         def _offer_update_install(self, result):
+            if self._update_install_started:
+                return
+            if self._has_active_background_tasks():
+                self._pending_update_result = result
+                self.statusBar().showMessage("Update-Installation wartet auf den laufenden Vorgang.")
+                return
             answer = QtWidgets.QMessageBox.question(
                 self,
                 "Update verfügbar",
@@ -1233,6 +1256,11 @@ def create_main_window(
             if answer != QtWidgets.QMessageBox.Yes:
                 self.statusBar().showMessage("Update verschoben.")
                 return
+            if self._has_active_background_tasks():
+                self._pending_update_result = result
+                self.statusBar().showMessage("Update-Installation wartet auf den laufenden Vorgang.")
+                return
+            self._update_install_started = True
             self.statusBar().showMessage(f"Update {result.remote_version} wird heruntergeladen...")
 
             def handle_install_result(summary):
@@ -1241,18 +1269,23 @@ def create_main_window(
                     self._closing_for_update = True
                     QtCore.QTimer.singleShot(200, self.close)
                 else:
+                    self._update_install_started = False
                     QtWidgets.QMessageBox.critical(self, "Update", summary.message)
+
+            def handle_install_error(error):
+                self._update_install_started = False
+                self._notify_task_error(
+                    error,
+                    "Update",
+                    action=ACTIVITY_ACTION_UPDATE,
+                    actor="Updater",
+                )
 
             manifest = dict(result.manifest)
             self._start_background_task(
                 lambda: update_controller.download_and_install(manifest),
                 on_result=handle_install_result,
-                on_error=lambda error: self._notify_task_error(
-                    error,
-                    "Update",
-                    action=ACTIVITY_ACTION_UPDATE,
-                    actor="Updater",
-                ),
+                on_error=handle_install_error,
             )
 
         def _show_project_operation_summary(
@@ -1393,8 +1426,12 @@ def create_main_window(
             self._task_records.pop(bundle.thread, None)
             if bundle in self._active_tasks:
                 self._active_tasks.remove(bundle)
+            self._resume_pending_update_if_idle()
 
         def _refresh_projects_page(self):
+            if self._update_install_started:
+                self.statusBar().showMessage("Update-Installation läuft; Projektaktualisierung wurde zurückgestellt.")
+                return
             refresh = getattr(self._projects_page, "reload_projects", None)
             if callable(refresh):
                 refresh()

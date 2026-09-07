@@ -64,9 +64,10 @@ class PointcloudSource:
     source_path: str
     name: str = ""
     slug: str = ""
-    input_format: Literal["potree", "copc", "raw", "potree_dir", ""] = ""
+    input_format: Literal["potree", "raw", "potree_dir", ""] = ""
     source_type: Literal["raw_file", "potree_dir", ""] = ""
     crs_info: dict[str, Any] | None = None
+    upload_file_overrides: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)

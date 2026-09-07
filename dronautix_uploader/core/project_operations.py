@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .constants import BUCKET_NAME, COPC_OBJECT_NAME, S3_INDEX_CACHE_CONTROL
+from .constants import BUCKET_NAME, S3_INDEX_CACHE_CONTROL
 from .contracts import (
     CancelCallback,
     OperationCancelledError,
@@ -20,11 +21,13 @@ from .contracts import (
     UploadedKeyLedger,
     UploadResult,
 )
-from .crs_service import extract_pointcloud_crs_metadata
+from .crs_detection import detect_crs_from_metadata_dict
+from .crs_service import extract_pointcloud_crs_metadata, is_active_pointcloud, normalize_crs_metadata
 from .metadata_service import apply_crs_metadata, create_pointcloud_index_entry, get_common_crs_info
 from .naming_service import get_pointcloud_display_name, make_unique_slug, sanitize_folder_name
 from .project_index_service import append_project_history, apply_common_crs_or_clear, update_project_in_index
 from .project_index_service import remove_project_from_index
+from .project_repository import ProjectMetadataConflictError
 from .s3_service import (
     UploadFile,
     collect_project_object_entries,
@@ -33,6 +36,8 @@ from .s3_service import (
     copy_project_objects,
     delete_s3_objects,
     DownloadCancelledError,
+    ProjectCopyError,
+    S3DeleteError,
     download_project_objects,
     upload_files_to_s3,
     verify_uploaded_model_files,
@@ -99,12 +104,10 @@ def rebase_prepared_cloud_upload(
         )
         for local_path, s3_key in cloud.files_to_upload
     )
-    if cloud.input_format == "copc":
-        viewer_path = f"{viewer_prefix}/{COPC_OBJECT_NAME}"
-        s3_path = f"{s3_prefix}/{COPC_OBJECT_NAME}"
-    else:
-        viewer_path = viewer_prefix
-        s3_path = s3_prefix
+    if cloud.input_format != "potree":
+        raise ValueError(f"Nicht unterstuetztes Punktwolkenformat: {cloud.input_format}")
+    viewer_path = viewer_prefix
+    s3_path = s3_prefix
 
     return PreparedCloudUpload(
         name=cloud.name,
@@ -123,7 +126,7 @@ def prepare_cloud_uploads(
     project_viewer_root: str,
     project_s3_prefix: str,
 ) -> tuple[PreparedCloudUpload, ...]:
-    """Create S3/index upload plans for already prepared COPC or Potree sources."""
+    """Create S3/index upload plans for prepared Potree sources."""
 
     prepared: list[PreparedCloudUpload] = []
     used_slugs: set[str] = set()
@@ -131,27 +134,23 @@ def prepare_cloud_uploads(
         name = source.name or get_pointcloud_display_name(source.source_path)
         slug = source.slug or make_unique_slug(name, used_slugs)
         input_format = source.input_format
-        if input_format not in {"copc", "potree"}:
+        if input_format != "potree":
             raise ValueError(f"Nicht unterstütztes Punktwolkenformat: {input_format}")
 
         cloud_viewer_path = f"{project_viewer_root}/{slug}"
         cloud_s3_prefix = f"{project_s3_prefix}/{slug}"
-        if input_format == "copc":
-            files_to_upload = collect_upload_files(
-                "copc",
-                cloud_s3_prefix,
-                source_file=source.source_path,
-            )
-            viewer_path = f"{cloud_viewer_path}/{COPC_OBJECT_NAME}"
-            s3_path = f"{cloud_s3_prefix}/{COPC_OBJECT_NAME}"
-        else:
-            files_to_upload = collect_upload_files(
-                "potree",
-                cloud_s3_prefix,
-                output_dir=source.source_path,
-            )
-            viewer_path = cloud_viewer_path
-            s3_path = cloud_s3_prefix
+        files_to_upload = collect_upload_files(
+            "potree",
+            cloud_s3_prefix,
+            output_dir=source.source_path,
+        )
+        if source.upload_file_overrides:
+            files_to_upload = [
+                (source.upload_file_overrides.get(os.path.relpath(local_path, source.source_path).replace("\\", "/"), local_path), s3_key)
+                for local_path, s3_key in files_to_upload
+            ]
+        viewer_path = cloud_viewer_path
+        s3_path = cloud_s3_prefix
 
         prepared.append(
             PreparedCloudUpload(
@@ -177,18 +176,18 @@ def prepare_single_project_upload(
     """Create the legacy single-cloud upload plan without a child slug."""
 
     input_format = source.input_format
-    if input_format not in {"copc", "potree"}:
+    if input_format != "potree":
         raise ValueError(f"Nicht unterstütztes Punktwolkenformat: {input_format}")
 
     name = source.name or get_pointcloud_display_name(source.source_path)
-    if input_format == "copc":
-        files_to_upload = collect_upload_files("copc", project_s3_prefix, source_file=source.source_path)
-        viewer_path = f"{project_viewer_root}/{COPC_OBJECT_NAME}"
-        s3_path = f"{project_s3_prefix}/{COPC_OBJECT_NAME}"
-    else:
-        files_to_upload = collect_upload_files("potree", project_s3_prefix, output_dir=source.source_path)
-        viewer_path = project_viewer_root
-        s3_path = project_s3_prefix
+    files_to_upload = collect_upload_files("potree", project_s3_prefix, output_dir=source.source_path)
+    if source.upload_file_overrides:
+        files_to_upload = [
+            (source.upload_file_overrides.get(os.path.relpath(local_path, source.source_path).replace("\\", "/"), local_path), s3_key)
+            for local_path, s3_key in files_to_upload
+        ]
+    viewer_path = project_viewer_root
+    s3_path = project_s3_prefix
 
     return PreparedCloudUpload(
         name=name,
@@ -339,7 +338,9 @@ def build_multi_project_metadata(
         }
     )
     common_crs = get_common_crs_info(
-        entry.get("crs_info") for entry in updated_project.get("pointclouds", [])
+        _pointcloud_crs_metadata(entry)
+        for entry in updated_project.get("pointclouds", [])
+        if is_active_pointcloud(entry)
     )
     apply_common_crs_or_clear(updated_project, common_crs, _apply_crs_to_project)
     return updated_project
@@ -420,22 +421,26 @@ def _pointcloud_storage_boundary(
     input_format = str(pointcloud.get("format", "")).strip().lower()
     s3_path = _normalize_s3_path(str(pointcloud.get("s3_path", "")))
     viewer_path = _normalize_s3_path(str(pointcloud.get("viewer_path", "")))
-    if not _safe_child_path(s3_path, project_s3_prefix) or not _safe_child_path(viewer_path, project_viewer_root):
+    is_legacy_potree_root = (
+        input_format == "potree"
+        and s3_path == _normalize_s3_path(project_s3_prefix)
+        and viewer_path == _normalize_s3_path(project_viewer_root)
+    )
+    if not is_legacy_potree_root and (
+        not _safe_child_path(s3_path, project_s3_prefix)
+        or not _safe_child_path(viewer_path, project_viewer_root)
+    ):
         raise ValueError("Punktwolkenpfad liegt nicht innerhalb des Multi-Projekts.")
-    if input_format == "copc":
-        suffix = f"/{COPC_OBJECT_NAME}"
-        if not s3_path.endswith(suffix) or not viewer_path.endswith(suffix):
-            raise ValueError("COPC-Punktwolken muessen auf die exakte COPC-Datei zeigen.")
-        return "exact", s3_path
     if input_format == "potree":
-        return "prefix", s3_path
+        return ("root-prefix" if is_legacy_potree_root else "prefix"), s3_path
     raise ValueError("Multi-Projekt enthaelt ein nicht unterstuetztes Punktwolkenformat.")
 
 
 def _pointcloud_slug(pointcloud: dict[str, Any], project_viewer_root: str, project_s3_prefix: str) -> str:
     kind, s3_path = _pointcloud_storage_boundary(pointcloud, project_viewer_root, project_s3_prefix)
-    parent = s3_path[: -len(f"/{COPC_OBJECT_NAME}")] if kind == "exact" else s3_path
-    return parent.rsplit("/", 1)[-1]
+    if kind == "root-prefix":
+        return s3_path
+    return s3_path.rsplit("/", 1)[-1]
 
 
 def validate_explicit_multi_project(
@@ -495,7 +500,7 @@ def pointcloud_object_list_prefix(
     """Return the narrowest safe S3 ListObjects prefix for one child cloud."""
 
     kind, s3_path = _pointcloud_storage_boundary(pointcloud, project_viewer_root, project_s3_prefix)
-    return s3_path if kind == "exact" else f"{s3_path}/"
+    return f"{s3_path}/"
 
 
 def filter_pointcloud_object_keys(
@@ -504,15 +509,20 @@ def filter_pointcloud_object_keys(
     project_viewer_root: str,
     project_s3_prefix: str,
 ) -> tuple[str, ...]:
-    """Keep only exact COPC or directory-bound Potree child keys for cleanup."""
+    """Keep only directory-bound Potree child keys for cleanup."""
 
     kind, s3_path = _pointcloud_storage_boundary(pointcloud, project_viewer_root, project_s3_prefix)
     safe_prefix = f"{s3_path}/"
+    version_prefix = f"{safe_prefix}versions/"
     return tuple(
         key
         for key in object_keys
-        if (kind == "exact" and _normalize_s3_path(key) == s3_path)
-        or (kind == "prefix" and _normalize_s3_path(key).startswith(safe_prefix))
+        if (kind == "prefix" and _normalize_s3_path(key).startswith(safe_prefix))
+        or (
+            kind == "root-prefix"
+            and _normalize_s3_path(key).startswith(safe_prefix)
+            and not _normalize_s3_path(key).startswith(version_prefix)
+        )
     )
 
 
@@ -541,16 +551,16 @@ def _validate_new_multi_clouds(
         viewer_path = _normalize_s3_path(str(entry.get("viewer_path", "")))
         if not s3_path.startswith(version_s3_prefix) or not viewer_path.startswith(version_viewer_prefix):
             raise ValueError("Neue Punktwolken muessen in einem unveraenderlichen Datenstand abgelegt werden.")
-        expected_parent = s3_path[: -len(f"/{COPC_OBJECT_NAME}")] if cloud.input_format == "copc" else s3_path
+        if cloud.input_format != "potree":
+            raise ValueError("Neue Punktwolken muessen als Potree-Projekt vorbereitet sein.")
+        expected_parent = s3_path
         if expected_parent.rsplit("/", 1)[-1] != slug or _normalize_s3_path(cloud.s3_prefix) != expected_parent:
             raise ValueError("Punktwolken-Slug und Zielpfad stimmen nicht ueberein.")
         if not cloud.files_to_upload:
             raise ValueError("Keine Dateien zum Hochladen fuer die Punktwolke gefunden.")
         for _local_path, key in cloud.files_to_upload:
             normalized_key = _normalize_s3_path(key)
-            if (cloud.input_format == "copc" and normalized_key != s3_path) or (
-                cloud.input_format == "potree" and not normalized_key.startswith(f"{s3_path}/")
-            ):
+            if not normalized_key.startswith(f"{s3_path}/"):
                 raise ValueError("Punktwolken-Upload wuerde ausserhalb des Child-Pfads schreiben.")
         new_slugs.add(slug)
 
@@ -559,18 +569,56 @@ def _replace_multi_project_pointclouds(
     project: dict[str, Any],
     pointclouds: list[dict[str, Any]],
 ) -> None:
+    project["format"] = "multi"
     project["pointclouds"] = [copy.deepcopy(pointcloud) for pointcloud in pointclouds]
     project["pointcloud_count"] = len(pointclouds)
     common_crs = get_common_crs_info(
-        _pointcloud_crs_metadata(pointcloud) for pointcloud in project["pointclouds"]
+        _pointcloud_crs_metadata(pointcloud)
+        for pointcloud in project["pointclouds"]
+        if is_active_pointcloud(pointcloud)
     )
     apply_common_crs_or_clear(project, common_crs, _apply_crs_to_project)
 
 
+def _pointclouds_for_add(
+    project: dict[str, Any],
+    project_viewer_root: str,
+    project_s3_prefix: str,
+) -> tuple[dict[str, Any], ...]:
+    pointclouds = project.get("pointclouds")
+    if isinstance(pointclouds, list) and pointclouds:
+        return validate_explicit_multi_project(project, project_viewer_root, project_s3_prefix)
+
+    input_format = str(project.get("format", "")).strip().lower()
+    if input_format != "potree":
+        raise ValueError("Einzelprojekt enthaelt kein unterstuetztes Punktwolkenformat.")
+    entry = create_pointcloud_index_entry(
+        str(project.get("name", "")).strip() or str(project.get("projekt", "")).strip() or "Punktwolke 1",
+        input_format,
+        str(project.get("viewer_path", "")).strip(),
+        str(project.get("s3_path", "")).strip(),
+        extract_pointcloud_crs_metadata(project),
+    )
+    if "visible" in project:
+        entry["visible"] = project["visible"]
+    _pointcloud_storage_boundary(entry, project_viewer_root, project_s3_prefix)
+    return (entry,)
+
+
+def validate_project_pointcloud_add_target(
+    project: dict[str, Any],
+    project_viewer_root: str,
+    project_s3_prefix: str,
+) -> tuple[dict[str, Any], ...]:
+    """Fail fast unless a project can safely accept Potree child clouds."""
+
+    return _pointclouds_for_add(project, project_viewer_root, project_s3_prefix)
+
+
 def _pointcloud_crs_metadata(pointcloud: dict[str, Any]) -> dict[str, Any] | None:
-    crs_info = extract_pointcloud_crs_metadata(pointcloud)
-    if crs_info:
-        return crs_info
+    crs_info = pointcloud.get("crs_info")
+    if isinstance(crs_info, dict) and crs_info:
+        return dict(crs_info)
     legacy_pointcloud = dict(pointcloud)
     legacy_pointcloud.pop("crs_info", None)
     return extract_pointcloud_crs_metadata(legacy_pointcloud)
@@ -583,6 +631,62 @@ def _project_from_snapshot(index_data: dict[str, Any], project_id: str) -> dict[
             if isinstance(project, dict) and str(project.get("id", "")).strip() == project_id:
                 return project
     raise ValueError(f"Projekt mit ID '{project_id}' wurde nicht gefunden.")
+
+
+def _validate_pointcloud_model_crs(project, prepared_clouds, remaining_clouds=()) -> None:
+    """Reject incompatible cloud changes before any S3 write, including staged metadata."""
+
+    models = project.get("models")
+    if not models:
+        return
+    if not isinstance(models, list) or any(not isinstance(model, dict) for model in models):
+        raise ValueError("Projekt enthält ungültige models[]-Metadaten.")
+    references = []
+    for model in models:
+        reference = extract_pointcloud_crs_metadata(model) or {}
+        label = str(model.get("name") or model.get("id") or "3D-Modell")
+        if not reference.get("value") or not reference.get("vertical_crs"):
+            raise ValueError(
+                f"CRS oder Höhenbezug des vorhandenen 3D-Modells '{label}' fehlt. "
+                "Bitte die Modell-Metadaten vor der Punktwolkenänderung vervollständigen."
+            )
+        references.append((label, reference))
+
+    def check(label, candidates, *, require_complete):
+        known = set()
+        for candidate in candidates:
+            reference = normalize_crs_metadata(candidate) or {}
+            for field, field_label in (("value", "CRS"), ("vertical_crs", "Höhenbezug")):
+                value = reference.get(field)
+                if not value:
+                    continue
+                known.add(field)
+                for model_label, model_reference in references:
+                    if value != model_reference[field]:
+                        raise ValueError(
+                            f"{field_label} der Punktwolke '{label}' ({value}) widerspricht "
+                            f"dem vorhandenen 3D-Modell '{model_label}' ({model_reference[field]}). "
+                            "Die Punktwolkenänderung wurde nicht durchgeführt."
+                        )
+        if require_complete and known != {"value", "vertical_crs"}:
+            raise ValueError(
+                f"CRS oder Höhenbezug der Punktwolke '{label}' fehlt. "
+                "Die Kompatibilität mit vorhandenen 3D-Modellen kann nicht geprüft werden."
+            )
+
+    for cloud in prepared_clouds:
+        candidates = [cloud.crs_info]
+        for local_path, key in cloud.files_to_upload:
+            if key.rsplit("/", 1)[-1].lower() != "metadata.json":
+                continue
+            with open(local_path, encoding="utf-8") as handle:
+                document = json.load(handle)
+            if not isinstance(document, dict):
+                raise ValueError(f"Ungültige Potree-Metadaten für '{cloud.name}'.")
+            candidates.extend((extract_pointcloud_crs_metadata(document), detect_crs_from_metadata_dict(document)))
+        check(cloud.name, candidates, require_complete=True)
+    for cloud in remaining_clouds:
+        check(cloud.get("name", "Punktwolke"), [extract_pointcloud_crs_metadata(cloud)], require_complete=False)
 
 
 def add_project_pointclouds(
@@ -599,17 +703,18 @@ def add_project_pointclouds(
     bucket_name: str = BUCKET_NAME,
     timestamp: str = "",
 ) -> ProjectOperationResult:
-    """Append child clouds to an explicit multi-project without changing project identity."""
+    """Append child clouds, promoting a legacy single project when necessary."""
 
     snapshot = copy.deepcopy(index_data)
     original_project = _project_from_snapshot(snapshot, project_id)
-    existing_clouds = validate_explicit_multi_project(
+    existing_clouds = _pointclouds_for_add(
         original_project,
         project_viewer_root,
         project_s3_prefix,
     )
     additions = tuple(prepared_clouds)
     _validate_new_multi_clouds(additions, existing_clouds, project_viewer_root, project_s3_prefix)
+    _validate_pointcloud_model_crs(original_project, additions, existing_clouds)
     ledger = UploadedKeyLedger()
 
     try:
@@ -623,7 +728,7 @@ def add_project_pointclouds(
 
         def update_project(project: dict[str, Any]) -> None:
             original = _project_from_snapshot(snapshot, project_id)
-            current_clouds = validate_explicit_multi_project(
+            current_clouds = _pointclouds_for_add(
                 original,
                 project_viewer_root,
                 project_s3_prefix,
@@ -642,7 +747,9 @@ def add_project_pointclouds(
         _restore_index(index_data, snapshot)
         if ledger.uploaded_keys:
             try:
-                delete_keys(ledger.as_tuple())
+                rollback_keys = _rollback_keys_preserving_conflict(ledger.as_tuple(), snapshot, operation_error)
+                if rollback_keys:
+                    delete_keys(rollback_keys)
             except Exception as cleanup_error:
                 orphaned_keys = ", ".join(ledger.as_tuple())
                 raise RuntimeError(
@@ -688,10 +795,13 @@ def remove_project_pointcloud(
     )
     if len(existing_clouds) <= 1:
         raise ValueError("Die letzte Punktwolke eines Multi-Projekts kann nicht entfernt werden.")
-    target_keys = filter_pointcloud_object_keys(
-        target,
-        existing_target_keys,
-        project_viewer_root,
+    target_keys = exclude_model_object_keys(
+        filter_pointcloud_object_keys(
+            target,
+            existing_target_keys,
+            project_viewer_root,
+            project_s3_prefix,
+        ),
         project_s3_prefix,
     )
     target_name = str(target.get("name", "Punktwolke"))
@@ -757,6 +867,7 @@ def replace_project_pointclouds(
     """
 
     snapshot = copy.deepcopy(index_data)
+    _validate_pointcloud_model_crs(_project_from_snapshot(snapshot, project_id), prepared_clouds)
     ledger = UploadedKeyLedger()
     files_to_upload = [
         file_to_upload
@@ -792,9 +903,11 @@ def replace_project_pointclouds(
             raise RuntimeError("Projekt konnte im Index nicht gefunden werden.")
         if not save_index(index_data):
             raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
-    except Exception:
+    except Exception as operation_error:
         if ledger.uploaded_keys:
-            delete_keys(ledger.as_tuple())
+            rollback_keys = _rollback_keys_preserving_conflict(ledger.as_tuple(), snapshot, operation_error)
+            if rollback_keys:
+                delete_keys(rollback_keys)
         _restore_index(index_data, snapshot)
         raise
 
@@ -846,6 +959,27 @@ def replace_single_project_pointcloud(
     original_snapshot_project = _project_from_snapshot(snapshot, project_id)
     snapshot_pointclouds = original_snapshot_project.get("pointclouds")
     is_legacy_single = not isinstance(snapshot_pointclouds, list) or not snapshot_pointclouds
+    remaining_clouds = () if is_legacy_single else tuple(
+        cloud for cloud in snapshot_pointclouds
+        if isinstance(cloud, dict) and not _pointcloud_matches_s3_path(cloud, target_pointcloud_s3_path)
+    )
+    _validate_pointcloud_model_crs(original_snapshot_project, (prepared_cloud,), remaining_clouds)
+    cleanup_target_keys = tuple(existing_target_keys)
+    if not is_legacy_single and _normalize_s3_path(target_pointcloud_s3_path) == _normalize_s3_path(s3_prefix):
+        matches = [
+            pointcloud
+            for pointcloud in snapshot_pointclouds
+            if isinstance(pointcloud, dict)
+            and _pointcloud_matches_s3_path(pointcloud, target_pointcloud_s3_path)
+        ]
+        if len(matches) != 1:
+            raise ValueError(f"Punktwolke mit S3-Pfad '{target_pointcloud_s3_path}' wurde nicht eindeutig gefunden.")
+        cleanup_target_keys = filter_pointcloud_object_keys(
+            matches[0],
+            cleanup_target_keys,
+            base_viewer_path,
+            s3_prefix,
+        )
     legacy_display_name = (
         str(original_snapshot_project.get("name", "")).strip()
         or str(original_snapshot_project.get("projekt", "")).strip()
@@ -962,14 +1096,16 @@ def replace_single_project_pointcloud(
             )
         if not save_index(index_data):
             raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
-    except Exception:
+    except Exception as operation_error:
         if ledger.uploaded_keys:
-            delete_keys(ledger.as_tuple())
+            rollback_keys = _rollback_keys_preserving_conflict(ledger.as_tuple(), snapshot, operation_error)
+            if rollback_keys:
+                delete_keys(rollback_keys)
         _restore_index(index_data, snapshot)
         raise
 
     orphaned_keys = compute_orphaned_keys(
-        exclude_model_object_keys(existing_target_keys, s3_prefix),
+        exclude_model_object_keys(cleanup_target_keys, s3_prefix),
         replacement_keys,
     )
     if orphaned_keys:
@@ -1121,8 +1257,8 @@ def replace_single_project_model(
             raise RuntimeError("Projekt konnte im Index nicht gefunden werden.")
         if not save_index(index_data):
             raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
-    except Exception:
-        rollback_keys = _rollback_keys_preserving_indexed_models(ledger.as_tuple(), snapshot)
+    except Exception as operation_error:
+        rollback_keys = _rollback_keys_preserving_conflict(ledger.as_tuple(), snapshot, operation_error)
         if rollback_keys:
             delete_keys(rollback_keys)
         _restore_index(index_data, snapshot)
@@ -1258,8 +1394,8 @@ def add_project_models(
             raise RuntimeError("Projekt konnte im Index nicht gefunden werden.")
         if not save_index(index_data):
             raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
-    except Exception:
-        rollback_keys = _rollback_keys_preserving_indexed_models(ledger.as_tuple(), snapshot)
+    except Exception as operation_error:
+        rollback_keys = _rollback_keys_preserving_conflict(ledger.as_tuple(), snapshot, operation_error)
         if rollback_keys:
             delete_keys(rollback_keys)
         _restore_index(index_data, snapshot)
@@ -1414,9 +1550,9 @@ def upload_new_project(
             project_id=str(prepared_upload.project_metadata.get("id", "")),
             message="Upload abgebrochen. Bereits hochgeladene Dateien wurden wieder entfernt.",
         )
-    except Exception:
+    except Exception as operation_error:
         if ledger.uploaded_keys:
-            rollback_keys = _rollback_keys_preserving_indexed_models(ledger.as_tuple(), snapshot)
+            rollback_keys = _rollback_keys_preserving_conflict(ledger.as_tuple(), snapshot, operation_error)
             if rollback_keys:
                 delete_keys(rollback_keys)
         _restore_index(index_data, snapshot)
@@ -1583,12 +1719,20 @@ def build_duplicate_project_metadata(
 ) -> dict[str, Any]:
     """Build an active cloned project entry while preserving multi-cloud metadata."""
 
+    pointclouds = source_project.get("pointclouds")
+    has_pointclouds = isinstance(pointclouds, list) and bool(pointclouds)
+    cloud_formats = (
+        [str(pointcloud.get("format", "")).strip().casefold() for pointcloud in pointclouds if isinstance(pointcloud, dict)]
+        if has_pointclouds
+        else [str(source_project.get("format", "")).strip().casefold()]
+    )
+    allowed_formats = {"", "potree"} if has_pointclouds else {"", "potree", "multi"}
+    if any(cloud_format not in allowed_formats for cloud_format in cloud_formats):
+        raise ValueError("Das Projekt enthaelt ein nicht unterstuetztes Punktwolkenformat.")
+
     old_s3_prefix = str(source_project.get("s3_path", "")).rstrip("/")
     old_viewer_path = str(source_project.get("viewer_path", "")).rstrip("/")
-    if source_project.get("format") == "copc" and old_viewer_path.endswith(f"/{COPC_OBJECT_NAME}"):
-        old_viewer_root = old_viewer_path[: -len(f"/{COPC_OBJECT_NAME}")]
-    else:
-        old_viewer_root = old_viewer_path
+    old_viewer_root = old_viewer_path
 
     duplicated = copy.deepcopy(source_project)
     duplicated.update(
@@ -1649,6 +1793,39 @@ def build_duplicate_project_metadata(
     return duplicated
 
 
+def _rollback_keys_preserving_conflict(
+    uploaded_keys: tuple[str, ...],
+    index_snapshot: dict[str, Any],
+    operation_error: Exception,
+) -> tuple[str, ...]:
+    rollback_keys = _rollback_keys_preserving_indexed_models(uploaded_keys, index_snapshot)
+    current_data = getattr(operation_error, "current_data", None)
+    if isinstance(operation_error, ProjectMetadataConflictError) and not isinstance(current_data, dict):
+        operation_error.cleanup_deferred_keys = rollback_keys
+        return ()
+    if not isinstance(current_data, dict):
+        return rollback_keys
+    protected_prefixes: list[str] = []
+    for section in ("projects", "disabled_projects"):
+        for project in current_data.get(section, ()):
+            if not isinstance(project, dict):
+                continue
+            children = project.get("pointclouds")
+            if isinstance(children, list) and children:
+                referenced = [*children, *(project.get("models") or ())]
+            else:
+                referenced = [project, *(project.get("models") or ())]
+            for entry in referenced:
+                if isinstance(entry, dict):
+                    prefix = _normalize_s3_path(str(entry.get("s3_path", "")))
+                    if prefix:
+                        protected_prefixes.append(prefix)
+    return tuple(
+        key for key in rollback_keys
+        if not any(_normalize_s3_path(key) == prefix or _normalize_s3_path(key).startswith(f"{prefix}/") for prefix in protected_prefixes)
+    )
+
+
 def apply_project_rename_metadata(
     project: dict[str, Any],
     new_kunde: str,
@@ -1686,6 +1863,7 @@ def build_deleted_project_entry(
         "s3_path": s3_path,
         "deleted_at": deleted_at,
         "original_link": project_info.get("link", ""),
+        "cleanup_status": "pending",
     }
 
 
@@ -1765,10 +1943,21 @@ def duplicate_project(
         projects.insert(0, new_project)
         if not save_index(index_data):
             raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
-    except Exception:
+    except Exception as operation_error:
+        copied_keys = tuple(getattr(operation_error, "copied_keys", copied_keys))
+        copied_keys = _rollback_keys_preserving_conflict(copied_keys, snapshot, operation_error)
+        cleanup_error = None
         if copied_keys:
-            delete_keys(copied_keys)
+            try:
+                delete_keys(copied_keys)
+            except Exception as error:
+                cleanup_error = error
         _restore_index(index_data, snapshot)
+        if cleanup_error is not None:
+            raise RuntimeError(
+                f"Projektduplizierung fehlgeschlagen; Cleanup unvollstaendig fuer "
+                f"{len(copied_keys)} kopierte Objekte: {cleanup_error}"
+            ) from operation_error
         raise
 
     return ProjectOperationResult(
@@ -1794,28 +1983,97 @@ def delete_project(
     project_id = str(project_info.get("id", "")).strip()
     if not s3_path:
         return ProjectOperationResult(status="failed", project_id=project_id, message="S3-Pfad nicht gefunden.")
+    if _storage_path_is_referenced(index_data, project_id, s3_path):
+        return ProjectOperationResult(
+            status="failed",
+            project_id=project_id,
+            message="Projekt wurde nicht geloescht; sein S3-Pfad wird von einem anderen Projekt verwendet.",
+        )
 
-    object_keys = tuple(collect_project_objects(s3_client, s3_path, bucket_name=bucket_name))
-    deleted_count = delete_s3_objects(s3_client, object_keys, bucket_name=bucket_name) if object_keys else 0
-
-    metadata_errors: list[str] = []
+    original_index = copy.deepcopy(index_data)
+    original_deleted = copy.deepcopy(deleted_data)
     deleted_entry = build_deleted_project_entry(project_info, s3_path, deleted_at)
     upsert_deleted_project(deleted_data, deleted_entry)
-    if not save_deleted(deleted_data):
-        metadata_errors.append("deleted_projects.json")
+    try:
+        if not save_deleted(deleted_data):
+            raise RuntimeError("deleted_projects.json konnte nicht gespeichert werden.")
+    except Exception as error:
+        _restore_index(deleted_data, original_deleted)
+        return ProjectOperationResult(
+            status="failed",
+            project_id=project_id,
+            warnings=(str(error),),
+            message="Projekt wurde nicht geloescht; das Loeschjournal konnte nicht gespeichert werden.",
+        )
 
     removed = remove_project_from_index(index_data, project_id)
     if removed:
-        if not save_index(index_data):
-            metadata_errors.append("projects_index.json")
+        cleanup_project = copy.deepcopy(project_info)
+        cleanup_project["cleanup_pending"] = True
+        cleanup_project["disabled_at"] = deleted_at
+        disabled_projects = index_data.get("disabled_projects")
+        if not isinstance(disabled_projects, list):
+            disabled_projects = []
+            index_data["disabled_projects"] = disabled_projects
+        disabled_projects.insert(0, cleanup_project)
+        try:
+            if not save_index(index_data):
+                raise RuntimeError("projects_index.json konnte nicht gespeichert werden.")
+        except Exception as error:
+            _restore_index(index_data, original_index)
+            return ProjectOperationResult(
+                status="partial",
+                project_id=project_id,
+                warnings=(str(error),),
+                message="Loeschung vorgemerkt; Projektindex unveraendert und Projektdaten erhalten.",
+            )
 
-    if metadata_errors:
+    try:
+        object_keys = tuple(collect_project_objects(s3_client, s3_path, bucket_name=bucket_name))
+        deleted_count = delete_s3_objects(s3_client, object_keys, bucket_name=bucket_name) if object_keys else 0
+    except S3DeleteError as error:
+        return ProjectOperationResult(
+            status="partial",
+            project_id=project_id,
+            deleted_keys=error.deleted_keys,
+            warnings=(str(error),),
+            message="Projekt ist deaktiviert; einige S3-Daten benoetigen einen erneuten Loeschversuch.",
+        )
+    except Exception as error:
+        return ProjectOperationResult(
+            status="partial",
+            project_id=project_id,
+            warnings=(str(error),),
+            message="Projekt ist deaktiviert; S3-Daten konnten nicht geloescht werden.",
+        )
+
+    deleted_entry["cleanup_status"] = "complete"
+    upsert_deleted_project(deleted_data, deleted_entry)
+    try:
+        if not save_deleted(deleted_data):
+            raise RuntimeError("deleted_projects.json konnte nach dem Cleanup nicht gespeichert werden.")
+    except Exception as error:
         return ProjectOperationResult(
             status="partial",
             project_id=project_id,
             deleted_keys=object_keys,
-            warnings=(f"Metadaten konnten nicht vollständig aktualisiert werden: {', '.join(metadata_errors)}",),
-            message="Projektdaten wurden in S3 gelöscht, aber Metadaten sind unvollständig.",
+            warnings=(str(error),),
+            message="Projektdaten wurden geloescht; bitte die Projektloeschung erneut ausfuehren, um den Status abzuschliessen.",
+        )
+
+    tombstone_snapshot = copy.deepcopy(index_data)
+    remove_project_from_index(index_data, project_id)
+    try:
+        if not save_index(index_data):
+            raise RuntimeError("Cleanup-Eintrag konnte nicht aus projects_index.json entfernt werden.")
+    except Exception as error:
+        _restore_index(index_data, tombstone_snapshot)
+        return ProjectOperationResult(
+            status="partial",
+            project_id=project_id,
+            deleted_keys=object_keys,
+            warnings=(str(error),),
+            message="Projektdaten wurden geloescht; der sichtbare Cleanup-Eintrag kann erneut entfernt werden.",
         )
 
     return ProjectOperationResult(
@@ -1826,12 +2084,38 @@ def delete_project(
     )
 
 
+def _storage_path_is_referenced(index_data: dict[str, Any], project_id: str, target_path: str) -> bool:
+    target = target_path.strip().rstrip("/")
+    for collection_name in ("projects", "disabled_projects"):
+        collection = index_data.get(collection_name)
+        if not isinstance(collection, list):
+            continue
+        for project in collection:
+            if not isinstance(project, dict) or str(project.get("id", "")).strip() == project_id:
+                continue
+            references = [project.get("s3_path", "")]
+            for child_name in ("pointclouds", "models"):
+                children = project.get(child_name)
+                if isinstance(children, list):
+                    references.extend(child.get("s3_path", "") for child in children if isinstance(child, dict))
+            for reference in references:
+                path = str(reference or "").strip().rstrip("/")
+                if path and (path == target or path.startswith(target + "/") or target.startswith(path + "/")):
+                    return True
+    return False
+
+
 def build_download_folder_name(project_info: dict[str, Any], sanitize_func) -> str:
+    project_id = str(project_info.get("id", "")).strip()
+    if not project_id or not re.fullmatch(r"[A-Za-z0-9_-]+", project_id):
+        raise ValueError("Projekt-ID enthaelt ungueltige Pfadbestandteile.")
     folder_parts = [
         sanitize_func(project_info.get("kunde", "")),
         sanitize_func(project_info.get("projekt", "")),
-        str(project_info.get("id", "")).strip(),
+        project_id,
     ]
+    if any(not part or part in {".", ".."} or ":" in part or "/" in part or "\\" in part for part in folder_parts):
+        raise ValueError("Projektname enthaelt ungueltige Pfadbestandteile.")
     return "_".join(part for part in folder_parts if part) or "punktwolke"
 
 
@@ -1853,7 +2137,10 @@ def download_project(
     if not target_dir:
         raise ValueError("Kein Zielordner ausgewaehlt.")
 
-    download_dir = os.path.join(target_dir, build_download_folder_name(project_info, sanitize_func))
+    target_root = os.path.realpath(os.path.abspath(target_dir))
+    download_dir = os.path.realpath(os.path.join(target_root, build_download_folder_name(project_info, sanitize_func)))
+    if os.path.commonpath([target_root, download_dir]) != target_root:
+        raise ValueError("Projekt-Downloadziel liegt ausserhalb des Zielordners.")
     os.makedirs(download_dir, exist_ok=True)
     object_entries = [
         entry
@@ -1920,4 +2207,5 @@ __all__ = [
     "upload_new_project",
     "upsert_deleted_project",
     "validate_explicit_multi_project",
+    "validate_project_pointcloud_add_target",
 ]

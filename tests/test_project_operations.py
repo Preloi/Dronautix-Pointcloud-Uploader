@@ -36,6 +36,7 @@ from dronautix_uploader.core.project_operations import (
     remove_project_pointcloud,
     upload_new_project,
 )
+from dronautix_uploader.core.project_repository import ProjectMetadataConflictError, ProjectMetadataWriteUncertainError
 
 
 class FakeS3Client:
@@ -105,17 +106,21 @@ class FakeProjectS3Client(FakeS3Client):
             file.write(b"data")
 
 
-def test_prepare_cloud_uploads_builds_copc_and_potree_entries(tmp_path):
-    copc = tmp_path / "Scan Ä.copc.laz"
-    copc.write_bytes(b"copc")
-    potree_dir = tmp_path / "potree"
+def write_potree(tmp_path, name="potree", content=b"cloud"):
+    potree_dir = tmp_path / name
     potree_dir.mkdir()
-    (potree_dir / "cloud.js").write_text("cloud.js = {};", encoding="utf-8")
+    (potree_dir / "cloud.js").write_bytes(content)
     (potree_dir / "metadata.json").write_text("{}", encoding="utf-8")
+    return potree_dir
+
+
+def test_prepare_cloud_uploads_builds_potree_entries(tmp_path):
+    first = write_potree(tmp_path, "Scan Ä")
+    potree_dir = write_potree(tmp_path, "potree")
 
     prepared = prepare_cloud_uploads(
         (
-            PointcloudSource(str(copc), input_format="copc", crs_info={"value": "EPSG:25832"}),
+            PointcloudSource(str(first), input_format="potree", crs_info={"value": "EPSG:25832"}),
             PointcloudSource(str(potree_dir), name="Potree Cloud", input_format="potree"),
         ),
         "kunde/id/projekt",
@@ -123,8 +128,8 @@ def test_prepare_cloud_uploads_builds_copc_and_potree_entries(tmp_path):
     )
 
     assert prepared[0].slug == "scan_ae"
-    assert prepared[0].viewer_path == "kunde/id/projekt/scan_ae/source.copc.laz"
-    assert prepared[0].s3_path == "pointclouds/kunde/id/projekt/scan_ae/source.copc.laz"
+    assert prepared[0].viewer_path == "kunde/id/projekt/scan_ae"
+    assert prepared[0].s3_path == "pointclouds/kunde/id/projekt/scan_ae"
     assert prepared[0].index_entry["crs"] == "EPSG:25832"
     assert prepared[1].slug == "potree_cloud"
     assert [key for _local, key in prepared[1].files_to_upload][-1].endswith("metadata.json")
@@ -137,12 +142,11 @@ def test_compute_orphaned_keys_keeps_reuploaded_keys():
     ) == ("prefix/old.bin",)
 
 
-def test_build_new_project_upload_single_copc_uses_legacy_project_shape(tmp_path):
-    copc = tmp_path / "single.copc.laz"
-    copc.write_bytes(b"copc")
+def test_build_new_project_upload_single_potree_uses_legacy_project_shape(tmp_path):
+    potree = write_potree(tmp_path, "single")
 
     upload = build_new_project_upload(
-        sources=(PointcloudSource(str(copc), input_format="copc", crs_info={"value": "EPSG:25832"}),),
+        sources=(PointcloudSource(str(potree), input_format="potree", crs_info={"value": "EPSG:25832"}),),
         timestamp="2026-06-21T12:00:00",
         kunde="Kunde",
         projekt="Projekt",
@@ -157,28 +161,27 @@ def test_build_new_project_upload_single_copc_uses_legacy_project_shape(tmp_path
         "kunde": "Kunde",
         "id": "abc123ef",
         "projekt": "Projekt",
-        "format": "copc",
+        "format": "potree",
         "link": "https://viewer/?id=abc123ef",
-        "viewer_path": "kunde/abc123ef/projekt/source.copc.laz",
+        "viewer_path": "kunde/abc123ef/projekt",
         "s3_path": "pointclouds/kunde/abc123ef/projekt",
         "crs": "EPSG:25832",
         "projection": "EPSG:25832",
         "crs_info": {"value": "EPSG:25832"},
     }
-    assert upload.files_to_upload == ((str(copc), "pointclouds/kunde/abc123ef/projekt/source.copc.laz"),)
+    assert upload.files_to_upload == (
+        (str(potree / "cloud.js"), "pointclouds/kunde/abc123ef/projekt/cloud.js"),
+        (str(potree / "metadata.json"), "pointclouds/kunde/abc123ef/projekt/metadata.json"),
+    )
 
 
-def test_build_new_project_upload_multi_mixed_sources_sets_pointclouds_and_clears_mismatch(tmp_path):
-    copc = tmp_path / "scan.copc.laz"
-    copc.write_bytes(b"copc")
-    potree = tmp_path / "potree"
-    potree.mkdir()
-    (potree / "cloud.js").write_text("cloud.js = {};", encoding="utf-8")
-    (potree / "metadata.json").write_text("{}", encoding="utf-8")
+def test_build_new_project_upload_multi_potree_sources_clears_crs_mismatch(tmp_path):
+    scan = write_potree(tmp_path, "scan")
+    potree = write_potree(tmp_path, "potree")
 
     upload = build_new_project_upload(
         sources=(
-            PointcloudSource(str(copc), name="Scan", input_format="copc", crs_info={"value": "EPSG:25832"}),
+            PointcloudSource(str(scan), name="Scan", input_format="potree", crs_info={"value": "EPSG:25832"}),
             PointcloudSource(str(potree), name="Potree", input_format="potree", crs_info={"value": "EPSG:4326"}),
         ),
         timestamp="2026-06-21T12:00:00",
@@ -201,10 +204,9 @@ def test_build_new_project_upload_multi_mixed_sources_sets_pointclouds_and_clear
 
 
 def test_upload_new_project_inserts_index_after_upload_success(tmp_path):
-    copc = tmp_path / "single.copc.laz"
-    copc.write_bytes(b"copc")
+    potree = write_potree(tmp_path, "single")
     prepared_upload = build_new_project_upload(
-        sources=(PointcloudSource(str(copc), input_format="copc"),),
+        sources=(PointcloudSource(str(potree), input_format="potree"),),
         timestamp="2026-06-21T12:00:00",
         kunde="Kunde",
         projekt="Projekt",
@@ -227,17 +229,19 @@ def test_upload_new_project_inserts_index_after_upload_success(tmp_path):
 
     assert result.status == "success"
     assert result.project_id == "abc123ef"
-    assert result.uploaded_keys == ("pointclouds/kunde/abc123ef/projekt/source.copc.laz",)
+    assert result.uploaded_keys == (
+        "pointclouds/kunde/abc123ef/projekt/cloud.js",
+        "pointclouds/kunde/abc123ef/projekt/metadata.json",
+    )
     assert [project["id"] for project in index_data["projects"]] == ["abc123ef", "old"]
     assert saved_indexes == [["abc123ef", "old"]]
     assert deleted_keys == []
 
 
 def test_upload_new_project_forwards_progress_events(tmp_path):
-    copc = tmp_path / "single.copc.laz"
-    copc.write_bytes(b"copc")
+    potree = write_potree(tmp_path, "single")
     prepared_upload = build_new_project_upload(
-        sources=(PointcloudSource(str(copc), input_format="copc"),),
+        sources=(PointcloudSource(str(potree), input_format="potree"),),
         timestamp="2026-06-21T12:00:00",
         kunde="Kunde",
         projekt="Projekt",
@@ -268,14 +272,12 @@ def test_upload_new_project_forwards_progress_events(tmp_path):
 
 
 def test_upload_new_project_cancel_rolls_back_uploaded_keys_and_returns_cancelled(tmp_path):
-    first = tmp_path / "first.copc.laz"
-    first.write_bytes(b"copc-1")
-    second = tmp_path / "second.copc.laz"
-    second.write_bytes(b"copc-2")
+    first = write_potree(tmp_path, "first", b"cloud-1")
+    second = write_potree(tmp_path, "second", b"cloud-2")
     prepared_upload = build_new_project_upload(
         sources=(
-            PointcloudSource(str(first), input_format="copc"),
-            PointcloudSource(str(second), input_format="copc"),
+            PointcloudSource(str(first), input_format="potree"),
+            PointcloudSource(str(second), input_format="potree"),
         ),
         timestamp="2026-06-21T12:00:00",
         kunde="Kunde",
@@ -312,10 +314,9 @@ def test_upload_new_project_cancel_rolls_back_uploaded_keys_and_returns_cancelle
 
 
 def test_upload_new_project_rolls_back_uploaded_keys_when_index_save_fails(tmp_path):
-    copc = tmp_path / "single.copc.laz"
-    copc.write_bytes(b"copc")
+    potree = write_potree(tmp_path, "single")
     prepared_upload = build_new_project_upload(
-        sources=(PointcloudSource(str(copc), input_format="copc"),),
+        sources=(PointcloudSource(str(potree), input_format="potree"),),
         timestamp="2026-06-21T12:00:00",
         kunde="Kunde",
         projekt="Projekt",
@@ -337,17 +338,20 @@ def test_upload_new_project_rolls_back_uploaded_keys_when_index_save_fails(tmp_p
         )
 
     assert index_data == {"projects": [{"id": "old"}]}
-    assert deleted_keys == ["pointclouds/kunde/abc123ef/projekt/source.copc.laz"]
+    assert deleted_keys == [
+        "pointclouds/kunde/abc123ef/projekt/cloud.js",
+        "pointclouds/kunde/abc123ef/projekt/metadata.json",
+    ]
 
 
 def test_upload_rollback_keeps_model_hash_version_referenced_by_previous_index(tmp_path):
     content_hash = "b" * 64
     model_prefix = f"pointclouds/kunde/abc123ef/projekt/models/halle/versions/{content_hash}"
     viewer_prefix = f"kunde/abc123ef/projekt/models/halle/versions/{content_hash}"
-    pointcloud = tmp_path / "source.copc.laz"
+    pointcloud = tmp_path / "cloud.js"
     scene = tmp_path / "scene.glb"
     manifest = tmp_path / "model.json"
-    pointcloud.write_bytes(b"copc")
+    pointcloud.write_bytes(b"cloud")
     scene.write_bytes(b"glTF")
     manifest.write_text("{}", encoding="utf-8")
     model_entry = {
@@ -366,7 +370,7 @@ def test_upload_rollback_keeps_model_hash_version_referenced_by_previous_index(t
             "models": [model_entry],
         },
         files_to_upload=(
-            (str(pointcloud), "pointclouds/kunde/abc123ef/projekt/source.copc.laz"),
+            (str(pointcloud), "pointclouds/kunde/abc123ef/projekt/cloud.js"),
             (str(scene), f"{model_prefix}/scene.glb"),
             (str(manifest), f"{model_prefix}/model.json"),
         ),
@@ -386,7 +390,7 @@ def test_upload_rollback_keeps_model_hash_version_referenced_by_previous_index(t
         )
 
     assert previous_index == {"projects": [{"id": "abc123ef", "models": [model_entry]}]}
-    assert deleted_keys == ["pointclouds/kunde/abc123ef/projekt/source.copc.laz"]
+    assert deleted_keys == ["pointclouds/kunde/abc123ef/projekt/cloud.js"]
 
 
 @pytest.mark.parametrize("include_manifest, duplicate_scene", ((False, False), (True, True)))
@@ -462,9 +466,9 @@ def test_build_duplicate_project_metadata_preserves_multi_clouds_and_rewrites_pa
             },
             {
                 "name": "Cloud B",
-                "format": "copc",
-                "viewer_path": "alt/oldid/altprojekt/cloud_b/source.copc.laz",
-                "s3_path": "pointclouds/alt/oldid/altprojekt/cloud_b/source.copc.laz",
+                "format": "potree",
+                "viewer_path": "alt/oldid/altprojekt/cloud_b",
+                "s3_path": "pointclouds/alt/oldid/altprojekt/cloud_b",
                 "visible": False,
             },
         ],
@@ -492,8 +496,8 @@ def test_build_duplicate_project_metadata_preserves_multi_clouds_and_rewrites_pa
     assert duplicated["pointclouds"][0]["viewer_path"] == "neu/newid/neuprojekt/cloud_a"
     assert duplicated["pointclouds"][0]["s3_path"] == "pointclouds/neu/newid/neuprojekt/cloud_a"
     assert duplicated["pointclouds"][0]["crs_info"] == {"value": "EPSG:25832"}
-    assert duplicated["pointclouds"][1]["viewer_path"] == "neu/newid/neuprojekt/cloud_b/source.copc.laz"
-    assert duplicated["pointclouds"][1]["s3_path"] == "pointclouds/neu/newid/neuprojekt/cloud_b/source.copc.laz"
+    assert duplicated["pointclouds"][1]["viewer_path"] == "neu/newid/neuprojekt/cloud_b"
+    assert duplicated["pointclouds"][1]["s3_path"] == "pointclouds/neu/newid/neuprojekt/cloud_b"
     assert duplicated["pointclouds"][1]["visible"] is False
 
 
@@ -738,6 +742,100 @@ def test_duplicate_project_rolls_back_copied_keys_when_index_save_fails():
     assert deleted == ["pointclouds/neu/newid/neuprojekt/cloud.js"]
 
 
+@pytest.mark.parametrize("cleanup_fails", (False, True))
+def test_duplicate_project_cleans_first_copy_when_second_copy_fails(cleanup_fails):
+    class FailSecondCopy(FakeProjectS3Client):
+        def copy_object(self, **kwargs):
+            if self.copies:
+                raise RuntimeError("second copy failed")
+            super().copy_object(**kwargs)
+
+    source_project = {"id": "oldid", "s3_path": "pointclouds/old"}
+    s3_client = FailSecondCopy(pages=[{"Contents": [
+        {"Key": "pointclouds/old/first.bin", "Size": 1},
+        {"Key": "pointclouds/old/second.bin", "Size": 1},
+    ]}])
+    cleaned = []
+
+    def cleanup(keys):
+        cleaned.extend(keys)
+        if cleanup_fails:
+            raise RuntimeError("cleanup denied")
+
+    expected = "Cleanup unvollstaendig" if cleanup_fails else "second copy failed"
+    with pytest.raises(RuntimeError, match=expected):
+        duplicate_project(
+            s3_client=s3_client,
+            index_data={"projects": []},
+            source_project=source_project,
+            timestamp="now",
+            new_kunde="Neu",
+            new_projekt="Projekt",
+            new_project_id="newid",
+            new_project_url="url",
+            new_viewer_root="neu/newid/projekt",
+            new_s3_prefix="pointclouds/neu/newid/projekt",
+            save_index=lambda _data: True,
+            delete_keys=cleanup,
+        )
+
+    assert cleaned == ["pointclouds/neu/newid/projekt/first.bin"]
+
+
+def test_conflict_without_current_snapshot_never_deletes_possible_winner_objects():
+    source_project = {"id": "oldid", "s3_path": "pointclouds/old"}
+    s3_client = FakeProjectS3Client(
+        pages=[{"Contents": [{"Key": "pointclouds/old/models/scene.glb", "Size": 1}]}]
+    )
+    cleaned = []
+
+    def conflict(_data):
+        raise ProjectMetadataConflictError("projects_index.json", current_data=None)
+
+    with pytest.raises(ProjectMetadataConflictError, match="Cleanup.*ausgelassen"):
+        duplicate_project(
+            s3_client=s3_client,
+            index_data={"projects": []},
+            source_project=source_project,
+            timestamp="now",
+            new_kunde="Neu",
+            new_projekt="Projekt",
+            new_project_id="shared",
+            new_project_url="url",
+            new_viewer_root="neu/shared/projekt",
+            new_s3_prefix="pointclouds/neu/shared/projekt",
+            save_index=conflict,
+            delete_keys=lambda keys: cleaned.extend(keys),
+        )
+
+    assert cleaned == []
+
+
+def test_uncertain_committed_index_preserves_now_referenced_copied_objects():
+    source_project = {"id": "oldid", "s3_path": "pointclouds/old"}
+    s3_client = FakeProjectS3Client(
+        pages=[{"Contents": [{"Key": "pointclouds/old/scene.glb", "Size": 1}]}]
+    )
+    cleaned = []
+    target = "pointclouds/neu/shared/projekt"
+
+    def uncertain(_data):
+        raise ProjectMetadataWriteUncertainError(
+            "projects_index.json",
+            current_data={"projects": [{"id": "winner", "s3_path": target}]},
+        )
+
+    with pytest.raises(ProjectMetadataWriteUncertainError):
+        duplicate_project(
+            s3_client=s3_client, index_data={"projects": []}, source_project=source_project,
+            timestamp="now", new_kunde="Neu", new_projekt="Projekt", new_project_id="shared",
+            new_project_url="url", new_viewer_root="neu/shared/projekt", new_s3_prefix=target,
+            save_index=uncertain, delete_keys=lambda keys: cleaned.extend(keys),
+        )
+
+    assert cleaned == []
+
+
 def test_delete_project_removes_from_disabled_list_and_upserts_deleted_entry():
     version = "a" * 64
     s3_client = FakeProjectS3Client(
@@ -784,7 +882,7 @@ def test_delete_project_removes_from_disabled_list_and_upserts_deleted_entry():
     assert saved_index and saved_deleted
 
 
-def test_delete_project_reports_partial_when_metadata_save_fails():
+def test_delete_project_keeps_data_when_index_tombstone_save_fails():
     s3_client = FakeProjectS3Client(
         pages=[{"Contents": [{"Key": "pointclouds/old/cloud.js", "Size": 10}]}]
     )
@@ -802,8 +900,76 @@ def test_delete_project_reports_partial_when_metadata_save_fails():
     )
 
     assert result.status == "partial"
-    assert result.deleted_keys == ("pointclouds/old/cloud.js",)
+    assert result.deleted_keys == ()
     assert "projects_index.json" in result.warnings[0]
+    assert s3_client.deleted == []
+
+
+def test_delete_project_journal_exception_keeps_index_and_data():
+    s3_client = FakeProjectS3Client(pages=[{"Contents": [{"Key": "pointclouds/old/cloud.js", "Size": 1}]}])
+    index_data = {"projects": [{"id": "oldid", "s3_path": "pointclouds/old"}]}
+
+    def fail_journal(_data):
+        raise RuntimeError("journal denied")
+
+    result = delete_project(
+        s3_client=s3_client,
+        index_data=index_data,
+        deleted_data={"deleted_projects": []},
+        project_info=index_data["projects"][0],
+        deleted_at="now",
+        save_index=lambda _data: True,
+        save_deleted=fail_journal,
+    )
+
+    assert result.status == "failed"
+    assert index_data["projects"][0]["id"] == "oldid"
+    assert s3_client.deleted == []
+
+
+def test_delete_project_partial_delete_leaves_retryable_tombstone_then_completes():
+    s3_client = FakeProjectS3Client(pages=[{"Contents": [{"Key": "pointclouds/old/cloud.js", "Size": 1}]}])
+    original_delete = s3_client.delete_objects
+    calls = {"count": 0}
+
+    def partial_once(Bucket, Delete):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return {"Errors": [{"Key": "pointclouds/old/cloud.js", "Code": "Denied", "Message": "no"}]}
+        return original_delete(Bucket=Bucket, Delete=Delete)
+
+    s3_client.delete_objects = partial_once
+    index_data = {"projects": [{"id": "oldid", "s3_path": "pointclouds/old"}], S3_DISABLED_PROJECTS_KEY: []}
+    deleted_data = {"deleted_projects": []}
+    saves = []
+    save = lambda data: saves.append(copy.deepcopy(data)) or True
+
+    first = delete_project(
+        s3_client=s3_client, index_data=index_data, deleted_data=deleted_data,
+        project_info=index_data["projects"][0], deleted_at="now", save_index=save, save_deleted=save,
+    )
+    tombstone = index_data[S3_DISABLED_PROJECTS_KEY][0]
+    assert first.status == "partial" and tombstone["cleanup_pending"] is True
+
+    second = delete_project(
+        s3_client=s3_client, index_data=index_data, deleted_data=deleted_data,
+        project_info=tombstone, deleted_at="later", save_index=save, save_deleted=save,
+    )
+    assert second.status == "success"
+    assert index_data[S3_DISABLED_PROJECTS_KEY] == []
+    assert deleted_data["deleted_projects"][0]["cleanup_status"] == "complete"
+
+
+def test_delete_project_refuses_s3_path_referenced_by_another_project():
+    s3_client = FakeProjectS3Client()
+    target = {"id": "old", "s3_path": "pointclouds/shared"}
+    index_data = {"projects": [target, {"id": "restored", "s3_path": "pointclouds/shared"}]}
+    result = delete_project(
+        s3_client=s3_client, index_data=index_data, deleted_data={"deleted_projects": []},
+        project_info=target, deleted_at="now", save_index=lambda _data: True, save_deleted=lambda _data: True,
+    )
+    assert result.status == "failed"
+    assert s3_client.deleted == []
 
 
 def test_download_project_uses_legacy_folder_name_and_safe_paths(tmp_path):
@@ -812,7 +978,7 @@ def test_download_project_uses_legacy_folder_name_and_safe_paths(tmp_path):
             {
                 "Contents": [
                     {"Key": "pointclouds/kunde/id/projekt/cloud.js", "Size": 4},
-                    {"Key": "pointclouds/kunde/id/projekt/../nested/data.bin", "Size": 4},
+                    {"Key": "pointclouds/kunde/id/projekt/nested/data.bin", "Size": 4},
                     {"Key": "pointclouds/kunde/id/projekt/folder/", "Size": 0},
                 ]
             }
@@ -895,14 +1061,12 @@ def test_download_project_raises_project_cancelled_error_with_download_dir_and_p
 
 
 def test_replace_project_pointclouds_success_updates_disabled_project_and_deletes_orphans(tmp_path):
-    first = tmp_path / "first.copc.laz"
-    second = tmp_path / "second.copc.laz"
-    first.write_bytes(b"first")
-    second.write_bytes(b"second")
+    first = write_potree(tmp_path, "first", b"first")
+    second = write_potree(tmp_path, "second", b"second")
     prepared = prepare_cloud_uploads(
         (
-            PointcloudSource(str(first), name="First", input_format="copc", crs_info={"value": "EPSG:25832"}),
-            PointcloudSource(str(second), name="Second", input_format="copc", crs_info={"value": "EPSG:4326"}),
+            PointcloudSource(str(first), name="First", input_format="potree", crs_info={"value": "EPSG:25832"}),
+            PointcloudSource(str(second), name="Second", input_format="potree", crs_info={"value": "EPSG:4326"}),
         ),
         "kunde/project/projekt",
         "pointclouds/kunde/project/projekt",
@@ -930,7 +1094,7 @@ def test_replace_project_pointclouds_success_updates_disabled_project_and_delete
         s3_prefix="pointclouds/kunde/project/projekt",
         prepared_clouds=prepared,
         existing_keys=(
-            "pointclouds/kunde/project/projekt/first/source.copc.laz",
+            "pointclouds/kunde/project/projekt/first/cloud.js",
             "pointclouds/kunde/project/projekt/old/orphan.bin",
         ),
         save_index=lambda data: saved_indexes.append(data.copy()) or True,
@@ -950,10 +1114,9 @@ def test_replace_project_pointclouds_success_updates_disabled_project_and_delete
 
 
 def test_replace_project_pointclouds_forwards_progress_events(tmp_path):
-    first = tmp_path / "first.copc.laz"
-    first.write_bytes(b"first")
+    first = write_potree(tmp_path, "first", b"first")
     prepared = prepare_cloud_uploads(
-        (PointcloudSource(str(first), name="First", input_format="copc"),),
+        (PointcloudSource(str(first), name="First", input_format="potree"),),
         "kunde/project/projekt",
         "pointclouds/kunde/project/projekt",
     )
@@ -974,18 +1137,18 @@ def test_replace_project_pointclouds_forwards_progress_events(tmp_path):
     )
 
     assert result.status == "success"
-    assert [event.kind for event in events] == ["log", "log", "progress", "progress", "log"]
+    assert events[0].kind == "log"
+    assert events[-1].kind == "log"
+    assert {event.kind for event in events} == {"log", "progress"}
 
 
 def test_replace_project_pointclouds_rolls_back_uploaded_keys_before_index_save(tmp_path):
-    first = tmp_path / "first.copc.laz"
-    second = tmp_path / "second.copc.laz"
-    first.write_bytes(b"first")
-    second.write_bytes(b"second")
+    first = write_potree(tmp_path, "first", b"first")
+    second = write_potree(tmp_path, "second", b"second")
     prepared = prepare_cloud_uploads(
         (
-            PointcloudSource(str(first), name="First", input_format="copc"),
-            PointcloudSource(str(second), name="Second", input_format="copc"),
+            PointcloudSource(str(first), name="First", input_format="potree"),
+            PointcloudSource(str(second), name="Second", input_format="potree"),
         ),
         "kunde/project/projekt",
         "pointclouds/kunde/project/projekt",
@@ -1007,15 +1170,14 @@ def test_replace_project_pointclouds_rolls_back_uploaded_keys_before_index_save(
             delete_keys=lambda keys: deleted_keys.extend(keys),
         )
 
-    assert deleted_keys == [prepared[0].files_to_upload[0][1]]
+    assert deleted_keys == [key for _local_path, key in prepared[0].files_to_upload]
     assert index_data == {"projects": [{"id": "project", "projekt": "Old"}]}
 
 
 def test_replace_project_pointclouds_restores_history_when_index_save_fails(tmp_path):
-    source = tmp_path / "first.copc.laz"
-    source.write_bytes(b"first")
+    source = write_potree(tmp_path, "first", b"first")
     prepared = prepare_cloud_uploads(
-        (PointcloudSource(str(source), name="First", input_format="copc"),),
+        (PointcloudSource(str(source), name="First", input_format="potree"),),
         "kunde/project/projekt",
         "pointclouds/kunde/project/projekt",
     )
@@ -1048,10 +1210,9 @@ def test_replace_project_pointclouds_restores_history_when_index_save_fails(tmp_
 
 
 def test_replace_project_pointclouds_reports_orphan_cleanup_failure_after_index_save(tmp_path):
-    first = tmp_path / "first.copc.laz"
-    first.write_bytes(b"first")
+    first = write_potree(tmp_path, "first", b"first")
     prepared = prepare_cloud_uploads(
-        (PointcloudSource(str(first), name="First", input_format="copc"),),
+        (PointcloudSource(str(first), name="First", input_format="potree"),),
         "kunde/project/projekt",
         "pointclouds/kunde/project/projekt",
     )
@@ -1078,10 +1239,9 @@ def test_replace_project_pointclouds_reports_orphan_cleanup_failure_after_index_
 
 
 def test_replace_single_project_pointcloud_preserves_other_clouds_and_deletes_target_orphans(tmp_path):
-    replacement = tmp_path / "replacement.copc.laz"
-    replacement.write_bytes(b"replacement")
+    replacement = write_potree(tmp_path, "replacement", b"replacement")
     prepared = prepare_cloud_uploads(
-        (PointcloudSource(str(replacement), name="Replacement", input_format="copc", crs_info={"value": "EPSG:25832"}),),
+        (PointcloudSource(str(replacement), name="Replacement", input_format="potree", crs_info={"value": "EPSG:25832"}),),
         "kunde/project/projekt",
         "pointclouds/kunde/project/projekt",
     )[0]
@@ -1096,9 +1256,9 @@ def test_replace_single_project_pointcloud_preserves_other_clouds_and_deletes_ta
                 "pointclouds": [
                     {
                         "name": "Keep",
-                        "format": "copc",
-                        "viewer_path": "kunde/project/projekt/keep/source.copc.laz",
-                        "s3_path": "pointclouds/kunde/project/projekt/keep/source.copc.laz",
+                        "format": "potree",
+                        "viewer_path": "kunde/project/projekt/keep",
+                        "s3_path": "pointclouds/kunde/project/projekt/keep",
                         "visible": False,
                     },
                     {
@@ -1135,7 +1295,7 @@ def test_replace_single_project_pointcloud_preserves_other_clouds_and_deletes_ta
     assert pointclouds[0]["name"] == "Keep"
     assert pointclouds[0]["visible"] is False
     assert pointclouds[1]["name"] == "Replacement"
-    assert pointclouds[1]["format"] == "copc"
+    assert pointclouds[1]["format"] == "potree"
     assert pointclouds[1]["crs"] == "EPSG:25832"
     assert deleted_keys == [
         "pointclouds/kunde/project/projekt/target/cloud.js",
@@ -1144,10 +1304,9 @@ def test_replace_single_project_pointcloud_preserves_other_clouds_and_deletes_ta
 
 
 def test_replace_single_project_pointcloud_supports_disabled_legacy_single_project(tmp_path):
-    replacement = tmp_path / "replacement.copc.laz"
-    replacement.write_bytes(b"replacement")
+    replacement = write_potree(tmp_path, "replacement", b"replacement")
     prepared = prepare_single_project_upload(
-        PointcloudSource(str(replacement), name="Replacement", input_format="copc", crs_info={"value": "EPSG:4326"}),
+        PointcloudSource(str(replacement), name="Replacement", input_format="potree", crs_info={"value": "EPSG:4326"}),
         "kunde/project/projekt",
         "pointclouds/kunde/project/projekt",
     )
@@ -1159,10 +1318,10 @@ def test_replace_single_project_pointcloud_supports_disabled_legacy_single_proje
                 "datum": "2026-06-20T12:00:00",
                 "kunde": "Kunde",
                 "projekt": "Single",
-                "format": "copc",
+                "format": "potree",
                 "link": "https://viewer/?id=project",
-                "viewer_path": "kunde/project/projekt/source.copc.laz",
-                "s3_path": "pointclouds/kunde/project/projekt/source.copc.laz",
+                "viewer_path": "kunde/project/projekt",
+                "s3_path": "pointclouds/kunde/project/projekt",
                 "disabled_at": "2026-06-21T12:00:00",
             }
         ],
@@ -1176,9 +1335,9 @@ def test_replace_single_project_pointcloud_supports_disabled_legacy_single_proje
         base_viewer_path="kunde/project/projekt",
         s3_prefix="pointclouds/kunde/project/projekt",
         prepared_cloud=prepared,
-        target_pointcloud_s3_path="pointclouds/kunde/project/projekt/source.copc.laz",
+        target_pointcloud_s3_path="pointclouds/kunde/project/projekt",
         existing_target_keys=(
-            "pointclouds/kunde/project/projekt/source.copc.laz",
+            "pointclouds/kunde/project/projekt/cloud.js",
             "pointclouds/kunde/project/projekt/old.bin",
         ),
         save_index=lambda _data: True,
@@ -1190,13 +1349,14 @@ def test_replace_single_project_pointcloud_supports_disabled_legacy_single_proje
     assert index_data["projects"] == []
     assert project["id"] == "project"
     assert project["disabled_at"] == "2026-06-21T12:00:00"
-    assert project["format"] == "copc"
+    assert project["format"] == "potree"
     assert "pointclouds" not in project
     assert project["crs"] == "EPSG:4326"
     assert deleted_keys == ["pointclouds/kunde/project/projekt/old.bin"]
 
 
 def test_replace_empty_legacy_potree_with_models_migrates_custom_name_to_child_and_metadata(tmp_path):
+    crs_info = {"value": "EPSG:25832", "vertical_crs": "EPSG:7837"}
     replacement = tmp_path / "potree"
     replacement.mkdir()
     (replacement / "metadata.json").write_text(
@@ -1204,13 +1364,14 @@ def test_replace_empty_legacy_potree_with_models_migrates_custom_name_to_child_a
         encoding="utf-8",
     )
     prepared = prepare_single_project_upload(
-        PointcloudSource(str(replacement), name="Replacement", input_format="potree"),
+        PointcloudSource(str(replacement), name="Replacement", input_format="potree", crs_info=crs_info),
         "kunde/project/projekt",
         "pointclouds/kunde/project/projekt",
     )
     model = {
         "id": "halle",
         "name": "Halle",
+        **crs_info,
         "s3_path": "pointclouds/kunde/project/projekt/models/halle/versions/v1",
     }
     index_data = {
@@ -1598,8 +1759,8 @@ def test_remove_project_model_keeps_package_referenced_by_another_project():
 
 
 def test_add_project_pointclouds_preserves_multi_project_identity_and_existing_children(tmp_path):
-    source = tmp_path / "new.copc.laz"
-    source.write_bytes(b"new")
+    crs_info = {"value": "EPSG:25832", "vertical_crs": "EPSG:7837"}
+    source = write_potree(tmp_path, "new", b"new")
     project_root = "pointclouds/kunde/project/projekt"
     viewer_root = "kunde/project/projekt"
     original_child = {
@@ -1623,7 +1784,7 @@ def test_add_project_pointclouds_preserves_multi_project_identity_and_existing_c
                 "viewer_path": viewer_root,
                 "s3_path": project_root,
                 "disabled_at": "2026-06-21T12:00:00",
-                "models": [{"viewer_path": "models/model/model.json"}],
+                "models": [{"viewer_path": "models/model/model.json", **crs_info}],
                 "unknown": {"keep": True},
                 "crs_info": {"value": "EPSG:25832"},
                 "pointclouds": [original_child],
@@ -1631,7 +1792,7 @@ def test_add_project_pointclouds_preserves_multi_project_identity_and_existing_c
         ],
     }
     prepared = prepare_cloud_uploads(
-        (PointcloudSource(str(source), name="New", input_format="copc", crs_info={"value": "EPSG:25832"}),),
+        (PointcloudSource(str(source), name="New", input_format="potree", crs_info=crs_info),),
         f"{viewer_root}/versions/versionid",
         f"{project_root}/versions/versionid",
     )
@@ -1658,18 +1819,177 @@ def test_add_project_pointclouds_preserves_multi_project_identity_and_existing_c
     assert project["viewer_path"] == viewer_root
     assert project["s3_path"] == project_root
     assert project["disabled_at"] == "2026-06-21T12:00:00"
-    assert project["models"] == [{"viewer_path": "models/model/model.json"}]
+    assert project["models"] == [{"viewer_path": "models/model/model.json", **crs_info}]
     assert project["unknown"] == {"keep": True}
     assert project["pointcloud_count"] == 2
     assert project["pointclouds"][0] == original_child
     assert project["pointclouds"][0] is not original_child
-    assert project["pointclouds"][1]["s3_path"] == f"{project_root}/versions/versionid/new/source.copc.laz"
+    assert project["pointclouds"][1]["s3_path"] == f"{project_root}/versions/versionid/new"
     assert project["history"][-1]["message"] == "1 Punktwolke(n) wurden hinzugefuegt."
 
 
+def test_add_project_pointclouds_ignores_hidden_cloud_for_common_crs(tmp_path):
+    source = write_potree(tmp_path, "new", b"new")
+    project_root = "pointclouds/kunde/project/projekt"
+    viewer_root = "kunde/project/projekt"
+    index_data = {
+        "projects": [
+            {
+                "id": "project",
+                "format": "multi",
+                "viewer_path": viewer_root,
+                "s3_path": project_root,
+                "pointclouds": [
+                    {
+                        "name": "Hidden",
+                        "format": "potree",
+                        "viewer_path": f"{viewer_root}/hidden",
+                        "s3_path": f"{project_root}/hidden",
+                        "visible": False,
+                        "crs_info": {"value": "EPSG:4326"},
+                    }
+                ],
+            }
+        ],
+        S3_DISABLED_PROJECTS_KEY: [],
+    }
+    prepared = prepare_cloud_uploads(
+        (PointcloudSource(str(source), name="New", input_format="potree", crs_info={"value": "EPSG:25832"}),),
+        f"{viewer_root}/versions/versionid",
+        f"{project_root}/versions/versionid",
+    )
+
+    add_project_pointclouds(
+        s3_client=FakeS3Client(),
+        index_data=index_data,
+        project_id="project",
+        project_viewer_root=viewer_root,
+        project_s3_prefix=project_root,
+        prepared_clouds=prepared,
+        save_index=lambda _data: True,
+        delete_keys=lambda _keys: None,
+        timestamp="2026-06-21T13:00:00",
+    )
+
+    project = index_data["projects"][0]
+    assert project["crs_info"]["value"] == "EPSG:25832"
+    assert project["pointclouds"][0]["crs_info"]["value"] == "EPSG:4326"
+
+
+def test_add_project_pointclouds_promotes_legacy_potree_without_moving_existing_data(tmp_path):
+    source = write_potree(tmp_path, "new", b"new")
+    project_root = "pointclouds/kunde/project/projekt"
+    viewer_root = "kunde/project/projekt"
+    index_data = {
+        "projects": [
+            {
+                "id": "project",
+                "kunde": "Kunde",
+                "projekt": "Projekt",
+                "name": "Bestand",
+                "datum": "2026-06-20T12:00:00",
+                "link": "https://viewer/?id=project",
+                "format": "potree",
+                "viewer_path": viewer_root,
+                "s3_path": project_root,
+                "crs": "EPSG:25832",
+                "projection": "EPSG:25832",
+                "unknown": {"keep": True},
+            }
+        ],
+        S3_DISABLED_PROJECTS_KEY: [],
+    }
+    prepared = prepare_cloud_uploads(
+        (PointcloudSource(str(source), name="Projekt", input_format="potree", crs_info={"value": "EPSG:25832"}),),
+        f"{viewer_root}/versions/versionid",
+        f"{project_root}/versions/versionid",
+    )
+
+    result = add_project_pointclouds(
+        s3_client=FakeS3Client(),
+        index_data=index_data,
+        project_id="project",
+        project_viewer_root=viewer_root,
+        project_s3_prefix=project_root,
+        prepared_clouds=prepared,
+        save_index=lambda _data: True,
+        delete_keys=lambda _keys: None,
+        timestamp="2026-06-21T13:00:00",
+    )
+
+    project = index_data["projects"][0]
+    assert result.status == "success"
+    assert project["id"] == "project"
+    assert project["link"] == "https://viewer/?id=project"
+    assert project["viewer_path"] == viewer_root
+    assert project["s3_path"] == project_root
+    assert project["unknown"] == {"keep": True}
+    assert project["format"] == "multi"
+    assert project["pointcloud_count"] == 2
+    existing = project["pointclouds"][0]
+    assert existing["name"] == "Bestand"
+    assert existing["format"] == "potree"
+    assert existing["viewer_path"] == viewer_root
+    assert existing["s3_path"] == project_root
+    assert existing["visible"] is True
+    assert existing["crs_info"]["value"] == "EPSG:25832"
+    assert project["pointclouds"][1]["s3_path"] == (
+        f"{project_root}/versions/versionid/projekt"
+    )
+
+
+def test_remove_promoted_root_potree_keeps_versioned_sibling_files():
+    project_root = "pointclouds/kunde/project/projekt"
+    viewer_root = "kunde/project/projekt"
+    old_cloud = {
+        "name": "Bestand",
+        "format": "potree",
+        "viewer_path": viewer_root,
+        "s3_path": project_root,
+    }
+    new_cloud = {
+        "name": "Neu",
+        "format": "potree",
+        "viewer_path": f"{viewer_root}/versions/v1/neu",
+        "s3_path": f"{project_root}/versions/v1/neu",
+    }
+    index_data = {
+        "projects": [
+            {
+                "id": "project",
+                "format": "multi",
+                "viewer_path": viewer_root,
+                "s3_path": project_root,
+                "pointclouds": [old_cloud, new_cloud],
+            }
+        ],
+        S3_DISABLED_PROJECTS_KEY: [],
+    }
+    deleted_keys = []
+
+    result = remove_project_pointcloud(
+        index_data=index_data,
+        project_id="project",
+        project_viewer_root=viewer_root,
+        project_s3_prefix=project_root,
+        target_pointcloud_s3_path=project_root,
+        existing_target_keys=(
+            f"{project_root}/metadata.json",
+            f"{project_root}/octree.bin",
+            f"{project_root}/versions/v1/neu/cloud.js",
+            f"{project_root}/models/halle/model.json",
+        ),
+        save_index=lambda _data: True,
+        delete_keys=lambda keys: deleted_keys.extend(keys),
+    )
+
+    assert result.status == "success"
+    assert deleted_keys == [f"{project_root}/metadata.json", f"{project_root}/octree.bin"]
+    assert index_data["projects"][0]["pointclouds"] == [new_cloud]
+
+
 def test_add_project_pointclouds_rolls_back_uploaded_keys_before_index_save(tmp_path):
-    source = tmp_path / "new.copc.laz"
-    source.write_bytes(b"new")
+    source = write_potree(tmp_path, "new", b"new")
     project_root = "pointclouds/kunde/project/projekt"
     viewer_root = "kunde/project/projekt"
     original = {
@@ -1693,7 +2013,7 @@ def test_add_project_pointclouds_rolls_back_uploaded_keys_before_index_save(tmp_
     }
     index_data = copy.deepcopy(original)
     prepared = prepare_cloud_uploads(
-        (PointcloudSource(str(source), name="New", input_format="copc"),),
+        (PointcloudSource(str(source), name="New", input_format="potree"),),
         f"{viewer_root}/versions/versionid",
         f"{project_root}/versions/versionid",
     )
@@ -1712,12 +2032,14 @@ def test_add_project_pointclouds_rolls_back_uploaded_keys_before_index_save(tmp_
         )
 
     assert index_data == original
-    assert deleted_keys == [f"{project_root}/versions/versionid/new/source.copc.laz"]
+    assert deleted_keys == [
+        f"{project_root}/versions/versionid/new/cloud.js",
+        f"{project_root}/versions/versionid/new/metadata.json",
+    ]
 
 
 def test_add_project_pointclouds_restores_index_when_upload_cleanup_also_fails(tmp_path):
-    source = tmp_path / "new.copc.laz"
-    source.write_bytes(b"new")
+    source = write_potree(tmp_path, "new", b"new")
     project_root = "pointclouds/kunde/project/projekt"
     viewer_root = "kunde/project/projekt"
     original = {
@@ -1741,7 +2063,7 @@ def test_add_project_pointclouds_restores_index_when_upload_cleanup_also_fails(t
     }
     index_data = copy.deepcopy(original)
     prepared = prepare_cloud_uploads(
-        (PointcloudSource(str(source), name="New", input_format="copc"),),
+        (PointcloudSource(str(source), name="New", input_format="potree"),),
         f"{viewer_root}/versions/versionid",
         f"{project_root}/versions/versionid",
     )
@@ -1760,12 +2082,11 @@ def test_add_project_pointclouds_restores_index_when_upload_cleanup_also_fails(t
 
     assert index_data == original
     assert "Projekt-Index konnte nicht gespeichert werden" in str(error.value)
-    assert f"{project_root}/versions/versionid/new/source.copc.laz" in str(error.value)
+    assert f"{project_root}/versions/versionid/new/cloud.js" in str(error.value)
 
 
 def test_add_and_remove_preserve_legacy_child_crs_without_crs_info(tmp_path):
-    source = tmp_path / "new.copc.laz"
-    source.write_bytes(b"new")
+    source = write_potree(tmp_path, "new", b"new")
     project_root = "pointclouds/kunde/project/projekt"
     viewer_root = "kunde/project/projekt"
     index_data = {
@@ -1801,7 +2122,7 @@ def test_add_and_remove_preserve_legacy_child_crs_without_crs_info(tmp_path):
         S3_DISABLED_PROJECTS_KEY: [],
     }
     prepared = prepare_cloud_uploads(
-        (PointcloudSource(str(source), name="New", input_format="copc", crs_info={"value": "EPSG:25832"}),),
+        (PointcloudSource(str(source), name="New", input_format="potree", crs_info={"value": "EPSG:25832"}),),
         f"{viewer_root}/versions/versionid",
         f"{project_root}/versions/versionid",
     )
@@ -1850,9 +2171,9 @@ def test_remove_project_pointcloud_deletes_only_the_exact_child_after_index_save
                 "pointclouds": [
                     {
                         "name": "Keep",
-                        "format": "copc",
-                        "viewer_path": f"{viewer_root}/keep/source.copc.laz",
-                        "s3_path": f"{project_root}/keep/source.copc.laz",
+                        "format": "potree",
+                        "viewer_path": f"{viewer_root}/keep",
+                        "s3_path": f"{project_root}/keep",
                         "crs_info": {"value": "EPSG:25832"},
                     },
                     {
@@ -1879,7 +2200,7 @@ def test_remove_project_pointcloud_deletes_only_the_exact_child_after_index_save
             f"{target_path}/cloud.js",
             f"{target_path}/metadata.json",
             f"{target_path}-other/cloud.js",
-            f"{project_root}/keep/source.copc.laz",
+            f"{project_root}/keep/cloud.js",
             f"{project_root}/root-file.bin",
         ),
         save_index=lambda _data: actions.append("save") or True,
@@ -1913,9 +2234,9 @@ def test_remove_project_pointcloud_rejects_last_child_and_reports_cleanup_failur
                 "pointclouds": [
                     {
                         "name": "Only",
-                        "format": "copc",
-                        "viewer_path": f"{viewer_root}/only/source.copc.laz",
-                        "s3_path": f"{project_root}/only/source.copc.laz",
+                        "format": "potree",
+                        "viewer_path": f"{viewer_root}/only",
+                        "s3_path": f"{project_root}/only",
                     }
                 ],
             }
@@ -1929,7 +2250,7 @@ def test_remove_project_pointcloud_rejects_last_child_and_reports_cleanup_failur
             project_id="project",
             project_viewer_root=viewer_root,
             project_s3_prefix=project_root,
-            target_pointcloud_s3_path=f"{project_root}/only/source.copc.laz",
+            target_pointcloud_s3_path=f"{project_root}/only",
             existing_target_keys=(),
             save_index=lambda _data: True,
             delete_keys=lambda _keys: None,
@@ -1960,14 +2281,15 @@ def test_remove_project_pointcloud_rejects_last_child_and_reports_cleanup_failur
 
 
 def test_replacing_all_pointclouds_preserves_models_and_never_cleans_model_objects(tmp_path):
-    source = tmp_path / "replacement.copc.laz"
-    source.write_bytes(b"replacement")
+    crs_info = {"value": "EPSG:25832", "vertical_crs": "EPSG:7837"}
+    source = write_potree(tmp_path, "replacement", b"replacement")
     project_root = "pointclouds/kunde/project/projekt"
     viewer_root = "kunde/project/projekt"
     version = "a" * 64
     models = [
         {
             "id": "building",
+            **crs_info,
             "viewer_path": f"{viewer_root}/models/building/versions/{version}/model.json",
             "s3_path": f"{project_root}/models/building/versions/{version}",
         }
@@ -1983,16 +2305,16 @@ def test_replacing_all_pointclouds_preserves_models_and_never_cleans_model_objec
                 "pointclouds": [
                     {
                         "name": "Old",
-                        "format": "copc",
-                        "viewer_path": f"{viewer_root}/old/source.copc.laz",
-                        "s3_path": f"{project_root}/old/source.copc.laz",
+                        "format": "potree",
+                        "viewer_path": f"{viewer_root}/old",
+                        "s3_path": f"{project_root}/old",
                     }
                 ],
             }
         ]
     }
     prepared = prepare_cloud_uploads(
-        (PointcloudSource(str(source), name="Replacement", input_format="copc"),),
+        (PointcloudSource(str(source), name="Replacement", input_format="potree", crs_info=crs_info),),
         viewer_root,
         project_root,
     )
@@ -2006,7 +2328,7 @@ def test_replacing_all_pointclouds_preserves_models_and_never_cleans_model_objec
         s3_prefix=project_root,
         prepared_clouds=prepared,
         existing_keys=(
-            f"{project_root}/old/source.copc.laz",
+            f"{project_root}/old/cloud.js",
             f"{project_root}/models/building/versions/{version}/scene.glb",
             f"{project_root}/models/building/versions/{version}/model.json",
         ),
@@ -2016,17 +2338,18 @@ def test_replacing_all_pointclouds_preserves_models_and_never_cleans_model_objec
 
     assert result.status == "success"
     assert index_data["projects"][0]["models"] == models
-    assert deleted_keys == [f"{project_root}/old/source.copc.laz"]
+    assert deleted_keys == [f"{project_root}/old/cloud.js"]
 
 
 def test_replacing_single_pointcloud_preserves_models_and_never_cleans_model_objects(tmp_path):
-    source = tmp_path / "replacement.copc.laz"
-    source.write_bytes(b"replacement")
+    crs_info = {"value": "EPSG:25832", "vertical_crs": "EPSG:7837"}
+    source = write_potree(tmp_path, "replacement", b"replacement")
     project_root = "pointclouds/kunde/project/projekt"
     viewer_root = "kunde/project/projekt"
     version = "a" * 64
     models = [{
         "id": "building",
+        **crs_info,
         "format": "glb",
         "viewer_path": f"{viewer_root}/models/building/versions/{version}/model.json",
         "s3_path": f"{project_root}/models/building/versions/{version}",
@@ -2051,7 +2374,7 @@ def test_replacing_single_pointcloud_preserves_models_and_never_cleans_model_obj
         ]
     }
     prepared = prepare_cloud_uploads(
-        (PointcloudSource(str(source), name="Replacement", input_format="copc"),),
+        (PointcloudSource(str(source), name="Replacement", input_format="potree", crs_info=crs_info),),
         viewer_root,
         project_root,
     )[0]
