@@ -94,9 +94,16 @@ def run(
     environments where Qt is not installed.
     """
 
+    raw_argv = list(sys.argv if argv is None else argv)
+    if "--startup-self-test" in raw_argv:
+        from .startup_self_test import run_startup_self_test
+
+        if len(raw_argv) != 3 or raw_argv[1] != "--startup-self-test":
+            return 2
+        return run_startup_self_test(raw_argv[2])
+
     from .single_instance import SingleInstanceGuard, show_single_instance_message
 
-    raw_argv = list(sys.argv if argv is None else argv)
     identity = resolve_app_identity(mode) if mode is not None else resolve_runtime_identity(raw_argv, environ=environ)
     instance_guard = SingleInstanceGuard()
     try:
@@ -125,6 +132,11 @@ def _run_qt_application(raw_argv: list[str], identity: QtAppIdentity) -> int:
     try:
         from PySide6 import QtCore, QtGui, QtWidgets
     except ImportError as exc:
+        if getattr(sys, "frozen", False):
+            raise RuntimeError(
+                f"Die mitgelieferte Qt-Laufzeit konnte nicht geladen werden: {exc}. "
+                "Bitte den korrigierten Dronautix-Installer verwenden."
+            ) from exc
         raise RuntimeError(
             "PySide6 is required to run the Qt preview. Install PySide6 and "
             "start Dronautix_Pointcloud_Uploader_v2.py again."

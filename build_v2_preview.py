@@ -9,6 +9,7 @@ import subprocess
 import sys
 
 from app_version import APP_FILE_VERSION, APP_PUBLISHER, APP_VERSION
+from tools.windows_build import build_environment, verify_frozen_startup
 
 
 PREVIEW_APP_NAME = "Dronautix Pointcloud Uploader V2 Preview"
@@ -148,7 +149,8 @@ def main() -> int:
     command = build_command()
     print("Befehl:", " ".join(command))
     print()
-    subprocess.run(command, check=True)
+    subprocess.run(command, check=True, env=build_environment())
+    verify_frozen_startup(os.path.join(DIST_DIR, PREVIEW_EXE_NAME))
     print()
     print("[ERFOLG] Preview-Build erfolgreich:")
     print(f"  {DIST_DIR}/{PREVIEW_EXE_NAME}")

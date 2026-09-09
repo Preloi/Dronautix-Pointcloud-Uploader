@@ -11,6 +11,7 @@ import hashlib
 
 from app_version import APP_EXE_NAME, APP_FILE_VERSION, APP_ID, APP_NAME, APP_PUBLISHER, APP_VERSION
 from dronautix_uploader.core.glb_toolchain import validate_glb_toolchain_for_packaging
+from tools.windows_build import build_environment, verify_frozen_startup
 from tools.check_v2_final_packaging_contract import (
     CANDIDATE_DIST_DIR,
     CANDIDATE_OUTPUT_DIR,
@@ -322,7 +323,8 @@ def main() -> int:
     command = build_command()
     print("Befehl:", " ".join(command))
     print()
-    subprocess.run(command, check=True)
+    subprocess.run(command, check=True, env=build_environment())
+    verify_frozen_startup(os.path.join(DIST_DIR, APP_EXE_NAME))
     inno_setup = find_inno_setup()
     installer_sha256 = ""
     if inno_setup:

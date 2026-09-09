@@ -31,6 +31,7 @@ from app_version import (
     APP_VERSION,
 )
 from dronautix_uploader.core.glb_toolchain import validate_glb_toolchain_for_packaging
+from tools.windows_build import build_environment, verify_frozen_startup
 
 VERSION_INFO_FILE = "version_info.txt"
 INSTALLER_VERSION_FILE = "installer_version.iss"
@@ -255,7 +256,8 @@ print("Befehl:", " ".join(cmd))
 print()
 
 try:
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, env=build_environment())
+    verify_frozen_startup(os.path.join("dist", APP_EXE_NAME))
     inno_setup = find_inno_setup()
     if inno_setup:
         print("[OK] Inno Setup gefunden - baue Setup...")

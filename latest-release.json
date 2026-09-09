@@ -1,11 +1,11 @@
 {
   "version": "2.1.8",
-  "installer_name": "Dronautix_Pointcloud_Uploader_Setup_2.1.8.exe",
+  "installer_name": "Dronautix_Pointcloud_Uploader_Setup_2.1.8_korrigiert.exe",
   "repo_owner": "Preloi",
   "repo_name": "Dronautix-Pointcloud-Uploader",
   "manifest_branch": "master",
   "release_tag": "v2.1.8",
-  "installer_url": "https://github.com/Preloi/Dronautix-Pointcloud-Uploader/releases/download/v2.1.8/Dronautix_Pointcloud_Uploader_Setup_2.1.8.exe",
-  "published_at": "2026-09-07T11:41:55",
-  "installer_sha256": "99c3ac760e24d94564708b1a57b3b3e050e4a183463623887b6903ba7dab1115"
+  "installer_url": "https://github.com/Preloi/Dronautix-Pointcloud-Uploader/releases/download/v2.1.8/Dronautix_Pointcloud_Uploader_Setup_2.1.8_korrigiert.exe",
+  "published_at": "2026-09-07T13:36:19",
+  "installer_sha256": "a920b30192f0c8bfcd51851103c1e7d0008618a37b280f2e11fd8f196d649d32"
 }
