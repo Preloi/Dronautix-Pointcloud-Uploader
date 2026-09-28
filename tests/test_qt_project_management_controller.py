@@ -1,5 +1,5 @@
+from _import_isolation import loaded_forbidden_modules
 from dataclasses import dataclass
-import sys
 
 import pytest
 
@@ -227,7 +227,7 @@ class FakeService:
 
 
 def test_controller_imports_without_qt_bindings():
-    assert "PySide6" not in sys.modules
+    assert loaded_forbidden_modules("dronautix_uploader.qt_app.project_management_controller") == []
 
 
 def test_rename_project_routes_preview_id_and_request_to_service():

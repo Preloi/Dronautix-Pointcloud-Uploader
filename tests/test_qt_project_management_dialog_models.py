@@ -1,5 +1,5 @@
+from _import_isolation import loaded_forbidden_modules
 import importlib
-import sys
 
 import pytest
 
@@ -21,9 +21,7 @@ def dialog_models():
 
 def test_dialog_models_import_without_qt_or_tk_bindings(dialog_models):
     assert dialog_models is not None
-    assert "PySide6" not in sys.modules
-    assert "tkinter" not in sys.modules
-    assert "customtkinter" not in sys.modules
+    assert loaded_forbidden_modules("dronautix_uploader.qt_app.project_management_dialog_models") == []
 
 
 def test_build_rename_dialog_state_uses_project_and_single_pointcloud_name(dialog_models):

@@ -9,6 +9,7 @@ import json
 import os
 
 from .error_messages import describe_error
+from .crs_detection_worker import start_crs_detection
 from .activity_model import (
     ACTION_ALL,
     ACTION_FILTERS,
@@ -299,6 +300,7 @@ def create_upload_page(
     on_start: Callable[[], None] | None = None,
     on_cancel: Callable[[], None] | None = None,
     defaults_provider: Callable[[], object] | None = None,
+    crs_detector: Callable[[str], dict | None] | None = None,
 ):
     """Single-screen upload + local conversion form (no modal, no stepper)."""
 
@@ -308,6 +310,10 @@ def create_upload_page(
         "sources": [],
         "mode_sources": {},
         "detected_crs": {},
+        # Per-path generation tokens: a result is only applied if it belongs to
+        # the latest request for that path (removed/re-added paths, late results).
+        "crs_generation": {},
+        "crs_pending": {},
         "models": [],
         "model_sidecars": {},
         "model_results": {},
@@ -318,6 +324,13 @@ def create_upload_page(
     page_root = QtWidgets.QVBoxLayout(page)
     page_root.setContentsMargins(32, 28, 32, 28)
     page_root.setSpacing(16)
+
+    class CrsResultEmitter(QtCore.QObject):
+        # Emitted from the detection thread; the connection to a slot of an
+        # object living in the GUI thread is queued automatically.
+        detected = QtCore.Signal(str, int, object)
+
+    crs_emitter = CrsResultEmitter(page)
     form_scroll = QtWidgets.QScrollArea()
     form_scroll.setObjectName("UploadFormScrollArea")
     form_scroll.setWidgetResizable(True)
@@ -677,13 +690,55 @@ def create_upload_page(
             return None
 
     def detect_sources_crs():
+        """Start background detection for sources without a (pending) result."""
+
+        requests = []
         for path in state["sources"]:
-            if path in state["detected_crs"]:
+            if path in state["detected_crs"] or path in state["crs_pending"]:
                 continue
-            try:
-                state["detected_crs"][path] = detect_pointcloud_crs(path) or {}
-            except Exception:
-                state["detected_crs"][path] = {}
+            generation = state["crs_generation"].get(path, 0) + 1
+            state["crs_generation"][path] = generation
+            state["crs_pending"][path] = generation
+            requests.append((path, generation))
+        if requests:
+            start_crs_detection(
+                requests,
+                crs_emitter.detected.emit,
+                detector=crs_detector or detect_pointcloud_crs,
+            )
+        update_start_availability()
+
+    def forget_crs(paths):
+        for path in paths:
+            state["crs_generation"][path] = state["crs_generation"].get(path, 0) + 1
+            state["crs_pending"].pop(path, None)
+            state["detected_crs"].pop(path, None)
+
+    def crs_detection_pending() -> bool:
+        return any(path in state["crs_pending"] for path in state["sources"])
+
+    def apply_crs_result(path, generation, info):
+        if state["crs_generation"].get(path) != generation:
+            return  # removed, re-added or superseded meanwhile
+        state["crs_pending"].pop(path, None)
+        state["detected_crs"][path] = dict(info) if isinstance(info, dict) else {}
+        for row in range(source_list.count()):
+            item = source_list.item(row)
+            if item.data(QtCore.Qt.UserRole) == path:
+                item.setText(source_item_text(path))
+        render_models()
+        update_start_availability()
+
+    crs_emitter.detected.connect(apply_crs_result)
+
+    def update_start_availability():
+        pending = crs_detection_pending()
+        if not state["running"]:
+            start_button.setEnabled(on_start is not None and not pending)
+        start_button.setToolTip("CRS der Punktwolken wird noch erkannt ..." if pending else "")
+        count = len(state["sources"])
+        text = "Keine Quelle" if count == 0 else ("1 Quelle" if count == 1 else f"{count} Quellen")
+        sources_count.setText(f"{text} · CRS wird erkannt ..." if pending else text)
 
     def crs_display_for_path(path: str) -> str:
         manual_horizontal = horizontal_crs_input.text().strip()
@@ -823,20 +878,22 @@ def create_upload_page(
             for path in state["models"]
         )
 
+    def source_item_text(path: str) -> str:
+        fmt = source_format_label(path)
+        handling = source_handling_label(path)
+        crs = crs_display_for_path(path)
+        name = path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] or path
+        return f"{name}   ·   {fmt} → {handling}   ·   CRS: {crs}"
+
     def render_sources():
         source_list.clear()
         for path in state["sources"]:
-            fmt = source_format_label(path)
-            handling = source_handling_label(path)
-            crs = crs_display_for_path(path)
-            name = path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] or path
-            item = QtWidgets.QListWidgetItem(f"{name}   ·   {fmt} → {handling}   ·   CRS: {crs}")
+            item = QtWidgets.QListWidgetItem(source_item_text(path))
             item.setData(QtCore.Qt.UserRole, path)
             item.setToolTip(path)
             source_list.addItem(item)
         _fit_drop_list_height(source_list, drop_list_height)
-        count = len(state["sources"])
-        sources_count.setText("Keine Quelle" if count == 0 else ("1 Quelle" if count == 1 else f"{count} Quellen"))
+        update_start_availability()
 
     def remove_selected_sources():
         if state["running"]:
@@ -845,6 +902,7 @@ def create_upload_page(
         if not selected:
             return
         state["sources"] = [path for path in state["sources"] if path not in selected]
+        forget_crs(selected)
         render_sources()
         render_models()
 
@@ -992,6 +1050,7 @@ def create_upload_page(
             log_view.show()
         else:
             start_button.setEnabled(on_start is not None)
+            update_start_availability()
             progress_bar.hide()
             phase_panel.hide()
             cancel_button.hide()
@@ -1104,6 +1163,7 @@ def create_upload_page(
     page.show_error = show_error
     page.prefill_advanced_defaults = prefill_advanced_defaults
     page.crs_info_by_source_path = crs_info_by_source_path
+    page.crs_detection_pending = crs_detection_pending
     page.model_inputs = build_model_inputs
     page.add_model_paths = add_models
     page.add_source_paths = add_sources
@@ -1112,6 +1172,7 @@ def create_upload_page(
 
 
 DROP_LIST_MAX_VISIBLE_ROWS = 8
+PROJECT_SEARCH_DEBOUNCE_MS = 200
 
 
 def _fit_drop_list_height(list_widget, min_height: int, max_visible_rows: int = DROP_LIST_MAX_VISIBLE_ROWS) -> None:
@@ -1355,7 +1416,6 @@ def create_projects_page(
     proxy_model = ProjectsFilterProxy()
     proxy_model.setSourceModel(source_model)
     proxy_model.setFilterKeyColumn(-1)
-    search.textChanged.connect(proxy_model.setFilterFixedString)
     status_filter.currentTextChanged.connect(proxy_model.set_status)
 
     table.setModel(proxy_model)
@@ -1433,7 +1493,6 @@ def create_projects_page(
             empty_state_button.setVisible(False)
         empty_state.show()
 
-    search.textChanged.connect(lambda _text: update_empty_state())
     status_filter.currentTextChanged.connect(lambda _text: update_empty_state())
 
     detail_panel = QtWidgets.QFrame()
@@ -1998,7 +2057,21 @@ def create_projects_page(
     table.customContextMenuRequested.connect(show_project_context_menu)
     cloud_list.customContextMenuRequested.connect(show_pointcloud_context_menu)
     model_list.customContextMenuRequested.connect(show_model_context_menu)
-    search.textChanged.connect(lambda text: (_select_first_visible_project_if_needed(), update_detail_panel()))
+    # Debounced: filtering a large index on every keystroke made typing lag.
+    search_timer = QtCore.QTimer(page)
+    search_timer.setSingleShot(True)
+    search_timer.setInterval(PROJECT_SEARCH_DEBOUNCE_MS)
+
+    def apply_search_now():
+        search_timer.stop()
+        proxy_model.setFilterFixedString(search.text())
+        update_empty_state()
+        _select_first_visible_project_if_needed()
+        update_detail_panel()
+
+    search_timer.timeout.connect(apply_search_now)
+    search.textChanged.connect(lambda _text: search_timer.start())
+    page.apply_search_now = apply_search_now
     status_filter.currentTextChanged.connect(lambda text: (_select_first_visible_project_if_needed(), update_detail_panel()))
     refresh_button.clicked.connect(reload_projects)
     proxy_model.modelReset.connect(update_detail_panel)
@@ -2010,6 +2083,7 @@ def create_projects_page(
     def clear_search():
         if search.text():
             search.clear()
+            apply_search_now()  # Esc should reset the list immediately
             return True
         return False
 

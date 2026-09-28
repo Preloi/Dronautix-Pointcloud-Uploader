@@ -1,5 +1,5 @@
+from _import_isolation import loaded_forbidden_modules
 import importlib
-import sys
 
 
 class _TextWidget:
@@ -24,12 +24,7 @@ class _CheckWidget:
 
 
 def test_project_management_dialogs_import_without_qt_or_tk_bindings():
-    module = importlib.import_module("dronautix_uploader.qt_app.project_management_dialogs")
-
-    assert module is not None
-    assert "PySide6" not in sys.modules
-    assert "tkinter" not in sys.modules
-    assert "customtkinter" not in sys.modules
+    assert loaded_forbidden_modules("dronautix_uploader.qt_app.project_management_dialogs") == []
 
 
 def test_replace_dialog_state_from_inputs_uses_injected_converter_and_temp_output():

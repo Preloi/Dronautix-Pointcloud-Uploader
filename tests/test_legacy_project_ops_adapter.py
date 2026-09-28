@@ -1,5 +1,4 @@
-import importlib
-import sys
+from _import_isolation import loaded_forbidden_modules
 from dataclasses import dataclass
 
 from dronautix_uploader.adapters.legacy_project_ops import LegacyProjectOpsAdapter, normalize_legacy_sources
@@ -64,12 +63,7 @@ class FakeCoreApi:
 
 
 def test_legacy_project_ops_adapter_imports_without_tk_qt_or_customtkinter():
-    module = importlib.import_module("dronautix_uploader.adapters.legacy_project_ops")
-
-    assert module is not None
-    assert "tkinter" not in sys.modules
-    assert "customtkinter" not in sys.modules
-    assert "PySide6" not in sys.modules
+    assert loaded_forbidden_modules("dronautix_uploader.adapters.legacy_project_ops") == []
 
 
 def test_normalize_legacy_sources_matches_old_deduping_shape(tmp_path):

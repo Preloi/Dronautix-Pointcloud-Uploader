@@ -46,6 +46,7 @@ from .project_management_actions import (
 )
 from dronautix_uploader.core.crs_detection import detect_pointcloud_crs
 
+from .crs_detection_worker import detect_with_cache
 from .error_messages import describe_error, technical_details
 from .service_bridge import QtServiceBridge
 from .task_worker import create_task_worker
@@ -443,6 +444,11 @@ def create_main_window(
             if self._has_active_background_tasks():
                 self.statusBar().showMessage("Eine Aktion läuft bereits; bitte warten.")
                 return
+            pending = getattr(self._upload_page, "crs_detection_pending", None)
+            if callable(pending) and pending():
+                # Also covers Ctrl+Enter, which bypasses the disabled button.
+                self.statusBar().showMessage("CRS der Punktwolken wird noch erkannt; bitte kurz warten.")
+                return
             form = self._upload_page.read_form()
             if form.mode == "convert":
                 self._run_local_conversion(form)
@@ -800,7 +806,6 @@ def create_main_window(
                     if payload is None:
                         shutil.rmtree(replace_temp_dir, ignore_errors=True)
                         return
-                    payload = self._with_detected_crs_all(payload)
                     progress_dialog = self._create_action_progress_dialog(
                         "Punktwolken austauschen",
                         f"Punktwolken in „{project.project}“ werden ausgetauscht...",
@@ -814,9 +819,10 @@ def create_main_window(
                         target_path=project.s3_path or project.viewer_path,
                         extra_sink=self._progress_dialog_sink(progress_dialog),
                     )
+                    # CRS detection reads the sources (maybe on a NAS): worker thread.
                     operation = lambda: project_controller.replace_all_pointclouds(
                         project,
-                        payload,
+                        self._with_detected_crs_all(payload),
                         on_progress=progress_callback,
                         cancel_requested=action_cancel_event.is_set,
                     )
@@ -835,7 +841,6 @@ def create_main_window(
                     if payload is None:
                         shutil.rmtree(replace_temp_dir, ignore_errors=True)
                         return
-                    payload = self._with_detected_crs_all(payload)
                     progress_dialog = self._create_action_progress_dialog(
                         "Punktwolken hinzufügen",
                         f"Punktwolken werden zu „{project.project}“ hinzugefügt...",
@@ -851,7 +856,7 @@ def create_main_window(
                     )
                     operation = lambda: project_controller.add_pointclouds(
                         project,
-                        payload,
+                        self._with_detected_crs_all(payload),
                         on_progress=progress_callback,
                         cancel_requested=action_cancel_event.is_set,
                     )
@@ -916,7 +921,6 @@ def create_main_window(
                     if payload is None:
                         shutil.rmtree(replace_temp_dir, ignore_errors=True)
                         return
-                    payload = self._with_detected_crs_single(payload)
                     progress_dialog = self._create_action_progress_dialog(
                         "Punktwolke austauschen",
                         f"„{pointcloud.name}“ wird ausgetauscht...",
@@ -934,7 +938,7 @@ def create_main_window(
                     operation = lambda: project_controller.replace_single_pointcloud(
                         project,
                         pointcloud,
-                        payload,
+                        self._with_detected_crs_single(payload),
                         on_progress=progress_callback,
                         cancel_requested=action_cancel_event.is_set,
                     )
@@ -1687,10 +1691,13 @@ def create_main_window(
 
 
 def _detect_crs_or_none(source_path: str):
-    """CRS-Erkennung darf eine Projektaktion nie abbrechen."""
+    """CRS-Erkennung darf eine Projektaktion nie abbrechen.
+
+    Runs inside the action's worker thread and shares the upload page's cache.
+    """
 
     try:
-        return detect_pointcloud_crs(source_path)
+        return detect_with_cache(source_path, detect_pointcloud_crs)
     except Exception:
         return None
 
