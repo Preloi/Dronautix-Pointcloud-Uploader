@@ -780,7 +780,7 @@ def test_crs_repair_uses_javascript_mime_for_cloud_js_without_existing_header():
     assert result.status == "success"
     assert len(s3_client.puts) == 1
     assert s3_client.puts[0][1] == f"{cloud_path}/cloud.js"
-    assert s3_client.puts[0][3] == "application/javascript"
+    assert s3_client.puts[0][3] == "text/javascript"
 
 
 def test_uncertain_index_commit_does_not_roll_back_repaired_potree_crs():

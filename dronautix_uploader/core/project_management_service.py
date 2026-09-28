@@ -63,7 +63,7 @@ from .project_repository import (
     ProjectMetadataRepository,
     ProjectMetadataWriteUncertainError,
 )
-from .s3_service import collect_project_objects, delete_s3_objects
+from .s3_service import JAVASCRIPT_CONTENT_TYPE, collect_project_objects, delete_s3_objects
 from .upload_workflow_service import (
     build_model_pointcloud_spatial_warning_for_bounds,
     cleanup_glb_upload_run_staging_root,
@@ -1403,7 +1403,7 @@ def _s3_potree_documents(s3_client, bucket_name: str, entry: dict[str, Any], pro
         if not isinstance(document, dict):
             raise ValueError(f"Potree-Metadaten sind ungültig: {key}")
         headers = _s3_object_headers(response)
-        headers.setdefault("ContentType", "application/javascript" if filename == "cloud.js" else "application/json")
+        headers.setdefault("ContentType", JAVASCRIPT_CONTENT_TYPE if filename == "cloud.js" else "application/json")
         documents.append((key, document, raw, filename == "cloud.js", headers, _require_s3_etag(response, key)))
     return tuple(documents)
 

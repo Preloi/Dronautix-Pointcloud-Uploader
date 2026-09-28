@@ -22,11 +22,18 @@ from .contracts import (
 
 UploadFile = tuple[str, str]
 
+# Every file type the app uploads gets a fixed type. mimetypes reads the
+# Windows registry, so the same upload got "text/javascript" on one machine and
+# "application/javascript" (or worse) on another.
 _EXPLICIT_CONTENT_TYPES = {
     ".glb": "model/gltf-binary",
     ".ktx2": "image/ktx2",
     ".json": "application/json",
+    ".js": "text/javascript",  # RFC 9239
+    ".bin": "application/octet-stream",
+    ".hrc": "application/octet-stream",
 }
+JAVASCRIPT_CONTENT_TYPE = _EXPLICIT_CONTENT_TYPES[".js"]
 
 
 def _content_type_for_path(path: str) -> str:

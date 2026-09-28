@@ -435,3 +435,18 @@ def test_copy_cancelled_inside_callback_reports_the_possibly_completed_destinati
 
     assert isinstance(error.value, OperationCancelledError)
     assert set(client.created) <= set(error.value.copied_keys)
+
+
+def test_uploaded_viewer_files_get_fixed_content_types_independent_of_the_windows_registry(monkeypatch):
+    import mimetypes
+
+    from dronautix_uploader.core import s3_service
+
+    # A machine whose registry maps .js/.bin to something unexpected.
+    monkeypatch.setattr(mimetypes, "guess_type", lambda path, strict=True: ("application/x-registry-odd", None))
+
+    assert s3_service._content_type_for_path("p/cloud.js") == "text/javascript"
+    assert s3_service._content_type_for_path("p/octree.bin") == "application/octet-stream"
+    assert s3_service._content_type_for_path("p/r/r0.hrc") == "application/octet-stream"
+    assert s3_service._content_type_for_path("p/metadata.json") == "application/json"
+    assert s3_service._content_type_for_path("m/scene.glb") == "model/gltf-binary"
