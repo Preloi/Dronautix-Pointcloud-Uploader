@@ -123,6 +123,32 @@ def compare_with_snapshots(generated_root: str | Path, snapshot_root: str | Path
     return problems
 
 
+def describe_snapshot_differences(generated_root: str | Path, snapshot_root: str | Path, limit: int = 3) -> str:
+    """Short unified diffs of the first differing files, for test failure messages."""
+
+    import difflib
+
+    generated_root, snapshot_root = Path(generated_root), Path(snapshot_root)
+    chunks = []
+    for problem in compare_with_snapshots(generated_root, snapshot_root)[:limit]:
+        relative = problem.split(":", 1)[0]
+        expected, generated = snapshot_root / relative, generated_root / relative
+        if not (expected.is_file() and generated.is_file()):
+            chunks.append(problem)
+            continue
+        diff = difflib.unified_diff(
+            expected.read_bytes().decode("utf-8", "replace").splitlines(),
+            generated.read_bytes().decode("utf-8", "replace").splitlines(),
+            fromfile=f"snapshot/{relative}",
+            tofile=f"generated/{relative}",
+            lineterm="",
+            n=1,
+        )
+        lines = list(diff)[:24] or [f"{relative}: nur Bytes/Zeilenenden unterscheiden sich"]
+        chunks.append("\n".join(lines))
+    return "\n\n".join(chunks)
+
+
 def _generate_scenario(
     scenario: dict[str, Any],
     *,
@@ -1010,6 +1036,7 @@ __all__ = [
     "SUPPORTED_V2_UPLOAD_SCENARIOS",
     "SnapshotScenarioResult",
     "compare_with_snapshots",
+    "describe_snapshot_differences",
     "generate_output_snapshots",
     "snapshot_file_names",
     "snapshot_scenarios",

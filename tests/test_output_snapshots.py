@@ -6,6 +6,7 @@ from pathlib import Path
 from dronautix_uploader.core.output_snapshots import (
     SNAPSHOT_SCENARIOS,
     compare_with_snapshots,
+    describe_snapshot_differences,
     generate_output_snapshots,
 )
 
@@ -19,7 +20,8 @@ def test_generated_viewer_output_matches_committed_snapshots(tmp_path):
 
     assert differences == [], (
         "Viewer-Ausgabe hat sich geändert. Ist das beabsichtigt, "
-        "'python tools/update_output_snapshots.py --write' ausführen und den diff prüfen."
+        "'python tools/update_output_snapshots.py --write' ausführen und den diff prüfen.\n"
+        + describe_snapshot_differences(tmp_path, SNAPSHOT_ROOT)
     )
 
 
