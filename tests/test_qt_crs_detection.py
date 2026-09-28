@@ -252,6 +252,7 @@ def test_project_replace_detects_crs_in_the_worker_thread_not_the_gui_thread(mon
     from dronautix_uploader.qt_app.project_management import make_project_preview
     from dronautix_uploader.qt_app.project_management_actions import ProjectOperationSummary
     from dronautix_uploader.qt_app.project_management_controller import ReplaceAllPointcloudsInput
+    from dronautix_uploader.qt_app.window import support as window_support
 
     detection_threads = []
     received = []
@@ -266,7 +267,7 @@ def test_project_replace_detects_crs_in_the_worker_thread_not_the_gui_thread(mon
             return ProjectOperationSummary(status="success", message="ok")
 
     monkeypatch.setattr(main_window, "cleanup_stale_upload_temp_dirs", lambda: ())
-    monkeypatch.setattr(main_window, "detect_pointcloud_crs", recording_detector)
+    monkeypatch.setattr(window_support, "detect_pointcloud_crs", recording_detector)
     monkeypatch.setattr(QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
     source = tmp_path / "neu.laz"
     source.write_bytes(b"LASF")

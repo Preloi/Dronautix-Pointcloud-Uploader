@@ -73,6 +73,7 @@ def test_startup_cleanup_removes_only_dedicated_glb_stages_older_than_24_hours(t
 
 def test_startup_cleanup_retries_locked_dedicated_glb_stages_and_reports_failure(tmp_path, monkeypatch):
     from dronautix_uploader.qt_app import main_window
+    from dronautix_uploader.qt_app.window import support as window_support
 
     dedicated_root = tmp_path / main_window.GLB_UPLOAD_STAGING_ROOT_NAME
     old_stage = dedicated_root / ".glb-upload-locked"
@@ -86,7 +87,7 @@ def test_startup_cleanup_retries_locked_dedicated_glb_stages_and_reports_failure
         raise OSError("locked")
 
     monkeypatch.setattr(main_window.tempfile, "gettempdir", lambda: str(tmp_path))
-    monkeypatch.setattr(main_window.shutil, "rmtree", locked)
+    monkeypatch.setattr(window_support.shutil, "rmtree", locked)
 
     warnings = main_window.cleanup_stale_upload_temp_dirs()
 
