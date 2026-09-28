@@ -40,6 +40,20 @@ from ..project_management_actions import (
 )
 from .support import UPLOAD_TEMP_PREFIX, _CrsRepairRequest, _SpatialWarningRequest, _activity_action_for_project_action, _detect_crs_or_none
 
+@dataclasses.dataclass
+class _ProjectActionRun:
+    """What one project action set up; released on every exit path."""
+
+    action_id: str
+    project: ProjectPreview | None
+    pointcloud: object
+    controller: object
+    cancel_event: threading.Event = dataclasses.field(default_factory=threading.Event)
+    progress_dialog: object = None
+    progress_callback: object = None
+    temp_dir: str | None = None
+
+
 
 class ProjectActionsMixin:
     def _placeholder_action(self, action_id: str, project: ProjectPreview | None = None, pointcloud=None):
@@ -77,337 +91,28 @@ class ProjectActionsMixin:
             return
 
         project_controller = self._runtime.get("project_controller")
-        if project_controller is None:
+        builder = _PROJECT_ACTION_BUILDERS.get(action_id)
+        if project_controller is None or builder is None:
             self._placeholder_action(action_id, project, pointcloud)
             return
 
-        from ..project_management_dialogs import (
-            confirm_delete_project,
-            confirm_remove_model,
-            confirm_remove_pointcloud,
-            prompt_add_project_pointclouds,
-            prompt_add_project_models,
-            prompt_download_project,
-            prompt_duplicate_project,
-            prompt_rename_project,
-            prompt_replace_all_pointclouds,
-            prompt_replace_single_pointcloud,
-            prompt_replace_single_model,
-            prompt_repair_project_crs,
-        )
+        from .. import project_management_dialogs
 
-        progress_callback = None
-        progress_dialog = None
-        replace_temp_dir = None
-        action_cancel_event = threading.Event()
+        run = _ProjectActionRun(action_id, project, pointcloud, project_controller)
         try:
-            if action_id == ACTION_RENAME:
-                payload = prompt_rename_project(self.QtWidgets, self, project)
-                if payload is None:
-                    return
-                progress_dialog = self._create_action_progress_dialog(
-                    "Projekt umbenennen",
-                    f"„{project.project}“ wird umbenannt...",
-                )
-                operation = lambda: project_controller.rename_project(project, payload)
-            elif action_id == ACTION_DUPLICATE:
-                payload = prompt_duplicate_project(self.QtWidgets, self, project)
-                if payload is None:
-                    return
-                progress_dialog = self._create_action_progress_dialog(
-                    "Projekt duplizieren",
-                    f"„{project.project}“ wird dupliziert...",
-                    cancel_event=action_cancel_event,
-                )
-                progress_callback = self._make_progress_callback(
-                    ACTIVITY_ACTION_UPDATE,
-                    project=project.project,
-                    customer=project.customer,
-                    actor="Projektverwaltung",
-                    source_path=project.s3_path or project.viewer_path,
-                    extra_sink=self._progress_dialog_sink(progress_dialog),
-                )
-                operation = lambda: project_controller.duplicate_project(
-                    project,
-                    payload,
-                    on_progress=progress_callback,
-                    cancel_requested=action_cancel_event.is_set,
-                )
-            elif action_id == ACTION_DELETE:
-                if project is None or not confirm_delete_project(self.QtWidgets, self, project):
-                    return
-                progress_dialog = self._create_action_progress_dialog(
-                    "Projekt löschen",
-                    f"„{project.project}“ wird gelöscht...",
-                )
-                operation = lambda: project_controller.delete_project(project)
-            elif action_id == ACTION_DOWNLOAD:
-                if project is None:
-                    self._placeholder_action(action_id, project, pointcloud)
-                    return
-                payload = prompt_download_project(self.QtWidgets, self, project)
-                if payload is None:
-                    return
-                download_cancel_event = threading.Event()
-                progress_dialog = self.QtWidgets.QProgressDialog(
-                    "Download wird vorbereitet...",
-                    "Abbrechen",
-                    0,
-                    0,
-                    self,
-                )
-                progress_dialog.setWindowTitle("Projekt herunterladen")
-                progress_dialog.setMinimumDuration(0)
-                progress_dialog.setAutoClose(False)
-                progress_dialog.canceled.connect(download_cancel_event.set)
-                progress_dialog.canceled.connect(
-                    lambda: self.statusBar().showMessage("Download wird abgebrochen...")
-                )
-                progress_dialog.show()
-                progress_callback = self._make_progress_callback(
-                    ACTIVITY_ACTION_DOWNLOAD,
-                    project=project.project,
-                    customer=project.customer,
-                    actor="Projektverwaltung",
-                    source_path=project.s3_path or project.viewer_path,
-                    target_path=payload.target_dir,
-                    extra_sink=self._progress_dialog_sink(progress_dialog),
-                )
-                operation = lambda: project_controller.download_project(
-                    project,
-                    payload,
-                    on_progress=progress_callback,
-                    cancel_requested=download_cancel_event.is_set,
-                )
-            elif action_id == ACTION_DISABLE_LINK:
-                if project is None:
-                    return
-                operation = lambda: project_controller.disable_project_link(project)
-            elif action_id == ACTION_ENABLE_LINK:
-                if project is None:
-                    return
-                operation = lambda: project_controller.enable_project_link(project)
-            elif action_id == ACTION_REPLACE_ALL_POINTCLOUDS:
-                if project is None:
-                    self._placeholder_action(action_id, project, pointcloud)
-                    return
-                replace_temp_dir = tempfile.mkdtemp(prefix=UPLOAD_TEMP_PREFIX)
-                payload = prompt_replace_all_pointclouds(
-                    self.QtWidgets,
-                    self,
-                    project,
-                    self._settings_dialog_defaults(),
-                    replace_temp_dir,
-                )
-                if payload is None:
-                    shutil.rmtree(replace_temp_dir, ignore_errors=True)
-                    return
-                progress_dialog = self._create_action_progress_dialog(
-                    "Punktwolken austauschen",
-                    f"Punktwolken in „{project.project}“ werden ausgetauscht...",
-                    cancel_event=action_cancel_event,
-                )
-                progress_callback = self._make_progress_callback(
-                    ACTIVITY_ACTION_REPLACE,
-                    project=project.project,
-                    customer=project.customer,
-                    actor="Projektverwaltung",
-                    target_path=project.s3_path or project.viewer_path,
-                    extra_sink=self._progress_dialog_sink(progress_dialog),
-                )
-                # CRS detection reads the sources (maybe on a NAS): worker thread.
-                operation = lambda: project_controller.replace_all_pointclouds(
-                    project,
-                    self._with_detected_crs_all(payload),
-                    on_progress=progress_callback,
-                    cancel_requested=action_cancel_event.is_set,
-                )
-            elif action_id == ACTION_ADD_POINTCLOUDS:
-                if project is None:
-                    self._placeholder_action(action_id, project, pointcloud)
-                    return
-                replace_temp_dir = tempfile.mkdtemp(prefix=UPLOAD_TEMP_PREFIX)
-                payload = prompt_add_project_pointclouds(
-                    self.QtWidgets,
-                    self,
-                    project,
-                    self._settings_dialog_defaults(),
-                    replace_temp_dir,
-                )
-                if payload is None:
-                    shutil.rmtree(replace_temp_dir, ignore_errors=True)
-                    return
-                progress_dialog = self._create_action_progress_dialog(
-                    "Punktwolken hinzufügen",
-                    f"Punktwolken werden zu „{project.project}“ hinzugefügt...",
-                    cancel_event=action_cancel_event,
-                )
-                progress_callback = self._make_progress_callback(
-                    ACTIVITY_ACTION_UPLOAD,
-                    project=project.project,
-                    customer=project.customer,
-                    actor="Projektverwaltung",
-                    target_path=project.s3_path or project.viewer_path,
-                    extra_sink=self._progress_dialog_sink(progress_dialog),
-                )
-                operation = lambda: project_controller.add_pointclouds(
-                    project,
-                    self._with_detected_crs_all(payload),
-                    on_progress=progress_callback,
-                    cancel_requested=action_cancel_event.is_set,
-                )
-            elif action_id == ACTION_ADD_MODELS:
-                if project is None:
-                    self._placeholder_action(action_id, project, pointcloud)
-                    return
-                payload = prompt_add_project_models(self.QtWidgets, self, project)
-                if payload is None:
-                    return
-                progress_dialog = self._create_action_progress_dialog(
-                    "3D-Modelle hinzufügen",
-                    f"3D-Modelle werden zu „{project.project}“ hinzugefügt...",
-                    cancel_event=action_cancel_event,
-                )
-                progress_callback = self._make_progress_callback(
-                    ACTIVITY_ACTION_UPLOAD,
-                    project=project.project,
-                    customer=project.customer,
-                    actor="Projektverwaltung",
-                    source_path="; ".join(payload.source_paths),
-                    target_path=project.s3_path or project.viewer_path,
-                    extra_sink=self._progress_dialog_sink(progress_dialog),
-                )
-                operation = lambda: project_controller.add_models(
-                    project,
-                    payload,
-                    on_progress=progress_callback,
-                    cancel_requested=action_cancel_event.is_set,
-                    confirm_spatial_warning=self._confirm_spatial_warning,
-                    confirm_crs_repair=self._confirm_crs_repair,
-                )
-            elif action_id == ACTION_REPAIR_CRS_METADATA:
-                if project is None:
-                    self._placeholder_action(action_id, project, pointcloud)
-                    return
-                payload = prompt_repair_project_crs(self.QtWidgets, self, project)
-                if payload is None:
-                    return
-                progress_dialog = self._create_action_progress_dialog(
-                    "CRS-Metadaten reparieren",
-                    f"CRS-Metadaten in „{project.project}“ werden geprüft...",
-                )
-                operation = lambda: project_controller.repair_project_crs_metadata(
-                    project,
-                    payload,
-                    confirm_repair=self._confirm_crs_repair,
-                )
-            elif action_id == ACTION_REPLACE_SINGLE_POINTCLOUD:
-                if project is None or pointcloud is None:
-                    self._placeholder_action(action_id, project, pointcloud)
-                    return
-                replace_temp_dir = tempfile.mkdtemp(prefix=UPLOAD_TEMP_PREFIX)
-                payload = prompt_replace_single_pointcloud(
-                    self.QtWidgets,
-                    self,
-                    project,
-                    pointcloud,
-                    self._settings_dialog_defaults(),
-                    replace_temp_dir,
-                )
-                if payload is None:
-                    shutil.rmtree(replace_temp_dir, ignore_errors=True)
-                    return
-                progress_dialog = self._create_action_progress_dialog(
-                    "Punktwolke austauschen",
-                    f"„{pointcloud.name}“ wird ausgetauscht...",
-                    cancel_event=action_cancel_event,
-                )
-                progress_callback = self._make_progress_callback(
-                    ACTIVITY_ACTION_REPLACE,
-                    project=project.project,
-                    customer=project.customer,
-                    actor="Projektverwaltung",
-                    source_path=getattr(payload, "source_path", ""),
-                    target_path=pointcloud.s3_path or pointcloud.viewer_path,
-                    extra_sink=self._progress_dialog_sink(progress_dialog),
-                )
-                operation = lambda: project_controller.replace_single_pointcloud(
-                    project,
-                    pointcloud,
-                    self._with_detected_crs_single(payload),
-                    on_progress=progress_callback,
-                    cancel_requested=action_cancel_event.is_set,
-                )
-            elif action_id == ACTION_REPLACE_SINGLE_MODEL:
-                if project is None or pointcloud is None:
-                    self._placeholder_action(action_id, project, pointcloud)
-                    return
-                payload = prompt_replace_single_model(self.QtWidgets, self, project, pointcloud)
-                if payload is None:
-                    return
-                progress_dialog = self._create_action_progress_dialog(
-                    "GLB austauschen",
-                    f"„{pointcloud.name}“ wird vorbereitet und ausgetauscht...",
-                    cancel_event=action_cancel_event,
-                )
-                progress_callback = self._make_progress_callback(
-                    ACTIVITY_ACTION_REPLACE,
-                    project=project.project,
-                    customer=project.customer,
-                    actor="Projektverwaltung",
-                    source_path=payload.source_path,
-                    target_path=pointcloud.s3_path or pointcloud.viewer_path,
-                    extra_sink=self._progress_dialog_sink(progress_dialog),
-                )
-                operation = lambda: project_controller.replace_single_model(
-                    project,
-                    pointcloud,
-                    payload,
-                    on_progress=progress_callback,
-                    cancel_requested=action_cancel_event.is_set,
-                    confirm_spatial_warning=self._confirm_spatial_warning,
-                    confirm_crs_repair=self._confirm_crs_repair,
-                )
-            elif action_id == ACTION_REMOVE_POINTCLOUD:
-                if project is None or pointcloud is None:
-                    self._placeholder_action(action_id, project, pointcloud)
-                    return
-                if not confirm_remove_pointcloud(self.QtWidgets, self, project, pointcloud):
-                    return
-                progress_dialog = self._create_action_progress_dialog(
-                    "Punktwolke entfernen",
-                    f"„{pointcloud.name}“ wird entfernt...",
-                )
-                operation = lambda: project_controller.remove_pointcloud(project, pointcloud)
-            elif action_id == ACTION_REMOVE_MODEL:
-                if project is None or pointcloud is None:
-                    self._placeholder_action(action_id, project, pointcloud)
-                    return
-                if not confirm_remove_model(self.QtWidgets, self, project, pointcloud):
-                    return
-                progress_dialog = self._create_action_progress_dialog(
-                    "3D-Modell entfernen",
-                    f"„{pointcloud.name}“ wird entfernt...",
-                )
-                operation = lambda: project_controller.remove_model(project, pointcloud)
-            else:
-                self._placeholder_action(action_id, project, pointcloud)
-                return
+            operation = builder(self, run, project_management_dialogs)
         except Exception as error:
-            self._close_action_progress_dialog(progress_dialog)
-            if replace_temp_dir is not None:
-                shutil.rmtree(replace_temp_dir, ignore_errors=True)
+            self._release_project_action_run(run)
             self.statusBar().showMessage(str(error))
+            return
+        if operation is None:  # cancelled in the input dialog or not applicable
+            self._release_project_action_run(run)
             return
 
         # The input dialogs above are modal; an update or another task may
         # have started meanwhile (e.g. the delayed startup update check).
         if self._update_install_started or self._has_active_background_tasks():
-            self._close_action_progress_dialog(progress_dialog)
-            if progress_callback:
-                self._release_progress_callback(progress_callback)
-            if replace_temp_dir is not None:
-                shutil.rmtree(replace_temp_dir, ignore_errors=True)
+            self._release_project_action_run(run)
             self.statusBar().showMessage(
                 "Inzwischen läuft eine andere Aktion; bitte danach erneut starten."
             )
@@ -430,13 +135,6 @@ class ProjectActionsMixin:
 
         self.statusBar().showMessage(f"{action_label} gestartet")
 
-        def finish_project_action():
-            self._close_action_progress_dialog(progress_dialog)
-            if progress_callback:
-                self._release_progress_callback(progress_callback)
-            if replace_temp_dir is not None:
-                shutil.rmtree(replace_temp_dir, ignore_errors=True)
-
         self._start_background_task(
             operation,
             on_result=handle_result,
@@ -449,8 +147,319 @@ class ProjectActionsMixin:
                 actor="Projektverwaltung",
                 target_path=(project.s3_path or project.viewer_path) if project is not None else "",
             ),
-            on_finished=finish_project_action,
+            on_finished=lambda: self._release_project_action_run(run),
         )
+
+    def _release_project_action_run(self, run: _ProjectActionRun):
+        """Undo what a builder set up; safe on every exit path, also after an error."""
+
+        self._close_action_progress_dialog(run.progress_dialog)
+        if run.progress_callback:
+            self._release_progress_callback(run.progress_callback)
+        if run.temp_dir is not None:
+            shutil.rmtree(run.temp_dir, ignore_errors=True)
+
+    def _project_action_progress(self, run: _ProjectActionRun, activity_action: str, **paths):
+        run.progress_callback = self._make_progress_callback(
+            activity_action,
+            project=run.project.project,
+            customer=run.project.customer,
+            actor="Projektverwaltung",
+            extra_sink=self._progress_dialog_sink(run.progress_dialog),
+            **paths,
+        )
+        return run.progress_callback
+
+    # Builders: ask for input, set up dialog/progress on ``run`` and return the
+    # worker operation, or None when the user cancelled. They run on the GUI
+    # thread; everything slow (S3, CRS detection on a NAS) belongs in the operation.
+
+    def _build_rename_action(self, run: _ProjectActionRun, dialogs):
+        project = run.project
+        payload = dialogs.prompt_rename_project(self.QtWidgets, self, project)
+        if payload is None:
+            return None
+        run.progress_dialog = self._create_action_progress_dialog(
+            "Projekt umbenennen",
+            f"„{project.project}“ wird umbenannt...",
+        )
+        return lambda: run.controller.rename_project(project, payload)
+
+    def _build_duplicate_action(self, run: _ProjectActionRun, dialogs):
+        project = run.project
+        payload = dialogs.prompt_duplicate_project(self.QtWidgets, self, project)
+        if payload is None:
+            return None
+        run.progress_dialog = self._create_action_progress_dialog(
+            "Projekt duplizieren",
+            f"„{project.project}“ wird dupliziert...",
+            cancel_event=run.cancel_event,
+        )
+        on_progress = self._project_action_progress(
+            run, ACTIVITY_ACTION_UPDATE, source_path=project.s3_path or project.viewer_path
+        )
+        return lambda: run.controller.duplicate_project(
+            project,
+            payload,
+            on_progress=on_progress,
+            cancel_requested=run.cancel_event.is_set,
+        )
+
+    def _build_delete_action(self, run: _ProjectActionRun, dialogs):
+        project = run.project
+        if project is None or not dialogs.confirm_delete_project(self.QtWidgets, self, project):
+            return None
+        run.progress_dialog = self._create_action_progress_dialog(
+            "Projekt löschen",
+            f"„{project.project}“ wird gelöscht...",
+        )
+        return lambda: run.controller.delete_project(project)
+
+    def _build_download_action(self, run: _ProjectActionRun, dialogs):
+        project = run.project
+        if project is None:
+            self._placeholder_action(run.action_id, project, run.pointcloud)
+            return None
+        payload = dialogs.prompt_download_project(self.QtWidgets, self, project)
+        if payload is None:
+            return None
+        progress_dialog = self.QtWidgets.QProgressDialog(
+            "Download wird vorbereitet...",
+            "Abbrechen",
+            0,
+            0,
+            self,
+        )
+        run.progress_dialog = progress_dialog
+        progress_dialog.setWindowTitle("Projekt herunterladen")
+        progress_dialog.setMinimumDuration(0)
+        progress_dialog.setAutoClose(False)
+        progress_dialog.canceled.connect(run.cancel_event.set)
+        progress_dialog.canceled.connect(
+            lambda: self.statusBar().showMessage("Download wird abgebrochen...")
+        )
+        progress_dialog.show()
+        on_progress = self._project_action_progress(
+            run,
+            ACTIVITY_ACTION_DOWNLOAD,
+            source_path=project.s3_path or project.viewer_path,
+            target_path=payload.target_dir,
+        )
+        return lambda: run.controller.download_project(
+            project,
+            payload,
+            on_progress=on_progress,
+            cancel_requested=run.cancel_event.is_set,
+        )
+
+    def _build_disable_link_action(self, run: _ProjectActionRun, dialogs):
+        project = run.project
+        if project is None:
+            return None
+        return lambda: run.controller.disable_project_link(project)
+
+    def _build_enable_link_action(self, run: _ProjectActionRun, dialogs):
+        project = run.project
+        if project is None:
+            return None
+        return lambda: run.controller.enable_project_link(project)
+
+    def _build_replace_all_pointclouds_action(self, run: _ProjectActionRun, dialogs):
+        project = run.project
+        if project is None:
+            self._placeholder_action(run.action_id, project, run.pointcloud)
+            return None
+        run.temp_dir = tempfile.mkdtemp(prefix=UPLOAD_TEMP_PREFIX)
+        payload = dialogs.prompt_replace_all_pointclouds(
+            self.QtWidgets,
+            self,
+            project,
+            self._settings_dialog_defaults(),
+            run.temp_dir,
+        )
+        if payload is None:
+            return None
+        run.progress_dialog = self._create_action_progress_dialog(
+            "Punktwolken austauschen",
+            f"Punktwolken in „{project.project}“ werden ausgetauscht...",
+            cancel_event=run.cancel_event,
+        )
+        on_progress = self._project_action_progress(
+            run, ACTIVITY_ACTION_REPLACE, target_path=project.s3_path or project.viewer_path
+        )
+        # CRS detection reads the sources (maybe on a NAS): worker thread.
+        return lambda: run.controller.replace_all_pointclouds(
+            project,
+            self._with_detected_crs_all(payload),
+            on_progress=on_progress,
+            cancel_requested=run.cancel_event.is_set,
+        )
+
+    def _build_add_pointclouds_action(self, run: _ProjectActionRun, dialogs):
+        project = run.project
+        if project is None:
+            self._placeholder_action(run.action_id, project, run.pointcloud)
+            return None
+        run.temp_dir = tempfile.mkdtemp(prefix=UPLOAD_TEMP_PREFIX)
+        payload = dialogs.prompt_add_project_pointclouds(
+            self.QtWidgets,
+            self,
+            project,
+            self._settings_dialog_defaults(),
+            run.temp_dir,
+        )
+        if payload is None:
+            return None
+        run.progress_dialog = self._create_action_progress_dialog(
+            "Punktwolken hinzufügen",
+            f"Punktwolken werden zu „{project.project}“ hinzugefügt...",
+            cancel_event=run.cancel_event,
+        )
+        on_progress = self._project_action_progress(
+            run, ACTIVITY_ACTION_UPLOAD, target_path=project.s3_path or project.viewer_path
+        )
+        return lambda: run.controller.add_pointclouds(
+            project,
+            self._with_detected_crs_all(payload),
+            on_progress=on_progress,
+            cancel_requested=run.cancel_event.is_set,
+        )
+
+    def _build_add_models_action(self, run: _ProjectActionRun, dialogs):
+        project = run.project
+        if project is None:
+            self._placeholder_action(run.action_id, project, run.pointcloud)
+            return None
+        payload = dialogs.prompt_add_project_models(self.QtWidgets, self, project)
+        if payload is None:
+            return None
+        run.progress_dialog = self._create_action_progress_dialog(
+            "3D-Modelle hinzufügen",
+            f"3D-Modelle werden zu „{project.project}“ hinzugefügt...",
+            cancel_event=run.cancel_event,
+        )
+        on_progress = self._project_action_progress(
+            run,
+            ACTIVITY_ACTION_UPLOAD,
+            source_path="; ".join(payload.source_paths),
+            target_path=project.s3_path or project.viewer_path,
+        )
+        return lambda: run.controller.add_models(
+            project,
+            payload,
+            on_progress=on_progress,
+            cancel_requested=run.cancel_event.is_set,
+            confirm_spatial_warning=self._confirm_spatial_warning,
+            confirm_crs_repair=self._confirm_crs_repair,
+        )
+
+    def _build_repair_crs_metadata_action(self, run: _ProjectActionRun, dialogs):
+        project = run.project
+        if project is None:
+            self._placeholder_action(run.action_id, project, run.pointcloud)
+            return None
+        payload = dialogs.prompt_repair_project_crs(self.QtWidgets, self, project)
+        if payload is None:
+            return None
+        run.progress_dialog = self._create_action_progress_dialog(
+            "CRS-Metadaten reparieren",
+            f"CRS-Metadaten in „{project.project}“ werden geprüft...",
+        )
+        return lambda: run.controller.repair_project_crs_metadata(
+            project,
+            payload,
+            confirm_repair=self._confirm_crs_repair,
+        )
+
+    def _build_replace_single_pointcloud_action(self, run: _ProjectActionRun, dialogs):
+        project, pointcloud = run.project, run.pointcloud
+        if project is None or pointcloud is None:
+            self._placeholder_action(run.action_id, project, pointcloud)
+            return None
+        run.temp_dir = tempfile.mkdtemp(prefix=UPLOAD_TEMP_PREFIX)
+        payload = dialogs.prompt_replace_single_pointcloud(
+            self.QtWidgets,
+            self,
+            project,
+            pointcloud,
+            self._settings_dialog_defaults(),
+            run.temp_dir,
+        )
+        if payload is None:
+            return None
+        run.progress_dialog = self._create_action_progress_dialog(
+            "Punktwolke austauschen",
+            f"„{pointcloud.name}“ wird ausgetauscht...",
+            cancel_event=run.cancel_event,
+        )
+        on_progress = self._project_action_progress(
+            run,
+            ACTIVITY_ACTION_REPLACE,
+            source_path=getattr(payload, "source_path", ""),
+            target_path=pointcloud.s3_path or pointcloud.viewer_path,
+        )
+        return lambda: run.controller.replace_single_pointcloud(
+            project,
+            pointcloud,
+            self._with_detected_crs_single(payload),
+            on_progress=on_progress,
+            cancel_requested=run.cancel_event.is_set,
+        )
+
+    def _build_replace_single_model_action(self, run: _ProjectActionRun, dialogs):
+        project, pointcloud = run.project, run.pointcloud
+        if project is None or pointcloud is None:
+            self._placeholder_action(run.action_id, project, pointcloud)
+            return None
+        payload = dialogs.prompt_replace_single_model(self.QtWidgets, self, project, pointcloud)
+        if payload is None:
+            return None
+        run.progress_dialog = self._create_action_progress_dialog(
+            "GLB austauschen",
+            f"„{pointcloud.name}“ wird vorbereitet und ausgetauscht...",
+            cancel_event=run.cancel_event,
+        )
+        on_progress = self._project_action_progress(
+            run,
+            ACTIVITY_ACTION_REPLACE,
+            source_path=payload.source_path,
+            target_path=pointcloud.s3_path or pointcloud.viewer_path,
+        )
+        return lambda: run.controller.replace_single_model(
+            project,
+            pointcloud,
+            payload,
+            on_progress=on_progress,
+            cancel_requested=run.cancel_event.is_set,
+            confirm_spatial_warning=self._confirm_spatial_warning,
+            confirm_crs_repair=self._confirm_crs_repair,
+        )
+
+    def _build_remove_pointcloud_action(self, run: _ProjectActionRun, dialogs):
+        project, pointcloud = run.project, run.pointcloud
+        if project is None or pointcloud is None:
+            self._placeholder_action(run.action_id, project, pointcloud)
+            return None
+        if not dialogs.confirm_remove_pointcloud(self.QtWidgets, self, project, pointcloud):
+            return None
+        run.progress_dialog = self._create_action_progress_dialog(
+            "Punktwolke entfernen",
+            f"„{pointcloud.name}“ wird entfernt...",
+        )
+        return lambda: run.controller.remove_pointcloud(project, pointcloud)
+
+    def _build_remove_model_action(self, run: _ProjectActionRun, dialogs):
+        project, pointcloud = run.project, run.pointcloud
+        if project is None or pointcloud is None:
+            self._placeholder_action(run.action_id, project, pointcloud)
+            return None
+        if not dialogs.confirm_remove_model(self.QtWidgets, self, project, pointcloud):
+            return None
+        run.progress_dialog = self._create_action_progress_dialog(
+            "3D-Modell entfernen",
+            f"„{pointcloud.name}“ wird entfernt...",
+        )
+        return lambda: run.controller.remove_model(project, pointcloud)
 
     def _close_action_progress_dialog(self, dialog):
         """Close a project action dialog for good.
@@ -575,3 +584,22 @@ class ProjectActionsMixin:
             actor="Projektverwaltung",
             target_path=project.link,
         )
+
+
+# Actions without a builder (or without S3) end in _placeholder_action.
+_PROJECT_ACTION_BUILDERS = {
+    ACTION_RENAME: ProjectActionsMixin._build_rename_action,
+    ACTION_DUPLICATE: ProjectActionsMixin._build_duplicate_action,
+    ACTION_DELETE: ProjectActionsMixin._build_delete_action,
+    ACTION_DOWNLOAD: ProjectActionsMixin._build_download_action,
+    ACTION_DISABLE_LINK: ProjectActionsMixin._build_disable_link_action,
+    ACTION_ENABLE_LINK: ProjectActionsMixin._build_enable_link_action,
+    ACTION_REPLACE_ALL_POINTCLOUDS: ProjectActionsMixin._build_replace_all_pointclouds_action,
+    ACTION_ADD_POINTCLOUDS: ProjectActionsMixin._build_add_pointclouds_action,
+    ACTION_ADD_MODELS: ProjectActionsMixin._build_add_models_action,
+    ACTION_REPAIR_CRS_METADATA: ProjectActionsMixin._build_repair_crs_metadata_action,
+    ACTION_REPLACE_SINGLE_POINTCLOUD: ProjectActionsMixin._build_replace_single_pointcloud_action,
+    ACTION_REPLACE_SINGLE_MODEL: ProjectActionsMixin._build_replace_single_model_action,
+    ACTION_REMOVE_POINTCLOUD: ProjectActionsMixin._build_remove_pointcloud_action,
+    ACTION_REMOVE_MODEL: ProjectActionsMixin._build_remove_model_action,
+}

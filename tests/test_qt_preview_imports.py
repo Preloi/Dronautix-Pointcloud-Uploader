@@ -338,3 +338,16 @@ def test_runtime_dialogs_accept_settings_defaults_without_qt():
 
     assert "defaults" in inspect.signature(prompt_replace_all_pointclouds).parameters
     assert "defaults" in inspect.signature(prompt_replace_single_pointcloud).parameters
+
+
+def test_every_catalog_project_action_has_a_builder_or_is_a_link_action():
+    from dronautix_uploader.qt_app.project_management_actions import (
+        ACTION_COPY_LINK,
+        ACTION_OPEN_LINK,
+        PROJECT_MANAGEMENT_ACTIONS,
+    )
+    from dronautix_uploader.qt_app.window.project_actions import _PROJECT_ACTION_BUILDERS
+
+    catalog = {action.action_id for action in PROJECT_MANAGEMENT_ACTIONS}
+
+    assert catalog - {ACTION_OPEN_LINK, ACTION_COPY_LINK} == set(_PROJECT_ACTION_BUILDERS)
