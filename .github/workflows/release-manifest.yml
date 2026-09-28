@@ -1,0 +1,27 @@
+name: Release-Manifest
+
+# latest-release.json on master is what installed apps read at startup.
+# It may only reference an uploaded installer whose SHA-256 matches.
+on:
+  pull_request:
+    paths: [latest-release.json]
+  push:
+    branches: [master]
+    paths: [latest-release.json]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Manifest gegen Release-Asset prüfen
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Manifest prüfen
+        run: python tools/verify_release_manifest.py --expect-app-version

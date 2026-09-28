@@ -6,6 +6,10 @@ import subprocess
 
 import pytest
 
+# Real bundled-runner calls; CI runners are slower and shared, the old 60 s
+# limit made the texture matrix test flaky under load.
+GLB_RUNNER_TEST_TIMEOUT = 300
+
 import dronautix_uploader.core.glb_toolchain as toolchain_module
 from dronautix_uploader.core.contracts import ModelUploadInput
 from dronautix_uploader.core.glb_toolchain import (
@@ -332,7 +336,7 @@ def test_visura_safe_candidate_combines_full_resolution_ktx2_meshopt_and_submill
         ],
         cwd=bundle,
         check=True,
-        timeout=60,
+        timeout=GLB_RUNNER_TEST_TIMEOUT,
     )
     document = {
         "asset": {"version": "2.0"},
@@ -364,14 +368,14 @@ def test_visura_safe_candidate_combines_full_resolution_ktx2_meshopt_and_submill
     source.write_bytes(struct.pack("<4sII", b"glTF", 2, 12 + len(chunks)) + chunks)
 
     candidate = tmp_path / "terrain-visura-safe.glb"
-    subprocess.run([str(node), str(optimizer), "visura-safe", str(source), str(candidate)], cwd=bundle, check=True, timeout=60)
+    subprocess.run([str(node), str(optimizer), "visura-safe", str(source), str(candidate)], cwd=bundle, check=True, timeout=GLB_RUNNER_TEST_TIMEOUT)
     report = subprocess.run(
         [str(node), str(validator), str(candidate)],
         cwd=bundle,
         capture_output=True,
         text=True,
         check=True,
-        timeout=60,
+        timeout=GLB_RUNNER_TEST_TIMEOUT,
     )
     assert json.loads(report.stdout)["dronautix_policy"]["blocking_error_count"] == 0
     output = _read_glb_json(candidate)
@@ -407,7 +411,7 @@ def test_visura_safe_candidate_combines_full_resolution_ktx2_meshopt_and_submill
         [str(node), str(optimizer), "visura-safe", str(large_source), str(large_candidate)],
         cwd=bundle,
         check=True,
-        timeout=60,
+        timeout=GLB_RUNNER_TEST_TIMEOUT,
     )
     large_output = _read_glb_json(large_candidate)
     assert {"EXT_meshopt_compression", "KHR_texture_basisu"}.issubset(large_output["extensionsRequired"])
@@ -480,7 +484,7 @@ def test_visura_safe_candidate_simplifies_static_indexed_geometry_with_metric_bu
                     cwd=bundle,
                     capture_output=True,
                     check=True,
-                    timeout=60,
+                    timeout=GLB_RUNNER_TEST_TIMEOUT,
                 ).stdout
             ).decode("ascii"),
         }],
@@ -498,7 +502,7 @@ def test_visura_safe_candidate_simplifies_static_indexed_geometry_with_metric_bu
     source.write_bytes(struct.pack("<4sII", b"glTF", 2, 12 + len(chunks)) + chunks)
 
     candidate = tmp_path / "indexed-grid-visura-safe.glb"
-    subprocess.run([str(node), str(optimizer), "visura-safe", str(source), str(candidate)], cwd=bundle, check=True, timeout=60)
+    subprocess.run([str(node), str(optimizer), "visura-safe", str(source), str(candidate)], cwd=bundle, check=True, timeout=GLB_RUNNER_TEST_TIMEOUT)
     output = _read_glb_json(candidate)
     primitive = output["meshes"][0]["primitives"][0]
     assert output["accessors"][primitive["attributes"]["POSITION"]]["count"] < size * size
@@ -532,12 +536,12 @@ Promise.all(tasks.map(([name, width, height, channels, background, format]) =>
   sharp({create: {width, height, channels, background}})[format]().toFile(path.join(output, name))
 )).catch((error) => { console.error(error); process.exitCode = 1; });
 """
-    subprocess.run([str(node), "-e", generation_script, str(image_dir)], cwd=bundle, check=True, timeout=60)
+    subprocess.run([str(node), "-e", generation_script, str(image_dir)], cwd=bundle, check=True, timeout=GLB_RUNNER_TEST_TIMEOUT)
     source = tmp_path / "texture-matrix.glb"
     document = _write_texture_matrix_glb(source, image_dir)
     ktx2 = tmp_path / "matrix-ktx2.glb"
-    subprocess.run([str(node), str(optimizer), "ktx2", str(source), str(ktx2)], cwd=bundle, check=True, timeout=60)
-    report = subprocess.run([str(node), str(validator), str(ktx2)], cwd=bundle, capture_output=True, text=True, check=True, timeout=60)
+    subprocess.run([str(node), str(optimizer), "ktx2", str(source), str(ktx2)], cwd=bundle, check=True, timeout=GLB_RUNNER_TEST_TIMEOUT)
+    report = subprocess.run([str(node), str(validator), str(ktx2)], cwd=bundle, capture_output=True, text=True, check=True, timeout=GLB_RUNNER_TEST_TIMEOUT)
     assert json.loads(report.stdout)["dronautix_policy"]["blocking_error_count"] == 0
     ktx_document = _read_glb_json(ktx2)
     assert "KHR_texture_basisu" in ktx_document["extensionsUsed"]
@@ -550,7 +554,7 @@ Promise.all(tasks.map(([name, width, height, channels, background, format]) =>
     assert len(ktx_document["textures"]) >= 4  # Duplicate source images retain distinct samplers.
 
     plain_decoded = tmp_path / "matrix-ktx2-decoded.glb"
-    subprocess.run([str(node), str(decoder), "decode", "KHR_texture_basisu", str(ktx2), str(plain_decoded)], cwd=bundle, check=True, timeout=60)
+    subprocess.run([str(node), str(decoder), "decode", "KHR_texture_basisu", str(ktx2), str(plain_decoded)], cwd=bundle, check=True, timeout=GLB_RUNNER_TEST_TIMEOUT)
     decoded_plain_document = _read_glb_json(plain_decoded)
     metadata_script = """
 const fs = require('fs'); const sharp = require('sharp');
@@ -560,18 +564,18 @@ sharp(fs.readFileSync(process.argv[1])).metadata().then((value) => console.log(J
         selected_image = _texture_image_index(decoded_plain_document, 0, slot)
         image_path = tmp_path / f"decoded-{slot}.png"
         image_path.write_bytes(_read_glb_image_payload(plain_decoded, selected_image))
-        metadata = subprocess.run([str(node), "-e", metadata_script, str(image_path)], cwd=bundle, capture_output=True, text=True, check=True, timeout=60)
+        metadata = subprocess.run([str(node), "-e", metadata_script, str(image_path)], cwd=bundle, capture_output=True, text=True, check=True, timeout=GLB_RUNNER_TEST_TIMEOUT)
         dimensions = json.loads(metadata.stdout)
         assert (dimensions["width"], dimensions["height"]) == expected_size
 
     for geometry_codec, extension in (("meshopt", "EXT_meshopt_compression"), ("draco", "KHR_draco_mesh_compression")):
         combined = tmp_path / f"matrix-{geometry_codec}.glb"
         decoded = tmp_path / f"matrix-{geometry_codec}-decoded.glb"
-        subprocess.run([str(node), str(optimizer), geometry_codec, str(ktx2), str(combined)], cwd=bundle, check=True, timeout=60)
+        subprocess.run([str(node), str(optimizer), geometry_codec, str(ktx2), str(combined)], cwd=bundle, check=True, timeout=GLB_RUNNER_TEST_TIMEOUT)
         combined_document = _read_glb_json(combined)
         assert extension in combined_document["extensionsUsed"]
         assert "KHR_texture_basisu" in combined_document["extensionsUsed"]
-        subprocess.run([str(node), str(decoder), "decode", f"{extension},KHR_texture_basisu", str(combined), str(decoded)], cwd=bundle, check=True, timeout=60)
+        subprocess.run([str(node), str(decoder), "decode", f"{extension},KHR_texture_basisu", str(combined), str(decoded)], cwd=bundle, check=True, timeout=GLB_RUNNER_TEST_TIMEOUT)
         decoded_document = _read_glb_json(decoded)
         assert not {"EXT_meshopt_compression", "KHR_draco_mesh_compression", "KHR_texture_basisu"} & set(decoded_document.get("extensionsUsed", []))
 
@@ -583,10 +587,10 @@ sharp(fs.readFileSync(process.argv[1])).metadata().then((value) => console.log(J
     raw_json += b" " * (-len(raw_json) % 4)
     binary = struct.pack("<9f6f", 0, 0, 0, 2, 0, 0, 0, 3, 4, 0, 0, 1, 0, 0, 1)
     ambiguous.write_bytes(struct.pack("<4sII", b"glTF", 2, 12 + len(raw_json) + len(binary) + 16) + struct.pack("<II", len(raw_json), 0x4E4F534A) + raw_json + struct.pack("<II", len(binary), 0x004E4942) + binary)
-    rejected = subprocess.run([str(node), str(optimizer), "ktx2", str(ambiguous), str(tmp_path / "shared-image-ambiguous-ktx2.glb")], cwd=bundle, capture_output=True, text=True, timeout=60)
+    rejected = subprocess.run([str(node), str(optimizer), "ktx2", str(ambiguous), str(tmp_path / "shared-image-ambiguous-ktx2.glb")], cwd=bundle, capture_output=True, text=True, timeout=GLB_RUNNER_TEST_TIMEOUT)
     assert rejected.returncode != 0 and "E_KTX_AMBIGUOUS_COLORSPACE" in rejected.stderr
 
-    existing = subprocess.run([str(node), str(optimizer), "ktx2", str(ktx2), str(tmp_path / "again.glb")], cwd=bundle, capture_output=True, text=True, timeout=60)
+    existing = subprocess.run([str(node), str(optimizer), "ktx2", str(ktx2), str(tmp_path / "again.glb")], cwd=bundle, capture_output=True, text=True, timeout=GLB_RUNNER_TEST_TIMEOUT)
     assert existing.returncode != 0 and "E_KTX_ALREADY_COMPRESSED" in existing.stderr
 
 

@@ -1,0 +1,59 @@
+name: Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Testsuite (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      QT_QPA_PLATFORM: offscreen
+      QT_QPA_FONTDIR: C:\Windows\Fonts
+    steps:
+      # Check out exactly the committed bytes (LF); the Windows runner would
+      # otherwise convert text files to CRLF.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Abhängigkeiten installieren
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-v2-preview.txt pytest
+          python -m pip freeze
+      - name: Tests
+        run: python -m pytest tests -q -p no:cacheprovider
+
+  build:
+    name: EXE-Build + Start-Selbsttest
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Abhängigkeiten installieren
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-v2-preview.txt
+      - name: Build-Check (ohne Installer, ohne Manifest)
+        run: python tools/ci_build_check.py --check-version-files

@@ -1,1 +1,3 @@
 bundled_tools/GLBToolchain/** binary
+# Viewer output snapshots are compared byte-for-byte; keep LF on every platform.
+tests/golden/** text eol=lf
