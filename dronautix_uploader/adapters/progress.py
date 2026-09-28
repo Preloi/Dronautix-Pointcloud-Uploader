@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -66,10 +67,16 @@ class ProgressDispatcher:
 
 
 class ProgressRecorder:
-    """Sink implementation that keeps events in arrival order."""
+    """Sink implementation that keeps the latest events in arrival order.
 
-    def __init__(self) -> None:
-        self._events: list[ProgressEvent] = []
+    Byte-level upload progress produces thousands of events per run; only the
+    most recent ``max_events`` are kept so memory stays bounded.
+    """
+
+    DEFAULT_MAX_EVENTS = 5000
+
+    def __init__(self, max_events: int | None = DEFAULT_MAX_EVENTS) -> None:
+        self._events: deque[ProgressEvent] = deque(maxlen=max_events)
 
     @property
     def events(self) -> tuple[ProgressEvent, ...]:

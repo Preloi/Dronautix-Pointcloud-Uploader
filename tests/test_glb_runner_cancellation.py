@@ -57,3 +57,28 @@ def test_bundled_runner_cancellation_terminates_spawned_codec_process(tmp_path, 
     while _pid_is_running(child_pid) and time.monotonic() < deadline:
         time.sleep(0.05)
     assert not _pid_is_running(child_pid)
+
+
+def test_bundled_runner_timeout_terminates_hung_codec_and_reports_validation_error(tmp_path, monkeypatch):
+    runner = tmp_path / "runners" / "hang.py"
+    runner.parent.mkdir()
+    runner.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+    monkeypatch.setattr(service_module, "get_bundled_tool_path", lambda *_args: Path(sys.executable))
+    monkeypatch.setattr(service_module, "get_bundled_runner_path", lambda *_args: runner)
+    monkeypatch.setattr(service_module, "get_bundled_toolchain_environment", lambda *_args: os.environ.copy())
+
+    started = time.monotonic()
+    with pytest.raises(service_module.GLBValidationError, match="Zeitlimit"):
+        service_module._run_bundled_runner(None, "optimizer", (), None, timeout_seconds=0.5)
+
+    assert time.monotonic() - started < 15
+
+
+def test_runner_timeout_scales_with_input_size_and_is_capped(tmp_path):
+    small = tmp_path / "small.glb"
+    small.write_bytes(b"x")
+
+    assert service_module.runner_timeout_seconds(small) == pytest.approx(service_module.RUNNER_BASE_TIMEOUT_SECONDS, abs=1)
+    assert service_module.runner_timeout_seconds(tmp_path / "missing.glb") == service_module.RUNNER_BASE_TIMEOUT_SECONDS
+    # Texture-heavy small GLBs legitimately need long KTX2 runs; the limit only catches hangs.
+    assert service_module.RUNNER_BASE_TIMEOUT_SECONDS >= 45 * 60

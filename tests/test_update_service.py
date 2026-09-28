@@ -1,4 +1,5 @@
 import hashlib
+from pathlib import Path
 
 import pytest
 
@@ -172,7 +173,9 @@ def test_download_and_verify_installer_accepts_matching_sha(tmp_path):
 
     assert result.ok
     assert result.message == "OK"
-    assert (tmp_path / manifest["installer_name"]).exists()
+    installer = Path(result.installer_path)
+    assert installer.name == manifest["installer_name"] and installer.exists()
+    assert installer.parent.parent == tmp_path and installer.parent.name.startswith("update-")
 
 
 def test_download_and_verify_installer_deletes_bad_hash(tmp_path):
@@ -188,3 +191,57 @@ def test_download_and_verify_installer_deletes_bad_hash(tmp_path):
     assert "Hash" in result.message
     assert not (tmp_path / manifest["installer_name"]).exists()
     assert not (tmp_path / f"{manifest['installer_name']}.download").exists()
+
+
+def test_download_and_verify_installer_removes_previous_downloads(tmp_path):
+    manifest = _manifest("1.7.13", installer_sha256=hashlib.sha256(b"installer bytes").hexdigest())
+    old_dir = tmp_path / "update-old"
+    old_dir.mkdir()
+    (old_dir / "Dronautix_Pointcloud_Uploader_Setup_1.7.12.exe").write_bytes(b"old")
+    (tmp_path / "Dronautix_Pointcloud_Uploader_Setup_1.7.11.exe").write_bytes(b"older")
+
+    result = download_and_verify_installer(
+        manifest,
+        tmp_path,
+        opener=lambda _request, timeout: FakeResponse(b"installer bytes"),
+    )
+
+    assert result.ok
+    assert [path.name for path in tmp_path.iterdir()] == [Path(result.installer_path).parent.name]
+
+
+def test_prerelease_versions_are_never_offered_as_stable_update():
+    from dronautix_uploader.core.update_service import is_remote_version_newer
+
+    assert not is_remote_version_newer("2.2.0-rc1", "2.1.8")
+    assert not is_remote_version_newer("2.2.0b1", "2.1.8")
+    assert is_remote_version_newer("2.2.0", "2.1.8")
+    assert is_remote_version_newer("v2.1.10", "2.1.9")
+    assert not is_remote_version_newer("2.1.8", "2.1.8")
+
+
+def test_download_reports_progress_and_can_be_cancelled_without_leaving_files(tmp_path):
+    payload = b"x" * (3 * 1024 * 1024)
+    manifest = _manifest("1.7.13", installer_sha256=hashlib.sha256(payload).hexdigest())
+
+    class SizedResponse(FakeResponse):
+        headers = {"Content-Length": str(len(payload))}
+
+    progress = []
+    result = download_and_verify_installer(
+        manifest,
+        tmp_path,
+        opener=lambda _request, timeout: SizedResponse(payload),
+        on_progress=lambda done, total: progress.append((done, total)),
+    )
+    assert result.ok
+    assert progress[-1] == (len(payload), len(payload)) and len(progress) == 3
+
+    cancelled = download_and_verify_installer(
+        manifest,
+        tmp_path / "second",
+        opener=lambda _request, timeout: SizedResponse(payload),
+        cancel_requested=lambda: True,
+    )
+    assert cancelled.cancelled and not cancelled.ok
+    assert not list((tmp_path / "second").rglob("*.exe")) and not list((tmp_path / "second").rglob("*.download"))

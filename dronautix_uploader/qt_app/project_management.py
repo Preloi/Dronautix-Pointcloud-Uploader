@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from dronautix_uploader.core.crs_service import normalize_crs_metadata
 from dronautix_uploader.core.metadata_service import get_crs_summary_text
 
 
@@ -107,6 +108,7 @@ class ProjectPreview:
     updated_sort: str = ""
     history: tuple[str, ...] = ()
     has_explicit_pointclouds: bool = False
+    crs: str = ""
 
     @property
     def status(self) -> str:
@@ -161,6 +163,7 @@ def make_project_preview(project: dict[str, Any], disabled: bool) -> ProjectPrev
             and isinstance(project.get("pointclouds"), list)
             and bool(project.get("pointclouds"))
         ),
+        crs=_crs_summary(project) or "Nicht einheitlich / unbekannt",
     )
 
 
@@ -349,12 +352,28 @@ def _make_model_previews(project: dict[str, Any]) -> list[ModelPreview]:
     return previews
 
 
+def _crs_summary(entry: dict[str, Any]) -> str:
+    """Horizontal plus vertical CRS, from ``crs_info`` or the flat index fields."""
+
+    crs_info = entry.get("crs_info")
+    summary = get_crs_summary_text(crs_info) if isinstance(crs_info, dict) else ""
+    if summary:
+        return summary
+    try:
+        normalized = normalize_crs_metadata(
+            {key: entry.get(key) for key in (
+                "crs", "epsg", "projection", "crs_name",
+                "vertical_crs", "vertical_epsg", "vertical_datum", "vertical_name",
+            ) if entry.get(key)}
+        )
+    except Exception:
+        normalized = None
+    summary = get_crs_summary_text(normalized) if normalized else ""
+    return summary or str(entry.get("crs", "") or "").strip()
+
+
 def _get_pointcloud_crs_label(pointcloud: dict[str, Any]) -> str:
-    top_level = str(pointcloud.get("crs", "")).strip()
-    if top_level:
-        return top_level
-    summary = get_crs_summary_text(pointcloud.get("crs_info") if isinstance(pointcloud.get("crs_info"), dict) else None)
-    return summary or "Unbekannt"
+    return _crs_summary(pointcloud) or "Unbekannt"
 
 
 def _format_project_history(raw_history: Any) -> tuple[str, ...]:

@@ -90,12 +90,6 @@ def _extract_wkt_block(wkt: str, keyword: str) -> str:
     return wkt[start:]
 
 
-def _extract_wkt_epsg_codes(wkt: str) -> list[str]:
-    if not wkt:
-        return []
-    return re.findall(r'(?:AUTHORITY|ID)\s*\[\s*"EPSG"\s*,\s*"?(\d{3,6})"?', wkt, re.IGNORECASE)
-
-
 def _extract_wkt_name_for_keywords(wkt: str, keywords: tuple[str, ...]) -> str:
     for keyword in keywords:
         block = _extract_wkt_block(wkt, keyword)
@@ -107,24 +101,67 @@ def _extract_wkt_name_for_keywords(wkt: str, keywords: tuple[str, ...]) -> str:
     return ""
 
 
+_TOP_LEVEL_EPSG_PATTERN = re.compile(r'\s*(?:AUTHORITY|ID)\s*[\[(]\s*"EPSG"\s*,\s*"?(\d{3,6})"?', re.IGNORECASE)
+
+
+def _extract_top_level_wkt_epsg(block: str) -> str:
+    """Return the EPSG code attached directly to a WKT element.
+
+    Nested elements (UNIT, DATUM, SPHEROID, PRIMEM, AXIS, the base GEOGCS of a
+    PROJCS, ...) carry their own AUTHORITY/ID. Only a code at nesting depth 1
+    identifies the element itself; ``UNIT["metre",1,AUTHORITY["EPSG","9001"]]``
+    must never be reported as the CRS.
+    """
+
+    if not block:
+        return ""
+    open_index = min((i for i in (block.find("["), block.find("(")) if i >= 0), default=-1)
+    if open_index < 0:
+        return ""
+    depth = 0
+    in_quote = False
+    top_level_starts = [open_index + 1]
+    for index in range(open_index, len(block)):
+        char = block[index]
+        if char == '"':
+            in_quote = not in_quote
+        elif not in_quote:
+            if char in "[(":
+                depth += 1
+            elif char in "])":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif char == "," and depth == 1:
+                top_level_starts.append(index + 1)
+    codes = []
+    for start in top_level_starts:
+        match = _TOP_LEVEL_EPSG_PATTERN.match(block, start)
+        if match:
+            codes.append(match.group(1))
+    return codes[-1] if codes else ""
+
+
 def extract_epsg_from_wkt(wkt: str) -> str:
     if not wkt:
         return ""
-    for keyword in ("PROJCRS", "PROJCS", "GEOGCRS", "GEOGCS"):
-        epsg_codes = _extract_wkt_epsg_codes(_extract_wkt_block(wkt, keyword))
-        if epsg_codes:
-            return epsg_codes[-1]
+    # A projected CRS without its own code must not fall back to the code of its
+    # base geographic CRS or of a unit: an unknown code is better than a wrong one.
+    for keywords in (("PROJCRS", "PROJCS"), ("GEOGCRS", "GEOGCS")):
+        for keyword in keywords:
+            block = _extract_wkt_block(wkt, keyword)
+            if block:
+                return _extract_top_level_wkt_epsg(block)
     if re.search(r"\b(?:VERTCRS|VERT_CS)\s*\[", wkt, re.IGNORECASE):
         return ""
-    matches = _extract_wkt_epsg_codes(wkt)
-    return matches[-1] if matches else ""
+    return _extract_top_level_wkt_epsg(wkt.strip())
 
 
 def _extract_vertical_epsg_from_wkt(wkt: str) -> str:
     for keyword in ("VERTCRS", "VERT_CS"):
-        epsg_codes = _extract_wkt_epsg_codes(_extract_wkt_block(wkt, keyword))
-        if epsg_codes:
-            return epsg_codes[-1]
+        block = _extract_wkt_block(wkt, keyword)
+        if block:
+            return _extract_top_level_wkt_epsg(block)
     return ""
 
 
@@ -223,7 +260,8 @@ def detect_las_crs(source_path: str) -> dict | None:
     for record in records:
         record_id = record["record_id"]
         data = record["data"]
-        if record_id in (2111, 2112):
+        if record_id == 2112:
+            # 2112 is the OGC coordinate system WKT; 2111 is a math transform WKT.
             candidate = clean_las_text(data)
             if candidate:
                 wkt = candidate
@@ -259,7 +297,8 @@ def detect_las_crs(source_path: str) -> dict | None:
             if vertical_name:
                 crs_info["vertical_name"] = vertical_name
                 crs_info["vertical_datum"] = vertical_name
-        return crs_info
+            return crs_info
+        # WKT without a usable CRS: fall back to the GeoTIFF keys, if any.
 
     geo_keys = {entry[0]: _decode_geo_key_value(entry, ascii_params, double_params) for entry in geo_key_entries}
 

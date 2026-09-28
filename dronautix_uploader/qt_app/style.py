@@ -28,6 +28,13 @@ QWidget#Page {
     background: #1b2c46;
 }
 
+/* Scroll-Flaechen erben sonst die (helle) System-Palette. */
+QScrollArea#UploadFormScrollArea,
+QScrollArea#UploadFormScrollArea > QWidget#qt_scrollarea_viewport,
+QWidget#UploadFormContent {
+    background: transparent;
+}
+
 /* ---------- Sidebar ---------- */
 QFrame#Sidebar {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -128,6 +135,53 @@ QLabel#PreviewBadgeDanger {
     font-weight: 600;
     min-height: 28px;
     padding: 0 12px;
+}
+
+/* Status indicator (information only, not clickable). */
+QLabel#StatusPill,
+QLabel#StatusPillDanger {
+    border: none;
+    border-radius: 10px;
+    font-size: 12px;
+    font-weight: 600;
+    min-height: 20px;
+    padding: 0 10px;
+}
+
+QLabel#StatusPill {
+    background: #14352a;
+    color: #7ee2a8;
+}
+
+QLabel#StatusPillWarning,
+QLabel#StatusPillInfo {
+    border: none;
+    border-radius: 10px;
+    font-size: 12px;
+    font-weight: 600;
+    min-height: 20px;
+    padding: 0 10px;
+}
+
+QLabel#StatusPillWarning {
+    background: #3d3314;
+    color: #f5d27a;
+}
+
+QLabel#StatusPillInfo {
+    background: #1e3a5f;
+    color: #bcd6ff;
+}
+
+QLabel#StatusPillDanger {
+    background: #3a1d1d;
+    color: #f6a5a0;
+}
+
+QFrame#ProjectsEmptyState {
+    background: #1f3150;
+    border: 1px dashed #4b6a99;
+    border-radius: 6px;
 }
 
 /* ---------- Inputs ---------- */
@@ -394,6 +448,37 @@ QToolButton#ActionButton::menu-indicator {
     width: 0;
 }
 
+/* Segment control for the upload mode (selection, not an action). */
+QPushButton#ModeSegment {
+    background: #1f3150;
+    border: 1px solid #3a567f;
+    border-radius: 0;
+    color: #aebdd4;
+    min-height: 32px;
+    padding: 0 14px;
+}
+
+QPushButton#ModeSegment[segment="first"] {
+    border-top-left-radius: 6px;
+    border-bottom-left-radius: 6px;
+}
+
+QPushButton#ModeSegment[segment="last"] {
+    border-left: none;
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+}
+
+QPushButton#ModeSegment:hover {
+    color: #ffffff;
+}
+
+QPushButton#ModeSegment:checked {
+    background: #1e3a5f;
+    border-color: #3b82f6;
+    color: #ffffff;
+}
+
 QToolButton#AdvancedToggle {
     background: transparent;
     border: none;
@@ -583,6 +668,23 @@ QScrollBar::sub-line {
 QScrollBar::add-page,
 QScrollBar::sub-page {
     background: transparent;
+}
+
+QLabel#ConnectionStatus {
+    color: #aebdd4;
+    padding: 0 10px;
+}
+
+QLabel#ConnectionStatus[connection="ok"] {
+    color: #7ee2a8;
+}
+
+QLabel#ConnectionStatus[connection="failed"] {
+    color: #f6a5a0;
+}
+
+QLabel#ConnectionStatus[connection="checking"] {
+    color: #f5d27a;
 }
 
 QStatusBar {

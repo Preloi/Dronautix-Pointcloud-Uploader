@@ -9,17 +9,22 @@ from typing import Any, Callable
 
 from dronautix_uploader.core.config_service import (
     get_config_locations,
+    ACCESS_CONFIG_KEYS,
+    SECRET_CONFIG_KEYS,
     get_credential_keyring_services,
+    is_valid_aws_region,
+    is_valid_s3_bucket_name,
     load_config_file,
     save_config_file,
 )
-from dronautix_uploader.core.constants import BUCKET_NAME, REGION_NAME
+from dronautix_uploader.core.constants import BUCKET_NAME, REGION_NAME, S3_INDEX_JSON
 from dronautix_uploader.core.converter_bundle import (
     get_bundled_converter_path,
     is_converter_bundle_available,
     resolve_converter_path,
 )
 
+from .error_messages import describe_error, technical_details
 from .dashboard_settings_model import (
     UPDATE_CHANNEL_STABLE,
     SettingsPreview,
@@ -63,6 +68,7 @@ class SettingsController:
         credential_loader: CredentialLoader | None = None,
         credential_writer: CredentialWriter | None = None,
         connection_tester: ConnectionTester | None = None,
+        credential_deleter: Callable[[str, str], None] | None = None,
     ) -> None:
         locations = get_config_locations(
             preview=preview,
@@ -75,22 +81,29 @@ class SettingsController:
         self.config_saver = config_saver
         self.credential_loader = credential_loader or _load_keyring_password
         self.credential_writer = credential_writer or _write_keyring_password
+        self.credential_deleter = credential_deleter or _delete_keyring_password
         self.connection_tester = connection_tester or _test_s3_connection
 
     def load_state(self) -> SettingsFormState:
         config = self.config_loader(self.config_path)
         if not isinstance(config, dict):
             config = {}
-        access_key = _first_value(config, "aws_access_key_id", "aws_access", "aws_access_key", "access_key")
-        secret_key = _first_value(config, "aws_secret_access_key", "aws_secret", "aws_secret_key", "secret_key")
-        loaded_access, loaded_secret = _load_missing_credentials(
-            self.credential_loader,
-            self.credential_services,
-            need_access=not access_key,
-            need_secret=not secret_key,
+        access_key = _first_value(config, *ACCESS_CONFIG_KEYS)
+        secret_key = _first_value(config, *SECRET_CONFIG_KEYS)
+        keyring_access, keyring_secret = _load_missing_credentials(
+            self.credential_loader, self.credential_services, need_access=True, need_secret=True
         )
-        access_key = access_key or loaded_access
-        secret_key = secret_key or loaded_secret
+        if keyring_access and keyring_secret:
+            access_key, secret_key = keyring_access, keyring_secret
+        else:
+            loaded_access, loaded_secret = _load_missing_credentials(
+                self.credential_loader,
+                self.credential_services,
+                need_access=not access_key,
+                need_secret=not secret_key,
+            )
+            access_key = access_key or loaded_access
+            secret_key = secret_key or loaded_secret
         return SettingsFormState(
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
@@ -115,7 +128,7 @@ class SettingsController:
                 "update_channel": state.update_channel.strip() or UPDATE_CHANNEL_STABLE,
             }
         )
-        for key in ("aws_secret_access_key", "aws_secret", "aws_secret_key", "secret_key"):
+        for key in SECRET_CONFIG_KEYS:
             config.pop(key, None)
         config.pop("converter_path", None)
         config.pop("potree_converter_path", None)
@@ -126,13 +139,38 @@ class SettingsController:
         self.config_saver(self.config_path, config)
         return ProjectOperationSummary(status=SUCCESS_STATUS, message="Einstellungen gespeichert.")
 
+    def clear_credentials(self) -> ProjectOperationSummary:
+        """Remove stored AWS keys from the keyring and from config.json."""
+
+        failures = []
+        for username in ("aws_access", "aws_secret"):
+            try:
+                self.credential_deleter(self.keyring_service, username)
+            except Exception as error:
+                failures.append(f"{username}: {error}")
+        config = self.config_loader(self.config_path)
+        if isinstance(config, dict) and any(key in config for key in (*ACCESS_CONFIG_KEYS, *SECRET_CONFIG_KEYS)):
+            for key in (*ACCESS_CONFIG_KEYS, *SECRET_CONFIG_KEYS):
+                config.pop(key, None)
+            self.config_saver(self.config_path, config)
+        if failures:
+            return ProjectOperationSummary(
+                status=FAILED_STATUS,
+                message="Zugangsdaten konnten nicht vollständig entfernt werden: " + "; ".join(failures),
+            )
+        return ProjectOperationSummary(status=SUCCESS_STATUS, message="AWS-Zugangsdaten wurden entfernt.")
+
     def test_connection(self, state: SettingsFormState | None = None) -> ProjectOperationSummary:
         selected = state or self.load_state()
         _validate_connection_state(selected)
         try:
             self.connection_tester(selected)
         except Exception as exc:
-            return ProjectOperationSummary(status=FAILED_STATUS, message=f"S3-Verbindung fehlgeschlagen: {exc}")
+            return ProjectOperationSummary(
+                status=FAILED_STATUS,
+                message=f"S3-Verbindung fehlgeschlagen: {describe_error(exc)}",
+                warnings=tuple(filter(None, (technical_details(exc),))),
+            )
         return ProjectOperationSummary(status=SUCCESS_STATUS, message="S3-Verbindung erfolgreich getestet.")
 
     def preview(self) -> SettingsPreview:
@@ -157,10 +195,16 @@ class SettingsController:
 
 
 def _validate_settings_state(state: SettingsFormState) -> None:
-    if not state.region_name.strip():
+    region_name = state.region_name.strip()
+    bucket_name = state.bucket_name.strip()
+    if not region_name:
         raise ValueError("AWS Region ist erforderlich.")
-    if not state.bucket_name.strip():
+    if not is_valid_aws_region(region_name):
+        raise ValueError(f"AWS Region „{region_name}“ ist ungültig (Beispiel: eu-central-1).")
+    if not bucket_name:
         raise ValueError("S3 Bucket ist erforderlich.")
+    if not is_valid_s3_bucket_name(bucket_name):
+        raise ValueError(f"S3 Bucket „{bucket_name}“ ist kein gültiger Bucket-Name.")
 
 
 def _validate_connection_state(state: SettingsFormState) -> None:
@@ -179,7 +223,19 @@ def _test_s3_connection(state: SettingsFormState) -> None:
         aws_secret_access_key=state.aws_secret_access_key.strip(),
         region_name=state.region_name.strip(),
     )
-    session.client("s3").head_bucket(Bucket=state.bucket_name.strip())
+    from dronautix_uploader.adapters.runtime_services import s3_client_config
+
+    client_config = s3_client_config()
+    client = session.client("s3", config=client_config) if client_config is not None else session.client("s3")
+    # Test what the app actually needs: reading the project index. HeadBucket
+    # requires s3:ListBucket, which the uploader itself never uses, so it
+    # reported failures for working setups (and successes did not prove access).
+    try:
+        client.get_object(Bucket=state.bucket_name.strip(), Key=S3_INDEX_JSON)["Body"].close()
+    except Exception as error:
+        code = str(((getattr(error, "response", None) or {}).get("Error") or {}).get("Code", ""))
+        if code not in {"NoSuchKey", "404"}:
+            raise
 
 
 def _load_keyring_password(service_name: str, username: str) -> str:
@@ -223,6 +279,18 @@ def _load_first_credential(
         if value:
             return value
     return ""
+
+
+def _delete_keyring_password(service_name: str, username: str) -> None:
+    try:
+        import keyring
+        from keyring.errors import PasswordDeleteError
+    except ImportError as exc:
+        raise RuntimeError("keyring ist zum Entfernen der Credentials erforderlich.") from exc
+    try:
+        keyring.delete_password(service_name, username)
+    except PasswordDeleteError:
+        pass  # nothing stored
 
 
 def _write_keyring_password(service_name: str, username: str, password: str) -> None:

@@ -34,7 +34,7 @@ def prepare_pointcloud_sources(
     """Convert raw LAS/LAZ inputs into upload-ready Potree sources."""
 
     if not request.sources:
-        raise ValueError("Bitte mindestens eine Punktwolkenquelle auswaehlen.")
+        raise ValueError("Bitte mindestens eine Punktwolkenquelle auswählen.")
 
     prepared: list[PointcloudSource] = []
     used_slugs: set[str] = set()
@@ -42,7 +42,7 @@ def prepare_pointcloud_sources(
     for index, source_path in enumerate(request.sources, start=1):
         source = str(source_path or "").strip()
         if not source:
-            raise ValueError("Leerer Punktwolkenpfad ist ungueltig.")
+            raise ValueError("Leerer Punktwolkenpfad ist ungültig.")
         _emit(
             on_progress,
             ProgressEvent(
@@ -74,9 +74,9 @@ def prepare_pointcloud_sources(
 
         if input_format == "raw":
             if not request.converter_path:
-                raise ValueError("Kein Potree Converter fuer LAS/LAZ-Vorbereitung angegeben.")
+                raise ValueError("Kein Potree Converter für LAS/LAZ-Vorbereitung angegeben.")
             if not request.output_base_dir:
-                raise ValueError("Kein Ausgabeordner fuer LAS/LAZ-Vorbereitung angegeben.")
+                raise ValueError("Kein Ausgabeordner für LAS/LAZ-Vorbereitung angegeben.")
             output_dir = build_local_output_dir(source, request.output_base_dir, unique_name=slug)
             result = run_local_conversion(
                 LocalConversionRequest(
@@ -101,7 +101,7 @@ def prepare_pointcloud_sources(
             )
             continue
 
-        raise ValueError(f"Nicht unterstuetzte Punktwolkenquelle: {source}")
+        raise ValueError(f"Nicht unterstützte Punktwolkenquelle: {source}")
 
     _emit(on_progress, ProgressEvent(kind="progress", percent=1.0, phase="preparation"))
     return tuple(prepared)
@@ -122,11 +122,11 @@ def classify_pointcloud_source(source_path: str) -> str:
     extension = os.path.splitext(lower_name)[1]
     if lower_name.endswith(".copc.laz"):
         raise ValueError(
-            "COPC-Dateien werden nicht unterstuetzt. Bitte eine LAS/LAZ-Datei oder einen Potree-Ordner auswaehlen."
+            "COPC-Dateien werden nicht unterstützt. Bitte eine LAS/LAZ-Datei oder einen Potree-Ordner auswählen."
         )
     if extension in {".las", ".laz"}:
         return "raw"
-    raise ValueError(f"Nicht unterstuetztes Punktwolkenformat: {source}")
+    raise ValueError(f"Nicht unterstütztes Punktwolkenformat: {source}")
 
 
 def _emit(callback: ProgressCallback | None, event: ProgressEvent) -> None:

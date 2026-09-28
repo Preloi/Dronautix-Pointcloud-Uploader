@@ -8,6 +8,7 @@ import inspect
 import json
 import os
 
+from .error_messages import describe_error
 from .activity_model import (
     ACTION_ALL,
     ACTION_FILTERS,
@@ -141,7 +142,11 @@ def create_settings_page(
     access_input = QtWidgets.QLineEdit()
     secret_input = QtWidgets.QLineEdit()
     secret_input.setEchoMode(QtWidgets.QLineEdit.Password)
-    region_input = QtWidgets.QLineEdit()
+    # Editable: common regions to pick from, any valid region can be typed.
+    region_input = QtWidgets.QComboBox()
+    region_input.setEditable(True)
+    region_input.addItems(list(COMMON_AWS_REGIONS))
+    region_input.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
     bucket_input = QtWidgets.QLineEdit()
     output_input = QtWidgets.QLineEdit()
     update_channel_input = QtWidgets.QComboBox()
@@ -155,19 +160,20 @@ def create_settings_page(
 
     form.addRow("AWS Access Key", access_input)
     form.addRow("AWS Secret Key", secret_input)
+    output_row = QtWidgets.QHBoxLayout()
+    output_row.setSpacing(8)
+    output_row.addWidget(output_input, 1)
+    output_button = QtWidgets.QPushButton("...")
+    output_button.setObjectName("ActionButton")
+    output_button.setToolTip("Output-Ordner auswählen")
+    output_button.setAccessibleName("Output-Ordner auswählen")
+    output_row.addWidget(output_button)
+
     form.addRow("Region", region_input)
     form.addRow("S3 Bucket", bucket_input)
-    form.addRow("Output-Ordner", output_input)
+    form.addRow("Output-Ordner", output_row)
     form.addRow("Updates", update_channel_input)
     form_root.addLayout(form)
-
-    browse_row = QtWidgets.QHBoxLayout()
-    browse_row.setSpacing(10)
-    output_button = QtWidgets.QPushButton("Output wählen")
-    output_button.setObjectName("ActionButton")
-    browse_row.addWidget(output_button)
-    browse_row.addStretch(1)
-    form_root.addLayout(browse_row)
 
     action_row = QtWidgets.QHBoxLayout()
     action_row.setSpacing(10)
@@ -179,11 +185,16 @@ def create_settings_page(
     update_button.setObjectName("ActionButton")
     reload_button = QtWidgets.QPushButton("Neu laden")
     reload_button.setObjectName("ActionButton")
+    reload_button.setToolTip("Gespeicherte Einstellungen erneut laden (F5)")
+    clear_credentials_button = QtWidgets.QPushButton("Zugangsdaten entfernen")
+    clear_credentials_button.setObjectName("ActionButton")
+    clear_credentials_button.setToolTip("AWS-Schlüssel aus dem Windows-Anmeldeinformationsspeicher entfernen")
     action_row.addWidget(save_button)
     action_row.addWidget(test_button)
     action_row.addWidget(update_button)
     action_row.addWidget(reload_button)
     action_row.addStretch(1)
+    action_row.addWidget(clear_credentials_button)
     form_root.addLayout(action_row)
 
     hint = QtWidgets.QLabel("Der integrierte PotreeConverter wird automatisch verwendet.")
@@ -201,7 +212,7 @@ def create_settings_page(
     def apply_state_to_inputs(selected_state: SettingsFormState):
         access_input.setText(selected_state.aws_access_key_id)
         secret_input.setText(selected_state.aws_secret_access_key)
-        region_input.setText(selected_state.region_name)
+        region_input.setCurrentText(selected_state.region_name)
         bucket_input.setText(selected_state.bucket_name)
         output_input.setText(selected_state.output_base_dir)
         channel_index = update_channel_input.findText(selected_state.update_channel)
@@ -211,7 +222,7 @@ def create_settings_page(
         return SettingsFormState(
             aws_access_key_id=access_input.text(),
             aws_secret_access_key=secret_input.text(),
-            region_name=region_input.text(),
+            region_name=region_input.currentText(),
             bucket_name=bucket_input.text(),
             converter_path=state.converter_path,
             output_base_dir=output_input.text(),
@@ -241,16 +252,43 @@ def create_settings_page(
         status_container.addWidget(_create_settings_status_panel(QtWidgets, "Status", preview.settings_status))
         status_container.addStretch(1)
 
+    def has_unsaved_changes() -> bool:
+        current = state_from_inputs()
+        fields = ("aws_access_key_id", "aws_secret_access_key", "region_name", "bucket_name", "output_base_dir", "update_channel")
+        return any(
+            str(getattr(current, field) or "").strip() != str(getattr(state, field) or "").strip()
+            for field in fields
+        )
+
+    def reload_settings_confirming_discard():
+        if has_unsaved_changes():
+            answer = QtWidgets.QMessageBox.question(
+                page,
+                "Einstellungen neu laden",
+                "Die Einstellungen enthalten ungespeicherte Änderungen.\n\nÄnderungen verwerfen und neu laden?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No,
+            )
+            if answer != QtWidgets.QMessageBox.Yes:
+                return False
+        render_settings()
+        return True
+
     output_button.clicked.connect(browse_output)
     save_button.clicked.connect(lambda checked=False: dispatch_settings_action("save", state_from_inputs()))
     test_button.clicked.connect(lambda checked=False: dispatch_settings_action("test_connection", state_from_inputs()))
     update_button.clicked.connect(lambda checked=False: dispatch_settings_action("check_update"))
-    reload_button.clicked.connect(lambda checked=False: render_settings())
-    for button in (save_button, test_button, update_button):
+    reload_button.clicked.connect(lambda checked=False: reload_settings_confirming_discard())
+    clear_credentials_button.clicked.connect(lambda checked=False: dispatch_settings_action("clear_credentials"))
+    for button in (save_button, test_button, update_button, clear_credentials_button):
         button.setEnabled(on_settings_action is not None)
 
     render_settings()
-    page.reload_settings = render_settings
+    # F5 / "Neu laden" ask before discarding edits; after a successful save the
+    # main window re-renders unconditionally via ``render_saved_settings``.
+    page.reload_settings = reload_settings_confirming_discard
+    page.render_saved_settings = render_settings
+    page.has_unsaved_changes = has_unsaved_changes
     return page
 
 
@@ -268,6 +306,7 @@ def create_upload_page(
         "mode": UPLOAD_MODE_UPLOAD,
         "running": False,
         "sources": [],
+        "mode_sources": {},
         "detected_crs": {},
         "models": [],
         "model_sidecars": {},
@@ -285,6 +324,7 @@ def create_upload_page(
     form_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
     form_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
     form_content = QtWidgets.QWidget()
+    form_content.setObjectName("UploadFormContent")
     root = QtWidgets.QVBoxLayout(form_content)
     root.setContentsMargins(0, 0, 0, 0)
     root.setSpacing(16)
@@ -302,14 +342,18 @@ def create_upload_page(
     title_box.addWidget(subtitle)
     header.addLayout(title_box, 1)
 
-    mode_upload_button = QtWidgets.QPushButton("Hochladen")
-    mode_upload_button.setObjectName("ActionButton")
+    # Segment control: chooses the mode, it does not start anything. It must
+    # not look like (or be labelled like) the primary "Hochladen" button.
+    mode_upload_button = QtWidgets.QPushButton("Upload zu S3")
+    mode_upload_button.setObjectName("ModeSegment")
+    mode_upload_button.setProperty("segment", "first")
     mode_upload_button.setCheckable(True)
     mode_upload_button.setChecked(True)
     mode_upload_button.setCursor(QtCore.Qt.PointingHandCursor)
     mode_upload_button.setToolTip("Punktwolken konvertieren und zu S3 hochladen")
-    mode_convert_button = QtWidgets.QPushButton("Nur konvertieren")
-    mode_convert_button.setObjectName("ActionButton")
+    mode_convert_button = QtWidgets.QPushButton("Nur lokal konvertieren")
+    mode_convert_button.setObjectName("ModeSegment")
+    mode_convert_button.setProperty("segment", "last")
     mode_convert_button.setCheckable(True)
     mode_convert_button.setCursor(QtCore.Qt.PointingHandCursor)
     mode_convert_button.setToolTip("LAS/LAZ nur lokal in ein Potree-Projekt umwandeln, ohne Upload")
@@ -317,8 +361,11 @@ def create_upload_page(
     mode_group.setExclusive(True)
     mode_group.addButton(mode_upload_button)
     mode_group.addButton(mode_convert_button)
-    header.addWidget(mode_upload_button)
-    header.addWidget(mode_convert_button)
+    mode_segment = QtWidgets.QHBoxLayout()
+    mode_segment.setSpacing(0)
+    mode_segment.addWidget(mode_upload_button)
+    mode_segment.addWidget(mode_convert_button)
+    header.addLayout(mode_segment)
     root.addLayout(header)
 
     # --- Project card -------------------------------------------------------
@@ -347,7 +394,7 @@ def create_upload_page(
     sources_layout.setContentsMargins(20, 16, 20, 16)
     sources_layout.setSpacing(10)
     sources_header = QtWidgets.QHBoxLayout()
-    sources_title = QtWidgets.QLabel("Punktwolken (las,laz)")
+    sources_title = QtWidgets.QLabel("Punktwolken (LAS/LAZ)")
     sources_title.setObjectName("PanelTitle")
     sources_hint = QtWidgets.QLabel("Dateien/Ordner hierher ziehen")
     sources_hint.setObjectName("MutedText")
@@ -381,6 +428,7 @@ def create_upload_page(
         QtWidgets,
         add_sources,
         on_delete=lambda: source_handlers.get("remove", lambda: None)(),
+        placeholder="LAS/LAZ-Dateien oder Potree-Ordner hierher ziehen oder über „Dateien“ / „Ordner“ auswählen",
     )
     source_list.setObjectName("UploadSourceList")
     drop_list_height = 104
@@ -487,7 +535,7 @@ def create_upload_page(
     # --- Advanced (collapsible) --------------------------------------------
     advanced_toggle = QtWidgets.QToolButton()
     advanced_toggle.setObjectName("AdvancedToggle")
-    advanced_toggle.setText("Erweitert (CRS, Ausgabeordner)")
+    advanced_toggle.setText("Erweitert (CRS)")
     advanced_toggle.setCheckable(True)
     advanced_toggle.setCursor(QtCore.Qt.PointingHandCursor)
     advanced_toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
@@ -614,6 +662,8 @@ def create_upload_page(
     log_view.setObjectName("UploadLogView")
     log_view.setReadOnly(True)
     log_view.setMinimumHeight(120)
+    # Converter output is chatty; keep memory and repaint cost bounded.
+    log_view.setMaximumBlockCount(5000)
     log_view.setPlaceholderText("Das Upload-Protokoll erscheint hier.")
     page_root.addWidget(log_view)
 
@@ -701,6 +751,7 @@ def create_upload_page(
             item.setData(QtCore.Qt.UserRole, path)
             item.setToolTip(path)
             model_list.addItem(item)
+        _fit_drop_list_height(model_list, drop_list_height)
         count = len(state["models"])
         model_count.setText("Keine Modelle" if count == 0 else ("1 Modell" if count == 1 else f"{count} Modelle"))
 
@@ -783,6 +834,7 @@ def create_upload_page(
             item.setData(QtCore.Qt.UserRole, path)
             item.setToolTip(path)
             source_list.addItem(item)
+        _fit_drop_list_height(source_list, drop_list_height)
         count = len(state["sources"])
         sources_count.setText("Keine Quelle" if count == 0 else ("1 Quelle" if count == 1 else f"{count} Quellen"))
 
@@ -827,7 +879,21 @@ def create_upload_page(
     def resolved_converter_path():
         return str(getattr(current_defaults(), "converter_path", "") or "")
 
+    def switch_mode_sources(previous_mode, mode):
+        # Jeder Modus merkt sich seine eigene Quellenliste, damit der Wechsel zu
+        # "Nur konvertieren" (genau eine Quelle) keine Upload-Auswahl verwirft.
+        if previous_mode == mode:
+            return
+        saved = state["mode_sources"]
+        saved[previous_mode] = list(state["sources"])
+        if mode in saved:
+            state["sources"] = list(saved[mode])
+        elif mode == UPLOAD_MODE_CONVERT and state["sources"]:
+            selected = [item.data(QtCore.Qt.UserRole) for item in source_list.selectedItems()]
+            state["sources"] = [selected[-1] if selected else state["sources"][-1]]
+
     def apply_mode(mode):
+        switch_mode_sources(state["mode"], mode)
         state["mode"] = mode
         is_convert = mode == UPLOAD_MODE_CONVERT
         customer_input.setEnabled(not is_convert)
@@ -835,13 +901,12 @@ def create_upload_page(
         vertical_crs_input.setEnabled(not is_convert)
         set_output_row_visible(is_convert)
         start_button.setText("Konvertieren" if is_convert else "Hochladen")
+        advanced_toggle.setText("Erweitert (CRS, Ausgabeordner)" if is_convert else "Erweitert (CRS)")
         subtitle.setText(
             "LAS/LAZ lokal in ein Potree-Projekt konvertieren, ohne Upload."
             if is_convert
             else "Punktwolken konvertieren und zu S3 hochladen."
         )
-        if is_convert and len(state["sources"]) > 1:
-            state["sources"] = state["sources"][-1:]
         models_panel.setVisible(not is_convert)
         render_sources()
         render_models()
@@ -1046,17 +1111,51 @@ def create_upload_page(
     return page
 
 
+DROP_LIST_MAX_VISIBLE_ROWS = 8
+
+
+def _fit_drop_list_height(list_widget, min_height: int, max_visible_rows: int = DROP_LIST_MAX_VISIBLE_ROWS) -> None:
+    """Grow a drop list with its entries (up to ``max_visible_rows``), then scroll.
+
+    A fixed height showed only two rows for multi-cloud projects with many
+    pointclouds.
+    """
+
+    rows = min(list_widget.count(), max_visible_rows)
+    content = sum(max(list_widget.sizeHintForRow(row), 0) for row in range(rows))
+    content += list_widget.spacing() * 2 * rows
+    chrome = list_widget.frameWidth() * 2 + 14  # frame + stylesheet padding
+    list_widget.setFixedHeight(max(min_height, content + chrome))
+
+
 def _create_source_drop_list(
     QtCore,
     QtWidgets,
     on_paths_dropped: Callable[[tuple[str, ...]], None],
     on_delete: Callable[[], None] | None = None,
+    placeholder: str = "",
 ):
+    from PySide6 import QtGui
+
     class SourceDropList(QtWidgets.QListWidget):
         def __init__(self):
             super().__init__()
             self.setAcceptDrops(True)
             self.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+            self.placeholder_text = placeholder
+
+        def paintEvent(self, event):  # noqa: N802 - Qt override
+            super().paintEvent(event)
+            if self.count() or not self.placeholder_text:
+                return
+            painter = QtGui.QPainter(self.viewport())
+            painter.setPen(QtGui.QColor("#7f90ab"))
+            painter.drawText(
+                self.viewport().rect().adjusted(12, 0, -12, 0),
+                QtCore.Qt.AlignCenter | QtCore.Qt.TextWordWrap,
+                self.placeholder_text,
+            )
+            painter.end()
 
         def dragEnterEvent(self, event):  # noqa: N802 - Qt override
             if mime_data_paths(event.mimeData()):
@@ -1104,6 +1203,9 @@ def create_projects_page(
     on_project_action: ProjectActionCallback | None = None,
     on_load_state_changed: Callable[[], None] | None = None,
     can_start_load: Callable[[], bool] | None = None,
+    empty_state_provider: Callable[[], str] | None = None,
+    on_open_settings: Callable[[], None] | None = None,
+    on_load_finished: Callable[[bool, str], None] | None = None,
 ):
     projects = tuple(project_previews or ())
     action_callback = on_project_action or on_placeholder_action
@@ -1197,8 +1299,10 @@ def create_projects_page(
     table.setSortingEnabled(True)
     table.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
     table.verticalHeader().setVisible(False)
-    table.horizontalHeader().setStretchLastSection(True)
+    table.horizontalHeader().setStretchLastSection(False)
     table.horizontalHeader().setDefaultAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+    table.setTextElideMode(QtCore.Qt.ElideRight)
+    table.setWordWrap(False)
 
     class StatusToggleDelegate(QtWidgets.QStyledItemDelegate):
         def paint(self, painter, option, index):
@@ -1219,7 +1323,10 @@ def create_projects_page(
             painter.drawRoundedRect(track, 8, 8)
             painter.setBrush(QtGui.QColor("#ffffff"))
             painter.drawEllipse(knob)
-            painter.setPen(QtGui.QColor("#2ecc71" if checked else "#e74c3c"))
+            selected = bool(option.state & QtWidgets.QStyle.StateFlag.State_Selected)
+            # Green/red text on the blue selection is hard to read; the toggle
+            # colour still carries the state.
+            painter.setPen(QtGui.QColor("#ffffff" if selected else ("#2ecc71" if checked else "#e74c3c")))
             painter.drawText(option.rect.adjusted(48, 0, -4, 0), QtCore.Qt.AlignmentFlag.AlignVCenter, index.data())
             painter.restore()
 
@@ -1252,8 +1359,82 @@ def create_projects_page(
     status_filter.currentTextChanged.connect(proxy_model.set_status)
 
     table.setModel(proxy_model)
-    table.resizeColumnsToContents()
-    content.addWidget(table)
+
+    optional_columns = (2, 5)  # Format, Aktualisiert
+
+    def update_optional_columns():
+        narrow = table.viewport().width() < 640
+        for column in optional_columns:
+            table.setColumnHidden(column, narrow)
+
+    class NarrowTableWatcher(QtCore.QObject):
+        def eventFilter(self, watched, event):  # noqa: N802 - Qt override
+            if event.type() == QtCore.QEvent.Type.Resize:
+                update_optional_columns()
+            return False
+
+    narrow_watcher = NarrowTableWatcher(table)
+    table.viewport().installEventFilter(narrow_watcher)
+
+    def fit_project_columns():
+        header = table.horizontalHeader()
+        table.resizeColumnsToContents()
+        header.setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
+        # "Projekt" absorbs the free width (and elides) so Status and dates
+        # stay visible without horizontal scrolling on 1024 px screens.
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        header.resizeSection(0, min(max(header.sectionSize(0), 90), 180))
+        header.resizeSection(3, max(header.sectionSize(3), 112))
+
+    fit_project_columns()
+
+    table_container = QtWidgets.QWidget()
+    table_container_layout = QtWidgets.QVBoxLayout(table_container)
+    table_container_layout.setContentsMargins(0, 0, 0, 0)
+    table_container_layout.setSpacing(8)
+    empty_state = QtWidgets.QFrame()
+    empty_state.setObjectName("ProjectsEmptyState")
+    empty_state_layout = QtWidgets.QHBoxLayout(empty_state)
+    empty_state_layout.setContentsMargins(14, 10, 14, 10)
+    empty_state_label = QtWidgets.QLabel("")
+    empty_state_label.setObjectName("MutedText")
+    empty_state_label.setWordWrap(True)
+    empty_state_layout.addWidget(empty_state_label, 1)
+    empty_state_button = QtWidgets.QPushButton("Einstellungen öffnen")
+    empty_state_button.setObjectName("ActionButton")
+    empty_state_button.setCursor(QtCore.Qt.PointingHandCursor)
+    empty_state_button.setVisible(False)
+    if on_open_settings is not None:
+        empty_state_button.clicked.connect(lambda: on_open_settings())
+    empty_state_layout.addWidget(empty_state_button)
+    empty_state.hide()
+    table_container_layout.addWidget(empty_state)
+    table_container_layout.addWidget(table, 1)
+    content.addWidget(table_container)
+
+    def update_empty_state():
+        if proxy_model.rowCount() > 0:
+            empty_state.hide()
+            return
+        reason = ""
+        if not projects and empty_state_provider is not None:
+            try:
+                reason = str(empty_state_provider() or "")
+            except Exception:
+                reason = ""
+        if reason:
+            empty_state_label.setText(reason)
+            empty_state_button.setVisible(on_open_settings is not None)
+        elif projects:
+            empty_state_label.setText("Keine Projekte passen zur Suche oder zum Statusfilter.")
+            empty_state_button.setVisible(False)
+        else:
+            empty_state_label.setText("Noch keine Projekte vorhanden. Neue Projekte über „Upload“ anlegen.")
+            empty_state_button.setVisible(False)
+        empty_state.show()
+
+    search.textChanged.connect(lambda _text: update_empty_state())
+    status_filter.currentTextChanged.connect(lambda _text: update_empty_state())
 
     detail_panel = QtWidgets.QFrame()
     detail_panel.setObjectName("DetailPanel")
@@ -1266,7 +1447,7 @@ def create_projects_page(
     detail_title.setObjectName("PanelTitle")
     detail_title.setWordWrap(True)
     status_badge = QtWidgets.QLabel("")
-    status_badge.setObjectName("PreviewBadgeLight")
+    status_badge.setObjectName("StatusPill")
     status_badge.setAlignment(QtCore.Qt.AlignCenter)
     status_badge.hide()
     title_row.addWidget(detail_title, 1)
@@ -1283,7 +1464,7 @@ def create_projects_page(
     info_grid.setContentsMargins(0, 0, 0, 0)
     info_grid.setHorizontalSpacing(14)
     info_grid.setVerticalSpacing(8)
-    info_field_keys = ("Kunde", "Format", "Punktwolken", "3D-Modelle", "Erstellt am", "Viewer-Link", "S3-Pfad")
+    info_field_keys = ("Kunde", "Format", "Punktwolken", "3D-Modelle", "CRS", "Erstellt am", "Viewer-Link", "S3-Pfad")
     info_values = {}
     for row, key in enumerate(info_field_keys):
         key_label = QtWidgets.QLabel(key)
@@ -1367,8 +1548,12 @@ def create_projects_page(
         ACTION_ENABLE_LINK,
         ACTION_DELETE,
     )
-    actions = QtWidgets.QHBoxLayout()
-    actions.setSpacing(10)
+    # Two rows: the primary action spans the panel, secondary actions below.
+    # A single row clipped the labels once the panel got narrower than ~430 px.
+    actions = QtWidgets.QVBoxLayout()
+    actions.setSpacing(8)
+    secondary_actions = QtWidgets.QHBoxLayout()
+    secondary_actions.setSpacing(8)
     action_buttons = {}
     for action_id in primary_action_ids:
         button = QtWidgets.QPushButton(action_by_id(action_id).label)
@@ -1378,7 +1563,10 @@ def create_projects_page(
         button.clicked.connect(
             lambda checked=False, selected_action_id=action_id: _handle_project_action_click(selected_action_id)
         )
-        actions.addWidget(button)
+        if action_id == ACTION_OPEN_LINK:
+            actions.addWidget(button)
+        else:
+            secondary_actions.addWidget(button, 1)
         action_buttons[action_id] = button
 
     edit_button = QtWidgets.QToolButton()
@@ -1400,11 +1588,15 @@ def create_projects_page(
         )
         edit_actions[action_id] = menu_action
     edit_button.setMenu(edit_menu)
-    actions.addWidget(edit_button)
-    actions.addStretch(1)
+    edit_button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+    secondary_actions.addWidget(edit_button, 1)
+    actions.addLayout(secondary_actions)
     detail_layout.addLayout(actions)
+    detail_panel.setMinimumWidth(360)
     content.addWidget(detail_panel)
-    content.setSizes([760, 380])
+    content.setStretchFactor(0, 3)
+    content.setStretchFactor(1, 2)
+    content.setSizes([760, 420])
 
     root.addWidget(content, 1)
 
@@ -1459,7 +1651,8 @@ def create_projects_page(
         finally:
             source_model.blockSignals(False)
         proxy_model.invalidate()
-        table.resizeColumnsToContents()
+        fit_project_columns()
+        update_empty_state()
         if selected_project_id:
             _select_project_by_id(selected_project_id)
         _select_first_visible_project_if_needed()
@@ -1484,6 +1677,8 @@ def create_projects_page(
                     load_error_label.hide()
                     load_error_label.setText("")
                     apply_projects(loaded_projects)
+                    if on_load_finished is not None:
+                        on_load_finished(True, "")
             finally:
                 self.result_handled = True
                 self._finish_if_ready()
@@ -1492,8 +1687,11 @@ def create_projects_page(
         def failed(self, error):
             try:
                 if self.generation == load_generation:
-                    load_error_label.setText(f"Projekte konnten nicht geladen werden: {error}")
+                    reason = describe_error(error) if isinstance(error, BaseException) else str(error)
+                    load_error_label.setText(f"Projekte konnten nicht geladen werden: {reason}")
                     load_error_label.show()
+                    if on_load_finished is not None:
+                        on_load_finished(False, reason)
             finally:
                 self.result_handled = True
                 self._finish_if_ready()
@@ -1721,7 +1919,7 @@ def create_projects_page(
 
         detail_title.setText(project.project)
         status_badge.setText("Inaktiv" if project.disabled else "Aktiv")
-        status_badge.setObjectName("PreviewBadgeDanger" if project.disabled else "PreviewBadgeLight")
+        status_badge.setObjectName("StatusPillDanger" if project.disabled else "StatusPill")
         status_badge.style().unpolish(status_badge)
         status_badge.style().polish(status_badge)
         status_badge.show()
@@ -1732,6 +1930,7 @@ def create_projects_page(
         info_values["Format"].setText(project.format or "-")
         info_values["Punktwolken"].setText(str(len(project.pointclouds)))
         info_values["3D-Modelle"].setText(str(len(project.models)))
+        info_values["CRS"].setText(getattr(project, "crs", "") or "-")
         info_values["Erstellt am"].setText(project.created or "-")
         _set_viewer_link(info_values["Viewer-Link"], project)
         info_values["S3-Pfad"].setText(project.s3_path or "-")
@@ -1739,9 +1938,11 @@ def create_projects_page(
         cloud_label.show()
         cloud_list.show()
         for pointcloud in project.pointclouds:
-            item = QtWidgets.QListWidgetItem(
-                f"{pointcloud.name} - {pointcloud.format} - {pointcloud.points} - CRS: {pointcloud.crs}"
-            )
+            parts = [pointcloud.name, pointcloud.format]
+            if pointcloud.points and pointcloud.points != "-":
+                parts.append(f"{pointcloud.points} Punkte")
+            parts.append(f"CRS: {pointcloud.crs}")
+            item = QtWidgets.QListWidgetItem("  ·  ".join(parts))
             item.setData(pointcloud_role, pointcloud)
             if pointcloud.s3_path:
                 item.setToolTip(pointcloud.s3_path)
@@ -1752,7 +1953,7 @@ def create_projects_page(
             model_list.show()
             for model in project.models:
                 crs = " / ".join(value for value in (model.crs, model.vertical_crs) if value) or "Unbekannt"
-                item = QtWidgets.QListWidgetItem(f"{model.name} - GLB - CRS: {crs}")
+                item = QtWidgets.QListWidgetItem("  ·  ".join((model.name, "GLB", f"CRS: {crs}")))
                 item.setData(model_role, model)
                 item.setToolTip(model.s3_path)
                 model_list.addItem(item)
@@ -2062,6 +2263,28 @@ def _create_settings_status_panel(QtWidgets, title_text: str, items, on_item_act
     return panel
 
 
+COMMON_AWS_REGIONS = (
+    "eu-central-1",
+    "eu-central-2",
+    "eu-west-1",
+    "eu-west-2",
+    "eu-west-3",
+    "eu-north-1",
+    "eu-south-1",
+    "us-east-1",
+    "us-east-2",
+    "us-west-2",
+)
+
+# Information only: pills must not look like the clickable buttons next to them.
+_STATUS_PILL_BY_LEVEL = {
+    "ok": "StatusPill",
+    "warning": "StatusPillWarning",
+    "error": "StatusPillDanger",
+    "info": "StatusPillInfo",
+}
+
+
 def _create_settings_status_item(QtWidgets, item, on_item_action: Callable[[str], None] | None = None):
     row = QtWidgets.QFrame()
     row.setObjectName("SettingsStatusRow")
@@ -2080,7 +2303,8 @@ def _create_settings_status_item(QtWidgets, item, on_item_action: Callable[[str]
     layout.addLayout(text_box, 1)
 
     badge = QtWidgets.QLabel(status_level_label(item.level))
-    badge.setObjectName("PreviewBadgeLight")
+    badge.setObjectName(_STATUS_PILL_BY_LEVEL.get(item.level, "StatusPillInfo"))
+    badge.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
     layout.addWidget(badge)
 
     action_id = settings_status_action_id(item) if on_item_action is not None else ""

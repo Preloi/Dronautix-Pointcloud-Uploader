@@ -62,7 +62,7 @@ def test_unsealed_toolchain_fails_closed_without_using_global_node_or_npm(tmp_pa
     assert status.toolchain_available is False
     assert status.missing_tools == REQUIRED_TOOL_IDS
     assert status.integrity_errors == ("Bundle ist nicht versiegelt.",)
-    assert "unveraendertes, selbststaendiges GLB" in status.fallback_reason
+    assert "unverändertes, selbststaendiges GLB" in status.fallback_reason
 
     with pytest.raises(GLBValidationError, match="versiegelter gebündelter Decoder"):
         BundledGLBCompressedAssetDecoder(tmp_path).decode(tmp_path / "input.glb", (), tmp_path)
@@ -619,3 +619,18 @@ def test_sealed_bundle_inventory_is_complete_for_production_packaging():
     # declared and its presence is enforced by both production build gates.
     assert len(actual_files) == 5260
     assert len(integrity["files"]) + 1 == len(actual_files)
+
+
+def test_isolated_toolchain_environment_drops_foreign_node_settings(monkeypatch, tmp_path):
+    from dronautix_uploader.core import glb_toolchain
+
+    monkeypatch.setenv("NODE_OPTIONS", "--require C:/evil.js")
+    monkeypatch.setenv("NODE_PATH", "C:/global/node_modules")
+    monkeypatch.setenv("npm_config_prefix", "C:/npm")
+    monkeypatch.setenv("SYSTEMROOT_TEST_KEEP", "kept")
+
+    environment = glb_toolchain._isolated_toolchain_environment(tmp_path)
+
+    assert not any(key.upper() in {"NODE_OPTIONS", "NODE_PATH", "NPM_CONFIG_PREFIX"} for key in environment)
+    assert environment["SYSTEMROOT_TEST_KEEP"] == "kept"
+    assert environment["PATH"] == str(tmp_path / "ktx" / "bin")

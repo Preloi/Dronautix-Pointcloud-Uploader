@@ -8,6 +8,8 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import tempfile
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -26,6 +28,12 @@ class UpdateDownloadResult:
     installer_path: str = ""
     installer_url: str = ""
     installer_sha256: str = ""
+    cancelled: bool = False
+
+
+class UpdateDownloadCancelledError(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("Update-Download wurde abgebrochen.")
 
 
 def parse_version_tuple(version_value: str) -> tuple[int, ...]:
@@ -34,7 +42,17 @@ def parse_version_tuple(version_value: str) -> tuple[int, ...]:
     return tuple(int(part) for part in re.findall(r"\d+", str(version_value)))
 
 
+def is_prerelease_version(version_value: str) -> bool:
+    """``2.2.0-rc1``, ``2.2.0b1`` or ``2.2.0+dev`` are not stable releases."""
+
+    return bool(re.search(r"[A-Za-z+-]", str(version_value or "").strip().lstrip("vV")))
+
+
 def is_remote_version_newer(remote_version: str, local_version: str) -> bool:
+    # The stable channel never offers pre-releases; "2.2.0-rc1" would otherwise
+    # parse as (2, 2, 0, 1) and look newer than the final 2.2.0.
+    if is_prerelease_version(remote_version):
+        return False
     remote_tuple = parse_version_tuple(remote_version)
     local_tuple = parse_version_tuple(local_version)
     max_length = max(len(remote_tuple), len(local_tuple))
@@ -94,7 +112,7 @@ def validate_update_download_info(
     remote_version = str(manifest.get("version", "")).strip()
     expected_tag = f"v{remote_version}"
     if not remote_version or not is_safe_installer_name(installer_name):
-        return False, "ungueltige Versions- oder Installerangabe"
+        return False, "ungültige Versions- oder Installerangabe"
 
     repo_owner = str(manifest.get("repo_owner", UPDATE_REPO_OWNER)).strip()
     repo_name = str(manifest.get("repo_name", UPDATE_REPO_NAME)).strip()
@@ -117,7 +135,7 @@ def validate_update_download_info(
 def validate_installer_sha256(expected_sha256: str) -> tuple[bool, str]:
     expected_sha256 = str(expected_sha256 or "").strip().lower()
     if not re.fullmatch(r"[a-f0-9]{64}", expected_sha256):
-        return False, "Update-Manifest enthaelt keinen gueltigen SHA-256 Hash"
+        return False, "Update-Manifest enthält keinen gültigen SHA-256 Hash"
     return True, "OK"
 
 
@@ -128,9 +146,11 @@ def download_update_installer(
     *,
     timeout_seconds: float = 60.0,
     opener: Any = None,
+    on_progress=None,
+    cancel_requested=None,
 ) -> str:
     if not is_safe_installer_name(installer_name):
-        raise ValueError("ungueltiger Installer-Dateiname")
+        raise ValueError("ungültiger Installer-Dateiname")
 
     target_dir = Path(download_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -146,14 +166,30 @@ def download_update_installer(
     open_url = opener or urllib.request.urlopen
     try:
         with open_url(request, timeout=timeout_seconds) as response, open(temp_path, "wb") as output:
+            total = _content_length(response)
+            downloaded = 0
             for chunk in iter(lambda: response.read(1024 * 1024), b""):
+                if cancel_requested is not None and cancel_requested():
+                    raise UpdateDownloadCancelledError()
                 output.write(chunk)
+                downloaded += len(chunk)
+                if on_progress is not None:
+                    on_progress(downloaded, total)
         os.replace(temp_path, target_path)
     except Exception:
         if temp_path.exists():
             temp_path.unlink()
         raise
     return str(target_path)
+
+
+def _content_length(response) -> int:
+    headers = getattr(response, "headers", None)
+    try:
+        value = headers.get("Content-Length") if headers is not None else None
+        return max(int(value), 0) if value else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 def calculate_url_sha256(
@@ -182,6 +218,8 @@ def download_and_verify_installer(
     *,
     timeout_seconds: float = 60.0,
     opener: Any = None,
+    on_progress=None,
+    cancel_requested=None,
 ) -> UpdateDownloadResult:
     installer_name = str(manifest.get("installer_name", "") or "").strip()
     installer_url = get_update_installer_url(manifest)
@@ -196,13 +234,22 @@ def download_and_verify_installer(
         return UpdateDownloadResult(False, sha_message, installer_url=installer_url)
 
     try:
+        # Old installers are ~100 MB each; a fresh random folder also avoids a
+        # predictable path that another process could prepare in advance.
+        cleanup_previous_update_downloads(download_dir)
+        Path(download_dir).mkdir(parents=True, exist_ok=True)
+        run_dir = tempfile.mkdtemp(prefix="update-", dir=download_dir)
         installer_path = download_update_installer(
             installer_url,
             installer_name,
-            download_dir,
+            run_dir,
             timeout_seconds=timeout_seconds,
             opener=opener,
+            on_progress=on_progress,
+            cancel_requested=cancel_requested,
         )
+    except UpdateDownloadCancelledError as exc:
+        return UpdateDownloadResult(False, str(exc), installer_url=installer_url, cancelled=True)
     except Exception as exc:
         return UpdateDownloadResult(False, f"Installer-Download fehlgeschlagen: {exc}", installer_url=installer_url)
 
@@ -226,6 +273,22 @@ def download_and_verify_installer(
         installer_url=installer_url,
         installer_sha256=expected_sha256,
     )
+
+
+def cleanup_previous_update_downloads(download_dir: str | os.PathLike[str]) -> None:
+    """Remove earlier update downloads; files still in use are skipped."""
+
+    directory = Path(download_dir)
+    if not directory.is_dir():
+        return
+    for entry in directory.iterdir():
+        try:
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+        except OSError:
+            continue
 
 
 def calculate_file_sha256(file_path: str) -> str:

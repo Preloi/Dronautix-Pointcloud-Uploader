@@ -163,7 +163,7 @@ def test_build_delete_dialog_state_contains_project_identity_and_s3_warning(dial
     assert "Bestand Nord" in state.project_label
     assert "abc-123" in state.detail_text
     assert "S3" in state.detail_text
-    assert "gelöscht" in state.detail_text or "loescht" in state.detail_text
+    assert "gelöscht" in state.detail_text or "löscht" in state.detail_text
 
 
 def test_build_download_dialog_state_contains_project_identity_and_s3_path(dialog_models):

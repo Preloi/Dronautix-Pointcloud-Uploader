@@ -68,3 +68,12 @@ def test_progress_recorder_keeps_events_in_arrival_order():
         recorder(event)
 
     assert recorder.events == events
+
+
+def test_progress_recorder_keeps_only_the_latest_events():
+    recorder = ProgressRecorder(max_events=3)
+    events = [ProgressEvent(kind="progress", percent=index / 10) for index in range(10)]
+    for event in events:
+        recorder(event)
+
+    assert recorder.events == tuple(events[-3:])

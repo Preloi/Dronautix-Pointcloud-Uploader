@@ -50,6 +50,14 @@ class ProjectCopyError(RuntimeError):
         self.copied_keys = copied_keys
 
 
+class ProjectCopyCancelledError(OperationCancelledError):
+    """Cancellation during a copy; ``copied_keys`` must still be rolled back."""
+
+    def __init__(self, copied_keys: tuple[str, ...]) -> None:
+        super().__init__("Kopieren wurde abgebrochen.")
+        self.copied_keys = copied_keys
+
+
 class S3DeleteError(RuntimeError):
     def __init__(self, message: str, deleted_keys: tuple[str, ...], failed_keys: tuple[str, ...]) -> None:
         super().__init__(message)
@@ -84,13 +92,15 @@ def collect_upload_files(
 
     files_to_upload: list[UploadFile] = []
     if input_format != "potree":
-        raise ValueError(f"Nicht unterstuetztes Uploadformat: {input_format}")
+        raise ValueError(f"Nicht unterstütztes Uploadformat: {input_format}")
 
     if not output_dir:
         return files_to_upload
 
     for root_dir, _dirs, files in os.walk(output_dir):
         for file in files:
+            if _is_excluded_upload_file(file):
+                continue
             local_path = os.path.join(root_dir, file)
             rel_path = os.path.relpath(local_path, output_dir)
             s3_key = f"{s3_prefix}/{rel_path}".replace("\\", "/")
@@ -100,6 +110,18 @@ def collect_upload_files(
         key=lambda item: (os.path.basename(item[1]).lower() == "metadata.json", item[1].lower())
     )
     return files_to_upload
+
+
+# Everything in the bucket is public. Converter logs contain local paths and
+# user names, and Explorer metadata or source clouds next to a chosen Potree
+# folder are not viewer data.
+_EXCLUDED_UPLOAD_FILE_NAMES = frozenset({"thumbs.db", "desktop.ini", ".ds_store", "log.txt"})
+_EXCLUDED_UPLOAD_SUFFIXES = (".las", ".laz", ".tmp", ".part")
+
+
+def _is_excluded_upload_file(file_name: str) -> bool:
+    name = str(file_name or "").lower()
+    return name in _EXCLUDED_UPLOAD_FILE_NAMES or name.startswith("~$") or name.endswith(_EXCLUDED_UPLOAD_SUFFIXES)
 
 
 def _emit(callback: ProgressCallback | None, event: ProgressEvent) -> None:
@@ -323,20 +345,20 @@ def build_safe_download_path(base_dir: str, s3_prefix: str, object_key: str) -> 
     key = str(object_key or "").replace("\\", "/")
     required_prefix = f"{prefix}/"
     if not prefix or not key.startswith(required_prefix):
-        raise ValueError("S3-Objektschluessel liegt ausserhalb des Projektpraefixes.")
+        raise ValueError("S3-Objektschlüssel liegt außerhalb des Projektpraefixes.")
     relative_path = key[len(required_prefix) :]
     if not relative_path or relative_path.startswith(("/", "\\")) or ntpath.splitdrive(relative_path)[0]:
-        raise ValueError("S3-Objektschluessel enthaelt einen ungueltigen Windows-Pfad.")
+        raise ValueError("S3-Objektschlüssel enthält einen ungültigen Windows-Pfad.")
     safe_parts = re.split(r"[/\\]+", relative_path)
     if any(_is_unsafe_windows_component(part) for part in safe_parts):
-        raise ValueError("S3-Objektschluessel enthaelt Traversal oder einen Windows-Datenstrom.")
+        raise ValueError("S3-Objektschlüssel enthält Traversal oder einen Windows-Datenstrom.")
     base_path = os.path.realpath(os.path.abspath(base_dir))
     target_path = os.path.realpath(os.path.join(base_path, *safe_parts))
     try:
         if os.path.commonpath([base_path, target_path]) != base_path:
-            raise ValueError("Downloadpfad liegt ausserhalb des Zielordners.")
+            raise ValueError("Downloadpfad liegt außerhalb des Zielordners.")
     except ValueError as error:
-        raise ValueError("Downloadpfad liegt ausserhalb des Zielordners.") from error
+        raise ValueError("Downloadpfad liegt außerhalb des Zielordners.") from error
     return target_path
 
 
@@ -357,6 +379,7 @@ def copy_project_objects(
     bucket_name: str = BUCKET_NAME,
     on_progress: ProgressCallback | None = None,
     source_sizes: dict[str, int] | None = None,
+    cancel_requested: CancelCallback | None = None,
 ) -> tuple[str, ...]:
     copied_keys: list[str] = []
     source_prefix = source_prefix.rstrip("/")
@@ -392,6 +415,8 @@ def copy_project_objects(
 
     managed_copy = getattr(s3_client, "copy", None)
     for index, source_key in enumerate(source_keys, start=1):
+        if _cancel_requested(cancel_requested):
+            raise ProjectCopyCancelledError(tuple(copied_keys))
         rel_path = source_key[len(source_prefix) :] if source_key.startswith(source_prefix) else ""
         rel_path = rel_path.lstrip("/")
         destination_key = (
@@ -401,12 +426,14 @@ def copy_project_objects(
         )
         file_size = int(sizes.get(source_key, 0) or 0)
         try:
-            if on_progress is not None and callable(managed_copy) and total_bytes > 0 and file_size > 0:
-                # Managed Copy meldet Byte-Chunks auch waehrend einer einzelnen
-                # grossen Datei, statt erst nach deren Abschluss.
+            if callable(managed_copy):
+                # Managed Copy nutzt Multipart (CopyObject ist auf 5 GB begrenzt)
+                # und meldet Byte-Chunks auch waehrend einer einzelnen grossen Datei.
                 file_progress = {"bytes": 0}
 
                 def report_copy_chunk(bytes_chunk, _state=file_progress, _base=copied_bytes, _index=index):
+                    if _cancel_requested(cancel_requested):
+                        raise OperationCancelledError("Kopieren wurde abgebrochen.")
                     _state["bytes"] += int(bytes_chunk or 0)
                     emit_copy_progress(_base + _state["bytes"], _index)
 
@@ -420,7 +447,11 @@ def copy_project_objects(
                         "ContentType": content_type,
                         "MetadataDirective": "REPLACE",
                     },
-                    Callback=report_copy_chunk,
+                    Callback=(
+                        report_copy_chunk
+                        if cancel_requested is not None or (on_progress is not None and total_bytes > 0)
+                        else None
+                    ),
                 )
             else:
                 s3_client.copy_object(
@@ -432,6 +463,10 @@ def copy_project_objects(
                     MetadataDirective="REPLACE",
                 )
         except Exception as error:
+            if _cancel_requested(cancel_requested):
+                # A single-part copy may already have completed when the
+                # callback raised; include its key (deleting a missing key is a no-op).
+                raise ProjectCopyCancelledError((*copied_keys, destination_key)) from error
             raise ProjectCopyError(
                 f"S3-Kopie fehlgeschlagen: {source_key} -> {destination_key}: {error}",
                 tuple(copied_keys),
@@ -465,7 +500,9 @@ def download_project_objects(
         object_key = str(entry.get("Key", ""))
         if not object_key or object_key.endswith("/"):
             continue
-        local_path = build_safe_download_path(download_dir, source_s3_path, object_key)
+        local_path = build_safe_download_path(
+            download_dir, str(entry.get("SourcePrefix") or source_s3_path), object_key
+        )
         if not local_path:
             continue
         os.makedirs(os.path.dirname(local_path), exist_ok=True)

@@ -229,7 +229,7 @@ class LegacyProjectOpsAdapter:
             return self.core_api_factory(str(aws_access or "").strip(), str(aws_secret or "").strip())
         if self.core_api is not None:
             return self.core_api
-        raise RuntimeError("LegacyProjectOpsAdapter benoetigt core_api oder core_api_factory.")
+        raise RuntimeError("LegacyProjectOpsAdapter benötigt core_api oder core_api_factory.")
 
     def _progress_callback(self, ui=None):
         return _progress_callback_from_ui(ui) or self.on_progress

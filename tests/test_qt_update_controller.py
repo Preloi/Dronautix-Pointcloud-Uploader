@@ -147,9 +147,13 @@ def test_update_controller_downloads_verifies_and_launches_installer(tmp_path):
     downloads = []
     launched = []
 
+    installer = tmp_path / "setup.exe"
+    installer.write_bytes(b"installer")
+    manifest["installer_sha256"] = hashlib.sha256(b"installer").hexdigest()
+
     def fake_downloader(selected_manifest, download_dir, **_kwargs):
         downloads.append((selected_manifest, download_dir))
-        return UpdateDownloadResult(True, "OK", installer_path=str(tmp_path / "setup.exe"))
+        return UpdateDownloadResult(True, "OK", installer_path=str(installer))
 
     controller = UpdateController(
         settings_controller=FakeSettingsController(),
@@ -187,6 +191,10 @@ def test_update_controller_reports_launcher_errors(tmp_path):
     def failing_launcher(_path):
         raise OSError("blocked by policy")
 
+    installer = tmp_path / "setup.exe"
+    installer.write_bytes(b"installer")
+    manifest = _manifest("1.7.13")
+    manifest["installer_sha256"] = hashlib.sha256(b"installer").hexdigest()
     controller = UpdateController(
         settings_controller=FakeSettingsController(),
         installer_downloader=lambda _manifest, _dir, **_kwargs: UpdateDownloadResult(
@@ -196,7 +204,55 @@ def test_update_controller_reports_launcher_errors(tmp_path):
         download_dir=tmp_path,
     )
 
-    summary = controller.download_and_install(_manifest("1.7.13"))
+    summary = controller.download_and_install(manifest)
 
     assert summary.status == FAILED_STATUS
     assert "blocked by policy" in summary.message
+
+
+def test_update_controller_refuses_to_launch_installer_swapped_after_download(tmp_path):
+    installer = tmp_path / "setup.exe"
+    installer.write_bytes(b"verified installer")
+    manifest = _manifest("1.7.13")
+    manifest["installer_sha256"] = hashlib.sha256(b"verified installer").hexdigest()
+    launched = []
+
+    def downloader_then_swap(_manifest, _dir, **_kwargs):
+        result = UpdateDownloadResult(
+            True, "OK", installer_path=str(installer), installer_sha256=manifest["installer_sha256"]
+        )
+        installer.write_bytes(b"malicious replacement")
+        return result
+
+    controller = UpdateController(
+        settings_controller=FakeSettingsController(),
+        installer_downloader=downloader_then_swap,
+        installer_launcher=launched.append,
+        download_dir=tmp_path,
+    )
+
+    summary = controller.download_and_install(manifest)
+
+    assert summary.status == FAILED_STATUS
+    assert launched == []
+
+
+def test_update_controller_reports_cancelled_download_as_cancelled(tmp_path):
+    seen = {}
+
+    def downloader(_manifest, _dir, **kwargs):
+        seen.update(kwargs)
+        return UpdateDownloadResult(False, "Update-Download wurde abgebrochen.", cancelled=True)
+
+    controller = UpdateController(
+        settings_controller=FakeSettingsController(),
+        installer_downloader=downloader,
+        installer_launcher=lambda _path: None,
+        download_dir=tmp_path,
+    )
+    cancel = lambda: True
+
+    summary = controller.download_and_install(_manifest("1.7.13"), on_progress=print, cancel_requested=cancel)
+
+    assert summary.status == "cancelled"
+    assert seen == {"on_progress": print, "cancel_requested": cancel}

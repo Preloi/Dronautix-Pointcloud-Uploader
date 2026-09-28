@@ -58,7 +58,7 @@ def test_create_pointcloud_index_entry_matches_viewer_shape():
 
 
 def test_create_pointcloud_index_entry_rejects_unsupported_format():
-    with pytest.raises(ValueError, match="Nicht unterstuetztes Punktwolkenformat"):
+    with pytest.raises(ValueError, match="Nicht unterstütztes Punktwolkenformat"):
         create_pointcloud_index_entry("Scan 1", "copc", "viewer", "s3")
 
 

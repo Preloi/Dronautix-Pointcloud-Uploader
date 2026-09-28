@@ -56,7 +56,7 @@ def validate_brotli_output(output_dir: str) -> None:
         with open(metadata_path, encoding="utf-8") as metadata_file:
             metadata = json.load(metadata_file)
     except (OSError, json.JSONDecodeError) as error:
-        raise RuntimeError("Potree-Konvertierung hat keine gueltige metadata.json erzeugt.") from error
+        raise RuntimeError("Potree-Konvertierung hat keine gültige metadata.json erzeugt.") from error
 
     if str(metadata.get("encoding", "")).upper() != "BROTLI":
         raise RuntimeError("PotreeConverter hat das angeforderte BROTLI-Encoding nicht erzeugt.")
@@ -71,9 +71,9 @@ def validate_potree_output(output_dir: str) -> None:
             with open(metadata_path, encoding="utf-8") as metadata_file:
                 metadata = json.load(metadata_file)
         except (OSError, json.JSONDecodeError) as error:
-            raise RuntimeError("Potree-Projekt enthaelt keine gueltige metadata.json.") from error
+            raise RuntimeError("Potree-Projekt enthält keine gültige metadata.json.") from error
         if not isinstance(metadata, dict) or not metadata:
-            raise RuntimeError("Potree-Projekt enthaelt leere oder ungueltige Metadaten.")
+            raise RuntimeError("Potree-Projekt enthält leere oder ungültige Metadaten.")
         hierarchy = metadata.get("hierarchy")
         attributes = metadata.get("attributes")
         position = next((item for item in attributes or () if isinstance(item, dict) and item.get("name") == "position"), None)
@@ -110,16 +110,16 @@ def validate_potree_output(output_dir: str) -> None:
             or not os.path.isfile(octree_path)
             or os.path.getsize(octree_path) <= 0
         ):
-            raise RuntimeError("Potree-2-Projekt benoetigt hierarchy.bin und octree.bin mit Daten.")
+            raise RuntimeError("Potree-2-Projekt benötigt hierarchy.bin und octree.bin mit Daten.")
         _validate_potree2_ranges(hierarchy_path, octree_path, first_chunk_size)
         return
 
     if os.path.isfile(os.path.join(output_dir, "cloud.js")):
         raise RuntimeError(
-            "Potree 1 (cloud.js) wird nicht unterstuetzt. "
-            "Bitte mit PotreeConverter 2.x neu konvertieren; der Viewer benoetigt metadata.json."
+            "Potree 1 (cloud.js) wird nicht unterstützt. "
+            "Bitte mit PotreeConverter 2.x neu konvertieren; der Viewer benötigt metadata.json."
         )
-    raise RuntimeError("Ordner ist kein vollstaendiges Potree-Projekt.")
+    raise RuntimeError("Ordner ist kein vollständiges Potree-Projekt.")
 
 
 def _valid_xyz(value, *, positive: bool = False) -> bool:
@@ -151,22 +151,22 @@ def _validate_potree2_ranges(hierarchy_path: str, octree_path: str, first_chunk_
         while pending:
             offset, size = pending.pop()
             if (offset, size) in visited:
-                raise RuntimeError("Potree-2-Hierarchie enthaelt einen zyklischen Proxy-Verweis.")
+                raise RuntimeError("Potree-2-Hierarchie enthält einen zyklischen Proxy-Verweis.")
             visited.add((offset, size))
             if size <= 0 or size % 22 or offset < 0 or offset + size > hierarchy_size:
-                raise RuntimeError("Potree-2-Hierarchie verweist ausserhalb von hierarchy.bin.")
+                raise RuntimeError("Potree-2-Hierarchie verweist außerhalb von hierarchy.bin.")
             hierarchy_file.seek(offset)
             for _record_index in range(size // 22):
                 record = hierarchy_file.read(22)
                 if len(record) != 22:
-                    raise RuntimeError("Potree-2-Hierarchie ist unvollstaendig.")
+                    raise RuntimeError("Potree-2-Hierarchie ist unvollständig.")
                 node_type, _child_mask, points, byte_offset, byte_size = struct.unpack("<BBIQQ", record)
                 if node_type == 2:
                     pending.append((byte_offset, byte_size))
                 elif node_type not in {0, 1} or (
                     points > 0 and (byte_size <= 0 or byte_offset + byte_size > octree_size)
                 ) or (points == 0 and (byte_offset != 0 or byte_size != 0)):
-                    raise RuntimeError("Potree-2-Hierarchie verweist ausserhalb von octree.bin.")
+                    raise RuntimeError("Potree-2-Hierarchie verweist außerhalb von octree.bin.")
 
 
 def _valid_bounds(value) -> bool:
@@ -205,6 +205,28 @@ def _windows_short_path(path: str) -> str:
     return buffer.value if buffer.value.isascii() else ""
 
 
+def _same_drive_staging_parents(reference_path: str) -> list[str]:
+    """Directories on the drive of ``reference_path``, ASCII paths first.
+
+    Hardlinks and cheap renames only work within one volume, and on
+    non-system drives Windows usually has no 8.3 short names, so the staging
+    location itself must be ASCII for PotreeConverter.
+    """
+
+    reference = os.path.abspath(reference_path)
+    drive = os.path.splitdrive(reference)[0].casefold()
+    candidates = [tempfile.gettempdir()]
+    if drive:
+        candidates.append(os.path.splitdrive(reference)[0] + os.sep)
+    candidates.append(os.path.dirname(reference))
+    parents: list[str] = []
+    for candidate in candidates:
+        candidate = os.path.abspath(candidate)
+        if os.path.splitdrive(candidate)[0].casefold() == drive and candidate not in parents:
+            parents.append(candidate)
+    return sorted(parents, key=lambda parent: not parent.isascii())
+
+
 @contextmanager
 def _converter_safe_source_path(source_file: str, output_dir: str):
     safe_path = _windows_short_path(source_file)
@@ -212,20 +234,66 @@ def _converter_safe_source_path(source_file: str, output_dir: str):
         yield safe_path
         return
 
-    staging_dir = tempfile.mkdtemp(
-        prefix="dronautix_potree_source_",
-    )
-    alias = os.path.join(staging_dir, f"source{os.path.splitext(source_file)[1].lower()}")
-    try:
+    last_error: OSError | None = None
+    extension = os.path.splitext(source_file)[1].lower()
+    for parent in _same_drive_staging_parents(source_file):
+        try:
+            staging_dir = tempfile.mkdtemp(prefix="dronautix_potree_source_", dir=parent)
+        except OSError as error:
+            last_error = error
+            continue
+        alias = os.path.join(staging_dir, f"source{extension}")
         try:
             os.link(source_file, alias)
         except OSError as error:
-            raise RuntimeError(
-                f"PotreeConverter kann den Unicode-Pfad '{source_file}' nicht direkt lesen und "
-                "ein platzsparender temporärer Dateialias konnte nicht erstellt werden. "
-                "Bitte Datei vorübergehend ohne Umlaute benennen."
-            ) from error
-        yield _windows_short_path(alias) or alias
+            last_error = error
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            continue
+        try:
+            yield _windows_short_path(alias) or alias
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        return
+    raise RuntimeError(
+        f"PotreeConverter kann den Unicode-Pfad '{source_file}' nicht direkt lesen und "
+        "ein platzsparender temporärer Dateialias konnte nicht erstellt werden. "
+        "Bitte Datei vorübergehend ohne Umlaute benennen."
+    ) from last_error
+
+
+@contextmanager
+def _converter_safe_output_dir(output_dir: str):
+    """Give PotreeConverter an ASCII output path; move the result afterwards."""
+
+    if output_dir.isascii():
+        yield output_dir
+        return
+    short_path = _windows_short_path(output_dir)
+    if short_path:
+        yield short_path
+        return
+    staging_dir = ""
+    for parent in _same_drive_staging_parents(output_dir):
+        if not parent.isascii():
+            continue
+        try:
+            staging_dir = tempfile.mkdtemp(prefix="dronautix_potree_output_", dir=parent)
+            break
+        except OSError:
+            continue
+    if not staging_dir:
+        yield output_dir
+        return
+    try:
+        yield staging_dir
+        # Only reached on success; same volume, so these are renames.
+        for name in os.listdir(staging_dir):
+            target = os.path.join(output_dir, name)
+            if os.path.isdir(target) and not os.path.islink(target):
+                shutil.rmtree(target)
+            elif os.path.lexists(target):
+                os.remove(target)
+            shutil.move(os.path.join(staging_dir, name), target)
     finally:
         shutil.rmtree(staging_dir, ignore_errors=True)
 
@@ -258,15 +326,21 @@ def run_potree_conversion(
     _emit(on_progress, ProgressEvent(kind="log", message=f"[CONVERTER] {converter_path}", phase="conversion"))
     _emit(on_progress, ProgressEvent(kind="log", message=f"[OUTPUT] {output_dir}", phase="conversion"))
 
-    with _converter_safe_source_path(source_file, output_dir) as converter_source:
-        command = build_potree_command(converter_source, converter_path, output_dir)
+    with _converter_safe_source_path(source_file, output_dir) as converter_source, _converter_safe_output_dir(
+        output_dir
+    ) as converter_output:
+        command = build_potree_command(converter_source, converter_path, converter_output)
         try:
+            # errors="replace": a single undecodable byte must not kill the
+            # reader thread, which would stop draining the pipe and block the
+            # converter on its next write.
             process = subprocess.Popen(
                 list(command.args),
                 cwd=command.cwd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                universal_newlines=True,
+                text=True,
+                errors="replace",
                 bufsize=1,
                 **_hidden_window_options(),
             )

@@ -373,3 +373,65 @@ def test_download_project_objects_removes_active_partial_file_when_cancelled(tmp
     assert target.read_bytes() == b"complete previous download"
     assert not list(tmp_path.glob("*.part"))
     assert fake_s3.downloads == []
+
+
+def test_collect_upload_files_skips_logs_explorer_metadata_and_source_clouds(tmp_path):
+    (tmp_path / "metadata.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "octree.bin").write_bytes(b"x")
+    for junk in ("log.txt", "Thumbs.db", "desktop.ini", "scan.las", "scan.LAZ", "~$lock"):
+        (tmp_path / junk).write_bytes(b"x")
+
+    files = collect_upload_files("potree", "pointclouds/k/id/p", output_dir=str(tmp_path))
+
+    assert [key for _local, key in files] == ["pointclouds/k/id/p/octree.bin", "pointclouds/k/id/p/metadata.json"]
+
+
+def test_copy_project_objects_uses_managed_multipart_copy_without_progress_callback():
+    class ManagedCopyClient:
+        def __init__(self):
+            self.managed = []
+
+        def copy(self, source, bucket, key, ExtraArgs=None, Callback=None):
+            self.managed.append((source["Key"], key, Callback))
+
+        def copy_object(self, **_kwargs):
+            raise AssertionError("single-request CopyObject is limited to 5 GB")
+
+    client = ManagedCopyClient()
+
+    copied = copy_project_objects(client, ("old/root/octree.bin",), "old/root", "new/root", bucket_name="bucket")
+
+    assert copied == ("new/root/octree.bin",)
+    assert client.managed == [("old/root/octree.bin", "new/root/octree.bin", None)]
+
+
+def test_copy_cancelled_inside_callback_reports_the_possibly_completed_destination_key():
+    from dronautix_uploader.core.contracts import OperationCancelledError
+    from dronautix_uploader.core.s3_service import ProjectCopyCancelledError
+
+    cancel = {"now": False}
+
+    class CompletingCopyClient:
+        def __init__(self):
+            self.created = []
+
+        def copy(self, source, bucket, key, ExtraArgs=None, Callback=None):
+            self.created.append(key)  # S3 already wrote the object ...
+            cancel["now"] = True
+            Callback(10)  # ... when the progress callback sees the cancel request
+
+    client = CompletingCopyClient()
+
+    with pytest.raises(ProjectCopyCancelledError) as error:
+        copy_project_objects(
+            client,
+            ("old/root/a.bin", "old/root/b.bin"),
+            "old/root",
+            "new/root",
+            bucket_name="bucket",
+            source_sizes={"old/root/a.bin": 10, "old/root/b.bin": 10},
+            cancel_requested=lambda: cancel["now"],
+        )
+
+    assert isinstance(error.value, OperationCancelledError)
+    assert set(client.created) <= set(error.value.copied_keys)

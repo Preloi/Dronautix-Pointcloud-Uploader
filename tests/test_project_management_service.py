@@ -149,6 +149,7 @@ class FakeGLBService:
         project_s3_prefix,
         used_slugs=None,
         on_progress=None,
+        cancel_requested=None,
     ):
         self.calls.append(
             (
@@ -469,7 +470,7 @@ def test_replace_project_model_rejects_unsupported_pointcloud_format_without_rea
         lambda: str(staging_root),
     )
 
-    with pytest.raises(ValueError, match="nicht unterstuetztes Punktwolkenformat"):
+    with pytest.raises(ValueError, match="nicht unterstütztes Punktwolkenformat"):
         ProjectManagementService(
             repository=repository,
             s3_client=s3_client,
@@ -889,7 +890,7 @@ def test_unsupported_pointcloud_format_blocks_sibling_crs_repair_without_writes(
         "dronautix_uploader.core.project_management_service.get_glb_upload_staging_root",
         lambda: str(tmp_path / "app-glb-staging"),
     )
-    with pytest.raises(ValueError, match="nicht unterstuetztes Punktwolkenformat"):
+    with pytest.raises(ValueError, match="nicht unterstütztes Punktwolkenformat"):
         ProjectManagementService(repository=repository, s3_client=s3_client, glb_service=FakeGLBService()).add_project_models_from_sources(
             "project", (str(source),)
         )
@@ -1466,9 +1467,9 @@ def test_cleanup_pending_project_blocks_activation_and_replacement_without_s3_wr
     s3_client = FakeS3Client()
     service = make_service(repository, s3_client=s3_client)
 
-    with pytest.raises(RuntimeError, match="Loeschversuch"):
+    with pytest.raises(RuntimeError, match="Löschversuch"):
         service.set_project_link_state("pending", False)
-    with pytest.raises(RuntimeError, match="Loeschversuch"):
+    with pytest.raises(RuntimeError, match="Löschversuch"):
         service.replace_project_pointclouds("pending", ())
 
     assert repository.saved_indexes == []
@@ -1585,3 +1586,26 @@ def test_pointcloud_change_rejects_unknown_model_reference(model_cloud_change):
         run("replace_single_source", {"value": "EPSG:25832", "vertical_crs": "EPSG:7837"})
     assert repository.saved_indexes == []
     assert client.uploads == client.puts == client.deleted == []
+
+
+def test_manual_crs_repair_rewrites_potree_metadata_without_immutable_cache():
+    cloud_path = "pointclouds/kunde/project/projekt/cloud"
+    repository = FakeRepository(
+        {"projects": [{
+            "id": "project", "viewer_path": "kunde/project/projekt", "s3_path": "pointclouds/kunde/project/projekt",
+            "pointclouds": [{"name": "Cloud", "format": "potree", "s3_path": cloud_path}],
+        }]}
+    )
+    s3_client = FakeS3Client()
+    s3_client.read_objects[f"{cloud_path}/metadata.json"] = b'{"name":"unchanged"}'
+    service = ProjectManagementService(repository=repository, s3_client=s3_client)
+
+    repaired = service.repair_project_crs_metadata(
+        "project",
+        {"value": "EPSG:31255", "vertical_crs": "EPSG:5778"},
+        confirm_repair=lambda _message: True,
+    )
+
+    assert repaired.status == "success"
+    metadata_puts = [put for put in s3_client.puts if put[1] == f"{cloud_path}/metadata.json"]
+    assert metadata_puts and all(put[4].get("CacheControl") == "no-cache" for put in metadata_puts)

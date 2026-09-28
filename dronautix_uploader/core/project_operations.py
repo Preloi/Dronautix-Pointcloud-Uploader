@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .constants import BUCKET_NAME, S3_INDEX_CACHE_CONTROL
+from .constants import BUCKET_NAME, S3_DISABLED_PROJECTS_KEY, S3_INDEX_CACHE_CONTROL
 from .contracts import (
     CancelCallback,
     OperationCancelledError,
@@ -26,8 +26,8 @@ from .crs_service import extract_pointcloud_crs_metadata, is_active_pointcloud, 
 from .metadata_service import apply_crs_metadata, create_pointcloud_index_entry, get_common_crs_info
 from .naming_service import get_pointcloud_display_name, make_unique_slug, sanitize_folder_name
 from .project_index_service import append_project_history, apply_common_crs_or_clear, update_project_in_index
-from .project_index_service import remove_project_from_index
-from .project_repository import ProjectMetadataConflictError
+from .project_index_service import remove_project_from_index, strip_project_ui_state
+from .project_repository import ProjectMetadataConflictError, ProjectMetadataWriteUncertainError
 from .s3_service import (
     UploadFile,
     collect_project_object_entries,
@@ -105,7 +105,7 @@ def rebase_prepared_cloud_upload(
         for local_path, s3_key in cloud.files_to_upload
     )
     if cloud.input_format != "potree":
-        raise ValueError(f"Nicht unterstuetztes Punktwolkenformat: {cloud.input_format}")
+        raise ValueError(f"Nicht unterstütztes Punktwolkenformat: {cloud.input_format}")
     viewer_path = viewer_prefix
     s3_path = s3_prefix
 
@@ -293,7 +293,7 @@ def build_new_project_upload(
             if entry != expected_entry:
                 raise ValueError(
                     "GLB-Upload abgebrochen: Modellpfad und data_version stimmen nicht ueberein. "
-                    "Es wurden keine S3-Daten geaendert."
+                    "Es wurden keine S3-Daten geändert."
                 )
             if entry.id in model_ids:
                 raise ValueError(f"Doppelte Modell-ID: {entry.id}")
@@ -403,6 +403,75 @@ def _restore_index(index_data: dict[str, Any], snapshot: dict[str, Any]) -> None
     index_data.update(snapshot)
 
 
+MAX_INDEX_SAVE_ATTEMPTS = 3
+
+
+def _find_index_entry(index_data: dict[str, Any], project_id: str):
+    normalized_id = str(project_id or "").strip()
+    for section in ("projects", S3_DISABLED_PROJECTS_KEY):
+        entries = index_data.get(section)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict) and str(entry.get("id", "")).strip() == normalized_id:
+                return section, strip_project_ui_state(entry)
+    return None
+
+
+def _apply_project_update(index_data: dict[str, Any], project_id: str, update_project) -> None:
+    if not update_project_in_index(index_data, project_id, update_project):
+        raise RuntimeError("Projekt konnte im Index nicht gefunden werden.")
+
+
+def _insert_project(index_data: dict[str, Any], project: dict[str, Any]) -> None:
+    projects = index_data.get("projects")
+    if not isinstance(projects, list):
+        projects = []
+        index_data["projects"] = projects
+    projects.insert(0, copy.deepcopy(project))
+
+
+def _save_index_with_rebase(
+    index_data: dict[str, Any],
+    snapshot: dict[str, Any],
+    save_index: Callable[[dict[str, Any]], bool],
+    *,
+    reapply: Callable[[dict[str, Any]], None],
+    project_id: str,
+) -> None:
+    """Save an already applied index change, rebasing it on concurrent edits.
+
+    Operations here change only their own project entry, so a conflict caused
+    by an edit of *another* project is resolved by applying the same change to
+    the freshly loaded index. If the own project changed meanwhile (renamed,
+    link toggled, deleted, ...) the original conflict is raised and the caller
+    rolls back as before. Uncertain writes are never retried.
+    """
+
+    target = index_data
+    for attempt in range(1, MAX_INDEX_SAVE_ATTEMPTS + 1):
+        try:
+            saved = save_index(target)
+        except ProjectMetadataWriteUncertainError:
+            raise
+        except ProjectMetadataConflictError as conflict:
+            fresh = getattr(conflict, "current_snapshot", None)
+            if (
+                attempt == MAX_INDEX_SAVE_ATTEMPTS
+                or not isinstance(fresh, dict)
+                or _find_index_entry(snapshot, project_id) != _find_index_entry(fresh, project_id)
+            ):
+                raise
+            reapply(fresh)
+            target = fresh
+            continue
+        if not saved:
+            raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
+        break
+    if target is not index_data:
+        _restore_index(index_data, target)
+
+
 def _safe_child_path(path: str, root: str) -> bool:
     normalized_path = _normalize_s3_path(path)
     normalized_root = _normalize_s3_path(root)
@@ -433,7 +502,7 @@ def _pointcloud_storage_boundary(
         raise ValueError("Punktwolkenpfad liegt nicht innerhalb des Multi-Projekts.")
     if input_format == "potree":
         return ("root-prefix" if is_legacy_potree_root else "prefix"), s3_path
-    raise ValueError("Multi-Projekt enthaelt ein nicht unterstuetztes Punktwolkenformat.")
+    raise ValueError("Multi-Projekt enthält ein nicht unterstütztes Punktwolkenformat.")
 
 
 def _pointcloud_slug(pointcloud: dict[str, Any], project_viewer_root: str, project_s3_prefix: str) -> str:
@@ -451,21 +520,21 @@ def validate_explicit_multi_project(
     """Validate a multi-only edit target without widening any child S3 boundary."""
 
     if str(project.get("format", "")).strip().lower() != "multi":
-        raise ValueError("Punktwolken koennen nur in expliziten Multi-Projekten verwaltet werden.")
+        raise ValueError("Punktwolken können nur in expliziten Multi-Projekten verwaltet werden.")
     pointclouds = project.get("pointclouds")
     if not isinstance(pointclouds, list) or not pointclouds:
-        raise ValueError("Multi-Projekt enthaelt keine verwaltbaren Punktwolken.")
+        raise ValueError("Multi-Projekt enthält keine verwaltbaren Punktwolken.")
 
     seen_paths: set[str] = set()
     seen_slugs: set[str] = set()
     validated: list[dict[str, Any]] = []
     for pointcloud in pointclouds:
         if not isinstance(pointcloud, dict):
-            raise ValueError("Multi-Projekt enthaelt einen ungueltigen Punktwolken-Eintrag.")
+            raise ValueError("Multi-Projekt enthält einen ungültigen Punktwolken-Eintrag.")
         _kind, s3_path = _pointcloud_storage_boundary(pointcloud, project_viewer_root, project_s3_prefix)
         slug = _pointcloud_slug(pointcloud, project_viewer_root, project_s3_prefix)
         if s3_path in seen_paths or slug in seen_slugs:
-            raise ValueError("Multi-Projekt enthaelt keine eindeutigen Punktwolkenpfade.")
+            raise ValueError("Multi-Projekt enthält keine eindeutigen Punktwolkenpfade.")
         seen_paths.add(s3_path)
         seen_slugs.add(slug)
         validated.append(pointcloud)
@@ -550,18 +619,18 @@ def _validate_new_multi_clouds(
         _kind, s3_path = _pointcloud_storage_boundary(entry, project_viewer_root, project_s3_prefix)
         viewer_path = _normalize_s3_path(str(entry.get("viewer_path", "")))
         if not s3_path.startswith(version_s3_prefix) or not viewer_path.startswith(version_viewer_prefix):
-            raise ValueError("Neue Punktwolken muessen in einem unveraenderlichen Datenstand abgelegt werden.")
+            raise ValueError("Neue Punktwolken müssen in einem unveränderlichen Datenstand abgelegt werden.")
         if cloud.input_format != "potree":
-            raise ValueError("Neue Punktwolken muessen als Potree-Projekt vorbereitet sein.")
+            raise ValueError("Neue Punktwolken müssen als Potree-Projekt vorbereitet sein.")
         expected_parent = s3_path
         if expected_parent.rsplit("/", 1)[-1] != slug or _normalize_s3_path(cloud.s3_prefix) != expected_parent:
             raise ValueError("Punktwolken-Slug und Zielpfad stimmen nicht ueberein.")
         if not cloud.files_to_upload:
-            raise ValueError("Keine Dateien zum Hochladen fuer die Punktwolke gefunden.")
+            raise ValueError("Keine Dateien zum Hochladen für die Punktwolke gefunden.")
         for _local_path, key in cloud.files_to_upload:
             normalized_key = _normalize_s3_path(key)
             if not normalized_key.startswith(f"{s3_path}/"):
-                raise ValueError("Punktwolken-Upload wuerde ausserhalb des Child-Pfads schreiben.")
+                raise ValueError("Punktwolken-Upload wuerde außerhalb des Child-Pfads schreiben.")
         new_slugs.add(slug)
 
 
@@ -591,7 +660,7 @@ def _pointclouds_for_add(
 
     input_format = str(project.get("format", "")).strip().lower()
     if input_format != "potree":
-        raise ValueError("Einzelprojekt enthaelt kein unterstuetztes Punktwolkenformat.")
+        raise ValueError("Einzelprojekt enthält kein unterstütztes Punktwolkenformat.")
     entry = create_pointcloud_index_entry(
         str(project.get("name", "")).strip() or str(project.get("projekt", "")).strip() or "Punktwolke 1",
         input_format,
@@ -702,6 +771,7 @@ def add_project_pointclouds(
     on_progress: ProgressCallback | None = None,
     bucket_name: str = BUCKET_NAME,
     timestamp: str = "",
+    cancel_requested: CancelCallback | None = None,
 ) -> ProjectOperationResult:
     """Append child clouds, promoting a legacy single project when necessary."""
 
@@ -724,6 +794,7 @@ def add_project_pointclouds(
             bucket_name=bucket_name,
             on_progress=on_progress,
             ledger=ledger,
+            cancel_requested=cancel_requested,
         )
 
         def update_project(project: dict[str, Any]) -> None:
@@ -737,32 +808,32 @@ def add_project_pointclouds(
                 project,
                 [*current_clouds, *(cloud.index_entry for cloud in additions)],
             )
-            append_project_history(project, timestamp, f"{len(additions)} Punktwolke(n) wurden hinzugefuegt.")
+            append_project_history(project, timestamp, f"{len(additions)} Punktwolke(n) wurden hinzugefügt.")
 
-        if not update_project_in_index(index_data, project_id, update_project):
-            raise RuntimeError("Projekt konnte im Index nicht gefunden werden.")
-        if not save_index(index_data):
-            raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
+        _apply_project_update(index_data, project_id, update_project)
+        _save_index_with_rebase(
+            index_data,
+            snapshot,
+            save_index,
+            reapply=lambda fresh: _apply_project_update(fresh, project_id, update_project),
+            project_id=project_id,
+        )
     except Exception as operation_error:
-        _restore_index(index_data, snapshot)
-        if ledger.uploaded_keys:
-            try:
-                rollback_keys = _rollback_keys_preserving_conflict(ledger.as_tuple(), snapshot, operation_error)
-                if rollback_keys:
-                    delete_keys(rollback_keys)
-            except Exception as cleanup_error:
-                orphaned_keys = ", ".join(ledger.as_tuple())
-                raise RuntimeError(
-                    f"Punktwolken konnten nicht hinzugefuegt werden: {operation_error}. "
-                    f"Upload-Cleanup fehlgeschlagen ({cleanup_error}); verwaiste S3-Keys: {orphaned_keys}"
-                ) from operation_error
+        _rollback_failed_operation(
+            action="Punktwolken konnten nicht hinzugefügt werden",
+            ledger=ledger,
+            snapshot=snapshot,
+            index_data=index_data,
+            operation_error=operation_error,
+            delete_keys=delete_keys,
+        )
         raise
 
     return ProjectOperationResult(
         status="success",
         project_id=project_id,
         uploaded_keys=ledger.as_tuple(),
-        message="Punktwolke(n) wurden hinzugefuegt.",
+        message="Punktwolke(n) wurden hinzugefügt.",
     )
 
 
@@ -816,10 +887,14 @@ def remove_project_pointcloud(
             _replace_multi_project_pointclouds(project, remaining)
             append_project_history(project, timestamp, f"Punktwolke '{target_name}' wurde entfernt.")
 
-        if not update_project_in_index(index_data, project_id, update_project):
-            raise RuntimeError("Projekt konnte im Index nicht gefunden werden.")
-        if not save_index(index_data):
-            raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
+        _apply_project_update(index_data, project_id, update_project)
+        _save_index_with_rebase(
+            index_data,
+            snapshot,
+            save_index,
+            reapply=lambda fresh: _apply_project_update(fresh, project_id, update_project),
+            project_id=project_id,
+        )
     except Exception:
         _restore_index(index_data, snapshot)
         raise
@@ -832,8 +907,8 @@ def remove_project_pointcloud(
                 status="partial",
                 project_id=project_id,
                 orphaned_keys=target_keys,
-                warnings=(f"Punktwolken-Dateien konnten nicht vollstaendig geloescht werden: {error}",),
-                message="Index wurde aktualisiert; entfernte Punktwolke benoetigt Cleanup.",
+                warnings=(f"Punktwolken-Dateien konnten nicht vollständig gelöscht werden: {error}",),
+                message="Index wurde aktualisiert; entfernte Punktwolke benötigt Cleanup.",
             )
 
     return ProjectOperationResult(
@@ -858,6 +933,7 @@ def replace_project_pointclouds(
     on_progress: ProgressCallback | None = None,
     bucket_name: str = BUCKET_NAME,
     timestamp: str = "",
+    cancel_requested: CancelCallback | None = None,
 ) -> ProjectOperationResult:
     """Upload replacement clouds, save index, then clean obsolete old keys.
 
@@ -883,6 +959,7 @@ def replace_project_pointclouds(
             bucket_name=bucket_name,
             on_progress=on_progress,
             ledger=ledger,
+            cancel_requested=cancel_requested,
         )
         pointcloud_entries = [cloud.index_entry for cloud in prepared_clouds]
 
@@ -899,16 +976,23 @@ def replace_project_pointclouds(
             )
             append_project_history(project, timestamp, "Alle Punktwolken wurden ausgetauscht.")
 
-        if not update_project_in_index(index_data, project_id, update_project):
-            raise RuntimeError("Projekt konnte im Index nicht gefunden werden.")
-        if not save_index(index_data):
-            raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
+        _apply_project_update(index_data, project_id, update_project)
+        _save_index_with_rebase(
+            index_data,
+            snapshot,
+            save_index,
+            reapply=lambda fresh: _apply_project_update(fresh, project_id, update_project),
+            project_id=project_id,
+        )
     except Exception as operation_error:
-        if ledger.uploaded_keys:
-            rollback_keys = _rollback_keys_preserving_conflict(ledger.as_tuple(), snapshot, operation_error)
-            if rollback_keys:
-                delete_keys(rollback_keys)
-        _restore_index(index_data, snapshot)
+        _rollback_failed_operation(
+            action="Punktwolken konnten nicht ausgetauscht werden",
+            ledger=ledger,
+            snapshot=snapshot,
+            index_data=index_data,
+            operation_error=operation_error,
+            delete_keys=delete_keys,
+        )
         raise
 
     orphaned_keys = compute_orphaned_keys(
@@ -952,6 +1036,7 @@ def replace_single_project_pointcloud(
     on_progress: ProgressCallback | None = None,
     bucket_name: str = BUCKET_NAME,
     timestamp: str = "",
+    cancel_requested: CancelCallback | None = None,
 ) -> ProjectOperationResult:
     """Replace one child pointcloud while preserving the other children."""
 
@@ -994,6 +1079,7 @@ def replace_single_project_pointcloud(
             bucket_name=bucket_name,
             on_progress=on_progress,
             ledger=ledger,
+            cancel_requested=cancel_requested,
         )
 
         def update_project(project: dict[str, Any]) -> None:
@@ -1085,8 +1171,7 @@ def replace_single_project_pointcloud(
             )
             append_project_history(project, timestamp, f"Punktwolke '{replaced_name}' wurde ausgetauscht.")
 
-        if not update_project_in_index(index_data, project_id, update_project):
-            raise RuntimeError("Projekt konnte im Index nicht gefunden werden.")
+        _apply_project_update(index_data, project_id, update_project)
         if is_legacy_single and legacy_display_name:
             _overwrite_uploaded_potree_name(
                 s3_client,
@@ -1094,14 +1179,22 @@ def replace_single_project_pointcloud(
                 legacy_display_name,
                 bucket_name=bucket_name,
             )
-        if not save_index(index_data):
-            raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
+        _save_index_with_rebase(
+            index_data,
+            snapshot,
+            save_index,
+            reapply=lambda fresh: _apply_project_update(fresh, project_id, update_project),
+            project_id=project_id,
+        )
     except Exception as operation_error:
-        if ledger.uploaded_keys:
-            rollback_keys = _rollback_keys_preserving_conflict(ledger.as_tuple(), snapshot, operation_error)
-            if rollback_keys:
-                delete_keys(rollback_keys)
-        _restore_index(index_data, snapshot)
+        _rollback_failed_operation(
+            action="Punktwolke konnte nicht ausgetauscht werden",
+            ledger=ledger,
+            snapshot=snapshot,
+            index_data=index_data,
+            operation_error=operation_error,
+            delete_keys=delete_keys,
+        )
         raise
 
     orphaned_keys = compute_orphaned_keys(
@@ -1117,8 +1210,8 @@ def replace_single_project_pointcloud(
                 project_id=project_id,
                 uploaded_keys=ledger.as_tuple(),
                 orphaned_keys=orphaned_keys,
-                warnings=(f"Alte S3-Keys konnten nicht vollstaendig geloescht werden: {error}",),
-                message="Index wurde aktualisiert; alte Dateien benoetigen Cleanup.",
+                warnings=(f"Alte S3-Keys konnten nicht vollständig gelöscht werden: {error}",),
+                message="Index wurde aktualisiert; alte Dateien benötigen Cleanup.",
             )
 
     return ProjectOperationResult(
@@ -1180,6 +1273,7 @@ def replace_single_project_model(
     on_progress: ProgressCallback | None = None,
     bucket_name: str = BUCKET_NAME,
     timestamp: str = "",
+    cancel_requested: CancelCallback | None = None,
 ) -> ProjectOperationResult:
     """Replace one immutable GLB package, then switch its models[] entry."""
 
@@ -1226,9 +1320,12 @@ def replace_single_project_model(
             bucket_name=bucket_name,
             on_progress=on_progress,
             ledger=ledger,
+            cancel_requested=cancel_requested,
             checksum_sha256_keys=tuple(key for _path, key in files_to_upload),
         )
-        verify_uploaded_model_files(s3_client, files_to_upload, bucket_name=bucket_name)
+        verify_uploaded_model_files(
+            s3_client, files_to_upload, bucket_name=bucket_name, cancel_requested=cancel_requested
+        )
 
         def update_project(project: dict[str, Any]) -> None:
             current_models = project.get("models")
@@ -1253,15 +1350,23 @@ def replace_single_project_model(
                 f"3D-Modell '{target_model.get('name', replacement.name)}' wurde ausgetauscht.",
             )
 
-        if not update_project_in_index(index_data, project_id, update_project):
-            raise RuntimeError("Projekt konnte im Index nicht gefunden werden.")
-        if not save_index(index_data):
-            raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
+        _apply_project_update(index_data, project_id, update_project)
+        _save_index_with_rebase(
+            index_data,
+            snapshot,
+            save_index,
+            reapply=lambda fresh: _apply_project_update(fresh, project_id, update_project),
+            project_id=project_id,
+        )
     except Exception as operation_error:
-        rollback_keys = _rollback_keys_preserving_conflict(ledger.as_tuple(), snapshot, operation_error)
-        if rollback_keys:
-            delete_keys(rollback_keys)
-        _restore_index(index_data, snapshot)
+        _rollback_failed_operation(
+            action="3D-Modell konnte nicht ausgetauscht werden",
+            ledger=ledger,
+            snapshot=snapshot,
+            index_data=index_data,
+            operation_error=operation_error,
+            delete_keys=delete_keys,
+        )
         raise
 
     old_prefix = f"{target_path}/"
@@ -1307,6 +1412,7 @@ def add_project_models(
     on_progress: ProgressCallback | None = None,
     bucket_name: str = BUCKET_NAME,
     timestamp: str = "",
+    cancel_requested: CancelCallback | None = None,
 ) -> ProjectOperationResult:
     """Upload new immutable GLB packages, then append their models[] entries."""
 
@@ -1366,9 +1472,12 @@ def add_project_models(
             bucket_name=bucket_name,
             on_progress=on_progress,
             ledger=ledger,
+            cancel_requested=cancel_requested,
             checksum_sha256_keys=tuple(key for _path, key in model_files),
         )
-        verify_uploaded_model_files(s3_client, model_files, bucket_name=bucket_name)
+        verify_uploaded_model_files(
+            s3_client, model_files, bucket_name=bucket_name, cancel_requested=cancel_requested
+        )
 
         def update_project(project: dict[str, Any]) -> None:
             current_models = project.get("models", [])
@@ -1390,15 +1499,23 @@ def add_project_models(
             )
             append_project_history(project, timestamp, message)
 
-        if not update_project_in_index(index_data, project_id, update_project):
-            raise RuntimeError("Projekt konnte im Index nicht gefunden werden.")
-        if not save_index(index_data):
-            raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
+        _apply_project_update(index_data, project_id, update_project)
+        _save_index_with_rebase(
+            index_data,
+            snapshot,
+            save_index,
+            reapply=lambda fresh: _apply_project_update(fresh, project_id, update_project),
+            project_id=project_id,
+        )
     except Exception as operation_error:
-        rollback_keys = _rollback_keys_preserving_conflict(ledger.as_tuple(), snapshot, operation_error)
-        if rollback_keys:
-            delete_keys(rollback_keys)
-        _restore_index(index_data, snapshot)
+        _rollback_failed_operation(
+            action="3D-Modelle konnten nicht hinzugefügt werden",
+            ledger=ledger,
+            snapshot=snapshot,
+            index_data=index_data,
+            operation_error=operation_error,
+            delete_keys=delete_keys,
+        )
         raise
 
     return ProjectOperationResult(
@@ -1455,10 +1572,14 @@ def remove_project_model(
             project["models"] = remaining
             append_project_history(project, timestamp, f"3D-Modell '{target_name}' wurde entfernt.")
 
-        if not update_project_in_index(index_data, project_id, update_project):
-            raise RuntimeError("Projekt konnte im Index nicht gefunden werden.")
-        if not save_index(index_data):
-            raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
+        _apply_project_update(index_data, project_id, update_project)
+        _save_index_with_rebase(
+            index_data,
+            snapshot,
+            save_index,
+            reapply=lambda fresh: _apply_project_update(fresh, project_id, update_project),
+            project_id=project_id,
+        )
     except Exception:
         _restore_index(index_data, snapshot)
         raise
@@ -1529,14 +1650,16 @@ def upload_new_project(
                 bucket_name=bucket_name,
                 cancel_requested=cancel_requested,
             )
-        projects = index_data.get("projects")
-        if not isinstance(projects, list):
-            projects = []
-            index_data["projects"] = projects
-        projects.insert(0, dict(prepared_upload.project_metadata))
+        new_project = dict(prepared_upload.project_metadata)
+        _insert_project(index_data, new_project)
         _emit(on_progress, ProgressEvent(kind="progress", percent=0.0, message="Projekt wird gespeichert...", phase="index"))
-        if not save_index(index_data):
-            raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
+        _save_index_with_rebase(
+            index_data,
+            snapshot,
+            save_index,
+            reapply=lambda fresh: _insert_project(fresh, new_project),
+            project_id=str(new_project.get("id", "")),
+        )
         _emit(on_progress, ProgressEvent(kind="progress", percent=1.0, message="Projekt wurde gespeichert.", phase="index"))
     except OperationCancelledError:
         if ledger.uploaded_keys:
@@ -1551,11 +1674,14 @@ def upload_new_project(
             message="Upload abgebrochen. Bereits hochgeladene Dateien wurden wieder entfernt.",
         )
     except Exception as operation_error:
-        if ledger.uploaded_keys:
-            rollback_keys = _rollback_keys_preserving_conflict(ledger.as_tuple(), snapshot, operation_error)
-            if rollback_keys:
-                delete_keys(rollback_keys)
-        _restore_index(index_data, snapshot)
+        _rollback_failed_operation(
+            action="Upload fehlgeschlagen",
+            ledger=ledger,
+            snapshot=snapshot,
+            index_data=index_data,
+            operation_error=operation_error,
+            delete_keys=delete_keys,
+        )
         raise
 
     return UploadResult(
@@ -1607,7 +1733,7 @@ def _validate_prepared_project_model_paths(prepared_upload: PreparedProjectUploa
     s3_root = _normalize_s3_path(str(prepared_upload.project_metadata.get("s3_path", "")))
     for model in models:
         if not isinstance(model, dict):
-            raise ValueError("GLB-Upload abgebrochen: Ungueltiger models[]-Eintrag.")
+            raise ValueError("GLB-Upload abgebrochen: Ungültiger models[]-Eintrag.")
         model_id = _normalize_s3_path(str(model.get("id", "")))
         s3_path = _normalize_s3_path(str(model.get("s3_path", "")))
         match = re.fullmatch(
@@ -1623,8 +1749,8 @@ def _validate_prepared_project_model_paths(prepared_upload: PreparedProjectUploa
             or _normalize_s3_path(str(model.get("viewer_path", ""))) != expected_viewer_path
         ):
             raise ValueError(
-                "GLB-Upload abgebrochen: models[] enthaelt keinen gueltigen "
-                "data_version-Pfad. Es wurden keine S3-Daten geaendert."
+                "GLB-Upload abgebrochen: models[] enthält keinen gültigen "
+                "data_version-Pfad. Es wurden keine S3-Daten geändert."
             )
 
 
@@ -1655,6 +1781,67 @@ def _rollback_keys_preserving_indexed_models(
             for prefix in protected_prefixes
         )
     )
+
+
+def strip_data_version(path: str) -> str:
+    """Return the stable project root of a ``<root>/versions/<version>`` path."""
+
+    marker = "/versions/"
+    normalized = str(path or "").strip().rstrip("/")
+    stable_root, separator, version = normalized.rpartition(marker)
+    return stable_root if separator and version and "/" not in version else normalized
+
+
+def _is_same_or_child_path(path: str, parent: str) -> bool:
+    return bool(parent) and (path == parent or path.startswith(parent + "/"))
+
+
+def project_storage_layout(project: dict[str, Any]) -> tuple[str, str, tuple[str, ...]]:
+    """Return ``(s3_path, stable_root, extra_prefixes)`` of a project's live data.
+
+    Replacements move ``s3_path`` to ``<root>/versions/<v>`` while models and
+    later added pointclouds live elsewhere under the stable root. Every
+    operation that must see all project data (delete, download, duplicate)
+    has to include the child prefixes outside ``s3_path``.
+    """
+
+    s3_path = str(project.get("s3_path", "")).strip().rstrip("/")
+    stable_root = strip_data_version(s3_path)
+    extra_prefixes: list[str] = []
+    for child_name in ("pointclouds", "models"):
+        children = project.get(child_name)
+        if not isinstance(children, list):
+            continue
+        for child in children:
+            if not isinstance(child, dict):
+                continue
+            child_path = str(child.get("s3_path", "")).strip().rstrip("/")
+            if (
+                not child_path
+                or not _is_same_or_child_path(child_path, stable_root)
+                or _is_same_or_child_path(child_path, s3_path)
+                or any(_is_same_or_child_path(child_path, prefix) for prefix in extra_prefixes)
+            ):
+                continue
+            extra_prefixes = [prefix for prefix in extra_prefixes if not _is_same_or_child_path(prefix, child_path)]
+            extra_prefixes.append(child_path)
+    return s3_path, stable_root, tuple(extra_prefixes)
+
+
+def _collect_project_storage_entries(s3_client, project: dict[str, Any], *, bucket_name: str):
+    """List the objects of ``s3_path`` plus every child prefix outside it."""
+
+    s3_path, _stable_root, extra_prefixes = project_storage_layout(project)
+    entries = list(collect_project_object_entries(s3_client, s3_path, bucket_name=bucket_name))
+    seen = {str(entry["Key"]) for entry in entries}
+    extra_entries = []
+    for prefix in extra_prefixes:
+        for entry in collect_project_object_entries(s3_client, prefix, bucket_name=bucket_name):
+            key = str(entry["Key"])
+            if key not in seen:
+                seen.add(key)
+                extra_entries.append(entry)
+    return entries, extra_entries
 
 
 def remap_project_path(value: str, old_prefix: str, new_prefix: str) -> str:
@@ -1728,11 +1915,12 @@ def build_duplicate_project_metadata(
     )
     allowed_formats = {"", "potree"} if has_pointclouds else {"", "potree", "multi"}
     if any(cloud_format not in allowed_formats for cloud_format in cloud_formats):
-        raise ValueError("Das Projekt enthaelt ein nicht unterstuetztes Punktwolkenformat.")
+        raise ValueError("Das Projekt enthält ein nicht unterstütztes Punktwolkenformat.")
 
-    old_s3_prefix = str(source_project.get("s3_path", "")).rstrip("/")
-    old_viewer_path = str(source_project.get("viewer_path", "")).rstrip("/")
-    old_viewer_root = old_viewer_path
+    # Rebase on the stable roots: a replaced project keeps its data under
+    # ``<root>/versions/<v>`` but its models under ``<root>/models``.
+    old_s3_prefix = strip_data_version(str(source_project.get("s3_path", "")))
+    old_viewer_root = strip_data_version(str(source_project.get("viewer_path", "")))
 
     duplicated = copy.deepcopy(source_project)
     duplicated.update(
@@ -1820,10 +2008,60 @@ def _rollback_keys_preserving_conflict(
                     prefix = _normalize_s3_path(str(entry.get("s3_path", "")))
                     if prefix:
                         protected_prefixes.append(prefix)
-    return tuple(
-        key for key in rollback_keys
-        if not any(_normalize_s3_path(key) == prefix or _normalize_s3_path(key).startswith(f"{prefix}/") for prefix in protected_prefixes)
-    )
+    return tuple(key for key in rollback_keys if not _key_is_referenced(key, protected_prefixes))
+
+
+def _key_is_referenced(key: str, referenced_prefixes: list[str]) -> bool:
+    """Return whether an uploaded key is live data of a referenced prefix.
+
+    A fresh ``<root>/versions/<v>/`` upload lies below the stable ``<root>`` of
+    a never-replaced project but is not part of its data; only an entry that
+    references that version prefix itself protects it.
+    """
+
+    normalized = _normalize_s3_path(key)
+    for prefix in referenced_prefixes:
+        if normalized == prefix:
+            return True
+        if normalized.startswith(f"{prefix}/") and not normalized[len(prefix) + 1 :].startswith("versions/"):
+            return True
+    return False
+
+
+def _rollback_failed_operation(
+    *,
+    action: str,
+    ledger: UploadedKeyLedger,
+    snapshot: dict[str, Any],
+    index_data: dict[str, Any],
+    operation_error: Exception,
+    delete_keys: Callable[[tuple[str, ...]], None],
+) -> None:
+    """Restore the index and remove uploaded keys without masking the error.
+
+    If the cleanup itself fails, the raised error names the original cause and
+    the S3 keys that are now orphaned instead of only the delete failure.
+    """
+
+    _restore_index(index_data, snapshot)
+    if not ledger.uploaded_keys:
+        return
+    rollback_keys: tuple[str, ...] = ()
+    try:
+        rollback_keys = _rollback_keys_preserving_conflict(ledger.as_tuple(), snapshot, operation_error)
+        if rollback_keys:
+            delete_keys(rollback_keys)
+    except Exception as cleanup_error:
+        orphaned_keys = rollback_keys or ledger.as_tuple()
+        shown = ", ".join(orphaned_keys[:20])
+        if len(orphaned_keys) > 20:
+            shown += f", ... ({len(orphaned_keys)} insgesamt)"
+        error = RuntimeError(
+            f"{action}: {operation_error}. Upload-Cleanup fehlgeschlagen ({cleanup_error}); "
+            f"verwaiste S3-Keys: {shown}"
+        )
+        error.orphaned_keys = orphaned_keys
+        raise error from operation_error
 
 
 def apply_project_rename_metadata(
@@ -1899,8 +2137,9 @@ def duplicate_project(
     delete_keys: Callable[[tuple[str, ...]], None],
     bucket_name: str = BUCKET_NAME,
     on_progress: ProgressCallback | None = None,
+    cancel_requested: CancelCallback | None = None,
 ) -> ProjectOperationResult:
-    source_s3_path = str(source_project.get("s3_path", "")).strip()
+    source_s3_path, source_root, _extra_prefixes = project_storage_layout(source_project)
     if not source_s3_path:
         raise ValueError("Quellprojekt hat keinen S3-Pfad.")
 
@@ -1908,7 +2147,8 @@ def duplicate_project(
     copied_keys: tuple[str, ...] = ()
     try:
         _emit(on_progress, ProgressEvent(kind="step", step=1, total_steps=3, message="Ermittle Projektdateien..."))
-        source_entries = collect_project_object_entries(s3_client, source_s3_path, bucket_name=bucket_name)
+        data_entries, child_entries = _collect_project_storage_entries(s3_client, source_project, bucket_name=bucket_name)
+        source_entries = data_entries + child_entries
         source_keys = [str(entry["Key"]) for entry in source_entries]
         if not source_keys:
             raise ValueError("Keine Dateien im Quellprojekt gefunden.")
@@ -1919,11 +2159,12 @@ def duplicate_project(
         copied_keys = copy_project_objects(
             s3_client,
             source_keys,
-            source_s3_path,
+            source_root,
             new_s3_prefix,
             bucket_name=bucket_name,
             on_progress=on_progress,
             source_sizes={str(entry["Key"]): int(entry.get("Size", 0) or 0) for entry in source_entries},
+            cancel_requested=cancel_requested,
         )
         _emit(on_progress, ProgressEvent(kind="step", step=3, total_steps=3, message="Speichere Projekt-Index..."))
         new_project = build_duplicate_project_metadata(
@@ -1936,13 +2177,14 @@ def duplicate_project(
             new_viewer_root=new_viewer_root,
             new_s3_prefix=new_s3_prefix,
         )
-        projects = index_data.get("projects")
-        if not isinstance(projects, list):
-            projects = []
-            index_data["projects"] = projects
-        projects.insert(0, new_project)
-        if not save_index(index_data):
-            raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
+        _insert_project(index_data, new_project)
+        _save_index_with_rebase(
+            index_data,
+            snapshot,
+            save_index,
+            reapply=lambda fresh: _insert_project(fresh, new_project),
+            project_id=new_project_id,
+        )
     except Exception as operation_error:
         copied_keys = tuple(getattr(operation_error, "copied_keys", copied_keys))
         copied_keys = _rollback_keys_preserving_conflict(copied_keys, snapshot, operation_error)
@@ -1955,7 +2197,7 @@ def duplicate_project(
         _restore_index(index_data, snapshot)
         if cleanup_error is not None:
             raise RuntimeError(
-                f"Projektduplizierung fehlgeschlagen; Cleanup unvollstaendig fuer "
+                f"Projektduplizierung fehlgeschlagen; Cleanup unvollständig für "
                 f"{len(copied_keys)} kopierte Objekte: {cleanup_error}"
             ) from operation_error
         raise
@@ -1979,15 +2221,17 @@ def delete_project(
     save_deleted: Callable[[dict[str, Any]], bool],
     bucket_name: str = BUCKET_NAME,
 ) -> ProjectOperationResult:
-    s3_path = str(project_info.get("s3_path", "")).strip()
+    s3_path, storage_root, _extra_prefixes = project_storage_layout(project_info)
     project_id = str(project_info.get("id", "")).strip()
     if not s3_path:
         return ProjectOperationResult(status="failed", project_id=project_id, message="S3-Pfad nicht gefunden.")
-    if _storage_path_is_referenced(index_data, project_id, s3_path):
+    # The stable root also holds models and pointclouds stored next to a
+    # versioned ``s3_path`` as well as leftovers of interrupted replacements.
+    if _storage_path_is_referenced(index_data, project_id, storage_root):
         return ProjectOperationResult(
             status="failed",
             project_id=project_id,
-            message="Projekt wurde nicht geloescht; sein S3-Pfad wird von einem anderen Projekt verwendet.",
+            message="Projekt wurde nicht gelöscht; sein S3-Pfad wird von einem anderen Projekt verwendet.",
         )
 
     original_index = copy.deepcopy(index_data)
@@ -2003,7 +2247,7 @@ def delete_project(
             status="failed",
             project_id=project_id,
             warnings=(str(error),),
-            message="Projekt wurde nicht geloescht; das Loeschjournal konnte nicht gespeichert werden.",
+            message="Projekt wurde nicht gelöscht; das Löschjournal konnte nicht gespeichert werden.",
         )
 
     removed = remove_project_from_index(index_data, project_id)
@@ -2025,11 +2269,11 @@ def delete_project(
                 status="partial",
                 project_id=project_id,
                 warnings=(str(error),),
-                message="Loeschung vorgemerkt; Projektindex unveraendert und Projektdaten erhalten.",
+                message="Löschung vorgemerkt; Projektindex unverändert und Projektdaten erhalten.",
             )
 
     try:
-        object_keys = tuple(collect_project_objects(s3_client, s3_path, bucket_name=bucket_name))
+        object_keys = tuple(collect_project_objects(s3_client, storage_root, bucket_name=bucket_name))
         deleted_count = delete_s3_objects(s3_client, object_keys, bucket_name=bucket_name) if object_keys else 0
     except S3DeleteError as error:
         return ProjectOperationResult(
@@ -2037,14 +2281,14 @@ def delete_project(
             project_id=project_id,
             deleted_keys=error.deleted_keys,
             warnings=(str(error),),
-            message="Projekt ist deaktiviert; einige S3-Daten benoetigen einen erneuten Loeschversuch.",
+            message="Projekt ist deaktiviert; einige S3-Daten benötigen einen erneuten Löschversuch.",
         )
     except Exception as error:
         return ProjectOperationResult(
             status="partial",
             project_id=project_id,
             warnings=(str(error),),
-            message="Projekt ist deaktiviert; S3-Daten konnten nicht geloescht werden.",
+            message="Projekt ist deaktiviert; S3-Daten konnten nicht gelöscht werden.",
         )
 
     deleted_entry["cleanup_status"] = "complete"
@@ -2058,7 +2302,7 @@ def delete_project(
             project_id=project_id,
             deleted_keys=object_keys,
             warnings=(str(error),),
-            message="Projektdaten wurden geloescht; bitte die Projektloeschung erneut ausfuehren, um den Status abzuschliessen.",
+            message="Projektdaten wurden gelöscht; bitte die Projektlöschung erneut ausführen, um den Status abzuschließen.",
         )
 
     tombstone_snapshot = copy.deepcopy(index_data)
@@ -2073,7 +2317,7 @@ def delete_project(
             project_id=project_id,
             deleted_keys=object_keys,
             warnings=(str(error),),
-            message="Projektdaten wurden geloescht; der sichtbare Cleanup-Eintrag kann erneut entfernt werden.",
+            message="Projektdaten wurden gelöscht; der sichtbare Cleanup-Eintrag kann erneut entfernt werden.",
         )
 
     return ProjectOperationResult(
@@ -2108,14 +2352,14 @@ def _storage_path_is_referenced(index_data: dict[str, Any], project_id: str, tar
 def build_download_folder_name(project_info: dict[str, Any], sanitize_func) -> str:
     project_id = str(project_info.get("id", "")).strip()
     if not project_id or not re.fullmatch(r"[A-Za-z0-9_-]+", project_id):
-        raise ValueError("Projekt-ID enthaelt ungueltige Pfadbestandteile.")
+        raise ValueError("Projekt-ID enthält ungültige Pfadbestandteile.")
     folder_parts = [
         sanitize_func(project_info.get("kunde", "")),
         sanitize_func(project_info.get("projekt", "")),
         project_id,
     ]
     if any(not part or part in {".", ".."} or ":" in part or "/" in part or "\\" in part for part in folder_parts):
-        raise ValueError("Projektname enthaelt ungueltige Pfadbestandteile.")
+        raise ValueError("Projektname enthält ungültige Pfadbestandteile.")
     return "_".join(part for part in folder_parts if part) or "punktwolke"
 
 
@@ -2131,21 +2375,24 @@ def download_project(
 ) -> tuple[str, tuple[str, ...]]:
     import os
 
-    source_s3_path = str(project_info.get("s3_path", "")).strip()
+    source_s3_path, source_root, _extra_prefixes = project_storage_layout(project_info)
     if not source_s3_path:
         raise ValueError("Projekt hat keinen S3-Pfad.")
     if not target_dir:
-        raise ValueError("Kein Zielordner ausgewaehlt.")
+        raise ValueError("Kein Zielordner ausgewählt.")
 
     target_root = os.path.realpath(os.path.abspath(target_dir))
     download_dir = os.path.realpath(os.path.join(target_root, build_download_folder_name(project_info, sanitize_func)))
     if os.path.commonpath([target_root, download_dir]) != target_root:
-        raise ValueError("Projekt-Downloadziel liegt ausserhalb des Zielordners.")
+        raise ValueError("Projekt-Downloadziel liegt außerhalb des Zielordners.")
     os.makedirs(download_dir, exist_ok=True)
+    data_entries, child_entries = _collect_project_storage_entries(s3_client, project_info, bucket_name=bucket_name)
+    # Pointcloud data stays at the top level as before; models and clouds
+    # outside a versioned ``s3_path`` keep their path relative to the root.
     object_entries = [
-        entry
-        for entry in collect_project_object_entries(s3_client, source_s3_path, bucket_name=bucket_name)
-        if not str(entry["Key"]).endswith("/")
+        entry for entry in data_entries if not str(entry["Key"]).endswith("/")
+    ] + [
+        {**entry, "SourcePrefix": source_root} for entry in child_entries if not str(entry["Key"]).endswith("/")
     ]
     if not object_entries:
         raise ValueError("Keine Dateien im Projekt gefunden.")

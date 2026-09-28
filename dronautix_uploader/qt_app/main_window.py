@@ -46,6 +46,7 @@ from .project_management_actions import (
 )
 from dronautix_uploader.core.crs_detection import detect_pointcloud_crs
 
+from .error_messages import describe_error, technical_details
 from .service_bridge import QtServiceBridge
 from .task_worker import create_task_worker
 
@@ -196,6 +197,9 @@ def create_main_window(
     class _CrsRepairEmitter(QtCore.QObject):
         requested = QtCore.Signal(object)
 
+    class _UpdateProgressEmitter(QtCore.QObject):
+        progressed = QtCore.Signal(object, object)
+
     class MainWindow(QtWidgets.QMainWindow):
         def __init__(self):
             super().__init__()
@@ -232,8 +236,12 @@ def create_main_window(
             self._crs_repair_emitter.requested.connect(self._show_crs_repair_confirmation)
             self._closing_for_update = False
             self._pending_update_result = None
+            self._pending_update_check_silent = None
             self._update_install_started = False
-            cleanup_stale_upload_temp_dirs()
+            # rmtree of large stale conversion folders must not delay the first paint.
+            threading.Thread(
+                target=cleanup_stale_upload_temp_dirs, name="startup-temp-cleanup", daemon=True
+            ).start()
             root = QtWidgets.QWidget()
             root.setObjectName("AppRoot")
             layout = QtWidgets.QHBoxLayout(root)
@@ -246,7 +254,15 @@ def create_main_window(
             self.stack.setObjectName("ContentStack")
             layout.addWidget(self.stack, 1)
             self.setCentralWidget(root)
-            self.statusBar().showMessage(self._runtime["status"])
+            # Permanent connection state on the right; transient messages (update
+            # checks, action results) use the left part and no longer hide it.
+            self._connection_state = "checking" if self._runtime.get("project_provider") is not None else "none"
+            self._connection_detail = ""
+            self._connection_label = QtWidgets.QLabel()
+            self._connection_label.setObjectName("ConnectionStatus")
+            self.statusBar().addPermanentWidget(self._connection_label)
+            self._show_connection_status()
+            self.statusBar().showMessage(self._runtime["status"], 8000)
 
             self._upload_cancel_event = None
             self._upload_page = self._add_page(
@@ -271,6 +287,9 @@ def create_main_window(
                     on_project_action=on_project_action or self._handle_project_action,
                     on_load_state_changed=self._resume_pending_update_if_idle,
                     can_start_load=lambda: not self._update_install_started,
+                    empty_state_provider=self._projects_empty_state_reason,
+                    on_open_settings=lambda: self._select_page("Einstellungen"),
+                    on_load_finished=self._handle_project_load_finished,
                 ),
             )
             self._activity_page = None
@@ -678,6 +697,7 @@ def create_main_window(
             progress_callback = None
             progress_dialog = None
             replace_temp_dir = None
+            action_cancel_event = threading.Event()
             try:
                 if action_id == ACTION_RENAME:
                     payload = prompt_rename_project(QtWidgets, self, project)
@@ -695,6 +715,7 @@ def create_main_window(
                     progress_dialog = self._create_action_progress_dialog(
                         "Projekt duplizieren",
                         f"„{project.project}“ wird dupliziert...",
+                        cancel_event=action_cancel_event,
                     )
                     progress_callback = self._make_progress_callback(
                         ACTIVITY_ACTION_UPDATE,
@@ -708,6 +729,7 @@ def create_main_window(
                         project,
                         payload,
                         on_progress=progress_callback,
+                        cancel_requested=action_cancel_event.is_set,
                     )
                 elif action_id == ACTION_DELETE:
                     if project is None or not confirm_delete_project(QtWidgets, self, project):
@@ -782,6 +804,7 @@ def create_main_window(
                     progress_dialog = self._create_action_progress_dialog(
                         "Punktwolken austauschen",
                         f"Punktwolken in „{project.project}“ werden ausgetauscht...",
+                        cancel_event=action_cancel_event,
                     )
                     progress_callback = self._make_progress_callback(
                         ACTIVITY_ACTION_REPLACE,
@@ -795,6 +818,7 @@ def create_main_window(
                         project,
                         payload,
                         on_progress=progress_callback,
+                        cancel_requested=action_cancel_event.is_set,
                     )
                 elif action_id == ACTION_ADD_POINTCLOUDS:
                     if project is None:
@@ -815,6 +839,7 @@ def create_main_window(
                     progress_dialog = self._create_action_progress_dialog(
                         "Punktwolken hinzufügen",
                         f"Punktwolken werden zu „{project.project}“ hinzugefügt...",
+                        cancel_event=action_cancel_event,
                     )
                     progress_callback = self._make_progress_callback(
                         ACTIVITY_ACTION_UPLOAD,
@@ -828,6 +853,7 @@ def create_main_window(
                         project,
                         payload,
                         on_progress=progress_callback,
+                        cancel_requested=action_cancel_event.is_set,
                     )
                 elif action_id == ACTION_ADD_MODELS:
                     if project is None:
@@ -839,6 +865,7 @@ def create_main_window(
                     progress_dialog = self._create_action_progress_dialog(
                         "3D-Modelle hinzufügen",
                         f"3D-Modelle werden zu „{project.project}“ hinzugefügt...",
+                        cancel_event=action_cancel_event,
                     )
                     progress_callback = self._make_progress_callback(
                         ACTIVITY_ACTION_UPLOAD,
@@ -853,6 +880,7 @@ def create_main_window(
                         project,
                         payload,
                         on_progress=progress_callback,
+                        cancel_requested=action_cancel_event.is_set,
                         confirm_spatial_warning=self._confirm_spatial_warning,
                         confirm_crs_repair=self._confirm_crs_repair,
                     )
@@ -892,6 +920,7 @@ def create_main_window(
                     progress_dialog = self._create_action_progress_dialog(
                         "Punktwolke austauschen",
                         f"„{pointcloud.name}“ wird ausgetauscht...",
+                        cancel_event=action_cancel_event,
                     )
                     progress_callback = self._make_progress_callback(
                         ACTIVITY_ACTION_REPLACE,
@@ -907,6 +936,7 @@ def create_main_window(
                         pointcloud,
                         payload,
                         on_progress=progress_callback,
+                        cancel_requested=action_cancel_event.is_set,
                     )
                 elif action_id == ACTION_REPLACE_SINGLE_MODEL:
                     if project is None or pointcloud is None:
@@ -918,6 +948,7 @@ def create_main_window(
                     progress_dialog = self._create_action_progress_dialog(
                         "GLB austauschen",
                         f"„{pointcloud.name}“ wird vorbereitet und ausgetauscht...",
+                        cancel_event=action_cancel_event,
                     )
                     progress_callback = self._make_progress_callback(
                         ACTIVITY_ACTION_REPLACE,
@@ -933,6 +964,7 @@ def create_main_window(
                         pointcloud,
                         payload,
                         on_progress=progress_callback,
+                        cancel_requested=action_cancel_event.is_set,
                         confirm_spatial_warning=self._confirm_spatial_warning,
                         confirm_crs_repair=self._confirm_crs_repair,
                     )
@@ -962,11 +994,23 @@ def create_main_window(
                     self._placeholder_action(action_id, project, pointcloud)
                     return
             except Exception as error:
-                if progress_dialog is not None:
-                    progress_dialog.close()
+                self._close_action_progress_dialog(progress_dialog)
                 if replace_temp_dir is not None:
                     shutil.rmtree(replace_temp_dir, ignore_errors=True)
                 self.statusBar().showMessage(str(error))
+                return
+
+            # The input dialogs above are modal; an update or another task may
+            # have started meanwhile (e.g. the delayed startup update check).
+            if self._update_install_started or self._has_active_background_tasks():
+                self._close_action_progress_dialog(progress_dialog)
+                if progress_callback:
+                    self._release_progress_callback(progress_callback)
+                if replace_temp_dir is not None:
+                    shutil.rmtree(replace_temp_dir, ignore_errors=True)
+                self.statusBar().showMessage(
+                    "Inzwischen läuft eine andere Aktion; bitte danach erneut starten."
+                )
                 return
 
             action_label = action_by_id(action_id).label
@@ -987,14 +1031,7 @@ def create_main_window(
             self.statusBar().showMessage(f"{action_label} gestartet")
 
             def finish_project_action():
-                if progress_dialog is not None:
-                    # close() loest sonst das canceled-Signal aus und meldet
-                    # nach erfolgreichem Abschluss faelschlich einen Abbruch.
-                    try:
-                        progress_dialog.canceled.disconnect()
-                    except (RuntimeError, TypeError):
-                        pass
-                    progress_dialog.close()
+                self._close_action_progress_dialog(progress_dialog)
                 if progress_callback:
                     self._release_progress_callback(progress_callback)
                 if replace_temp_dir is not None:
@@ -1015,12 +1052,48 @@ def create_main_window(
                 on_finished=finish_project_action,
             )
 
-        def _create_action_progress_dialog(self, title: str, label: str):
-            """Nicht abbrechbarer Beschaeftigt-Dialog fuer laufende Projektaktionen."""
+        def _close_action_progress_dialog(self, dialog):
+            """Close a project action dialog for good.
 
-            dialog = QtWidgets.QProgressDialog(label, "", 0, 0, self)
+            ``close()`` emits ``canceled``; without disconnecting first, a
+            cancellable dialog would report a cancel and show itself again.
+            """
+
+            if dialog is None:
+                return
+            dialog.setProperty("action_finished", True)
+            try:
+                dialog.canceled.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            dialog.close()
+
+        def _create_action_progress_dialog(self, title: str, label: str, cancel_event=None):
+            """Beschaeftigt-Dialog für Projektaktionen; mit ``cancel_event`` abbrechbar."""
+
+            dialog = QtWidgets.QProgressDialog(label, "Abbrechen" if cancel_event is not None else "", 0, 0, self)
             dialog.setWindowTitle(title)
-            dialog.setCancelButton(None)
+            if cancel_event is None:
+                dialog.setCancelButton(None)
+            else:
+                def request_cancel():
+                    cancel_event.set()
+                    self.statusBar().showMessage(f"{title} wird abgebrochen...")
+
+                    def show_rollback_state():
+                        # QProgressDialog versteckt sich beim Abbrechen; bis der
+                        # Rollback fertig ist, bleibt der Dialog ohne Button sichtbar.
+                        # Ist die Aufgabe inzwischen beendet, darf er nie wieder
+                        # erscheinen (sonst blockiert er das Fenster dauerhaft).
+                        if dialog.property("action_finished"):
+                            return
+                        dialog.setCancelButton(None)
+                        dialog.setLabelText("Wird abgebrochen - bereits übertragene Daten werden entfernt...")
+                        dialog.show()
+
+                    QtCore.QTimer.singleShot(0, show_rollback_state)
+
+                dialog.canceled.connect(request_cancel)
             dialog.setWindowModality(QtCore.Qt.WindowModal)
             dialog.setMinimumDuration(0)
             dialog.setMinimumWidth(420)
@@ -1080,11 +1153,18 @@ def create_main_window(
             return bool(self._active_tasks or getattr(page, "_active_project_loads", ()))
 
         def _resume_pending_update_if_idle(self):
-            pending_update = self._pending_update_result
-            if pending_update is None or self._has_active_background_tasks() or self._update_install_started:
+            if self._has_active_background_tasks() or self._update_install_started:
                 return
-            self._pending_update_result = None
-            QtCore.QTimer.singleShot(0, lambda result=pending_update: self._offer_update_install(result))
+            pending_update = self._pending_update_result
+            if pending_update is not None:
+                self._pending_update_result = None
+                self._pending_update_check_silent = None
+                QtCore.QTimer.singleShot(0, lambda result=pending_update: self._offer_update_install(result))
+                return
+            pending_check_silent = self._pending_update_check_silent
+            if pending_check_silent is not None:
+                self._pending_update_check_silent = None
+                QtCore.QTimer.singleShot(0, lambda silent=pending_check_silent: self._run_update_check(silent=silent))
 
         def _handle_project_link_action(self, action_id: str, project: ProjectPreview | None):
             if project is None:
@@ -1168,10 +1248,19 @@ def create_main_window(
                     return
                 self.statusBar().showMessage("S3-Verbindungstest gestartet...")
 
+                has_unsaved = getattr(self._settings_page, "has_unsaved_changes", None)
+                tests_saved_settings = not (callable(has_unsaved) and has_unsaved())
+
                 def show_test_result(summary):
                     self._show_project_operation_summary(
                         summary, action=ACTIVITY_ACTION_UPDATE, actor="Einstellungen"
                     )
+                    # Only a test of the saved settings describes the running connection.
+                    if tests_saved_settings and self._runtime.get("project_provider") is not None:
+                        ok = summary.status == "success"
+                        self._connection_state = "ok" if ok else "failed"
+                        self._connection_detail = "" if ok else summary.message
+                        self._show_connection_status()
                     self._notify_operation_summary(summary, "Verbindung testen")
 
                 self._start_background_task(
@@ -1188,6 +1277,25 @@ def create_main_window(
 
             if action_id == "check_update":
                 self._run_update_check(silent=False)
+                return
+
+            if action_id == "clear_credentials":
+                answer = QtWidgets.QMessageBox.question(
+                    self,
+                    "Zugangsdaten entfernen",
+                    "Die gespeicherten AWS-Zugangsdaten werden von diesem Rechner entfernt.\n"
+                    "Uploads und Projektverwaltung sind danach erst nach erneuter Eingabe möglich.\n\n"
+                    "Fortfahren?",
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                    QtWidgets.QMessageBox.No,
+                )
+                if answer != QtWidgets.QMessageBox.Yes:
+                    return
+                summary = settings_controller.clear_credentials()
+                self._show_project_operation_summary(summary, action=ACTIVITY_ACTION_UPDATE, actor="Einstellungen")
+                self._notify_operation_summary(summary, "Zugangsdaten entfernen")
+                self._reload_runtime_services()
+                self._refresh_settings_page()
                 return
 
             self.statusBar().showMessage(f"Unbekannte Einstellungsaktion: {action_id}")
@@ -1210,7 +1318,12 @@ def create_main_window(
                 self.statusBar().showMessage("Update-Installation läuft; bitte warten.")
                 return
             if self._has_active_background_tasks():
-                self.statusBar().showMessage("Update-Prüfung wird nach dem laufenden Vorgang erneut angeboten.")
+                # Merken statt verwerfen: der Start-Check laeuft sonst nie, wenn die
+                # Projektliste beim Start laenger als die Verzoegerung laedt.
+                pending = self._pending_update_check_silent
+                self._pending_update_check_silent = silent if pending is None else (pending and silent)
+                if not silent:
+                    self.statusBar().showMessage("Update-Prüfung wird nach dem laufenden Vorgang gestartet.")
                 return
             if not silent:
                 self.statusBar().showMessage("Update-Prüfung läuft...")
@@ -1263,16 +1376,57 @@ def create_main_window(
             self._update_install_started = True
             self.statusBar().showMessage(f"Update {result.remote_version} wird heruntergeladen...")
 
+            cancel_event = threading.Event()
+            dialog = QtWidgets.QProgressDialog(
+                f"Update {result.remote_version} wird heruntergeladen...", "Abbrechen", 0, 0, self
+            )
+            dialog.setWindowTitle("Update")
+            dialog.setWindowModality(QtCore.Qt.WindowModal)
+            dialog.setMinimumDuration(0)
+            dialog.setMinimumWidth(420)
+            dialog.setAutoClose(False)
+            dialog.setAutoReset(False)
+            dialog.canceled.connect(cancel_event.set)
+            dialog.show()
+            progress_emitter = _UpdateProgressEmitter()
+
+            def show_download_progress(downloaded, total):
+                if total:
+                    dialog.setRange(0, 100)
+                    dialog.setValue(min(int(downloaded * 100 / total), 100))
+                    dialog.setLabelText(
+                        f"Update {result.remote_version} wird heruntergeladen...\n"
+                        f"{downloaded / 1048576:.1f} MB von {total / 1048576:.1f} MB"
+                    )
+                else:
+                    dialog.setLabelText(
+                        f"Update {result.remote_version} wird heruntergeladen...\n{downloaded / 1048576:.1f} MB"
+                    )
+
+            progress_emitter.progressed.connect(show_download_progress)
+
+            def close_dialog():
+                try:
+                    dialog.canceled.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
+                dialog.close()
+
             def handle_install_result(summary):
+                close_dialog()
                 self._show_project_operation_summary(summary, action=ACTIVITY_ACTION_UPDATE, actor="Updater")
                 if summary.status == "success":
                     self._closing_for_update = True
                     QtCore.QTimer.singleShot(200, self.close)
+                elif summary.status == "cancelled":
+                    self._update_install_started = False
+                    self.statusBar().showMessage("Update-Download abgebrochen.")
                 else:
                     self._update_install_started = False
                     QtWidgets.QMessageBox.critical(self, "Update", summary.message)
 
             def handle_install_error(error):
+                close_dialog()
                 self._update_install_started = False
                 self._notify_task_error(
                     error,
@@ -1282,8 +1436,11 @@ def create_main_window(
                 )
 
             manifest = dict(result.manifest)
+            self._update_progress_emitter = progress_emitter
             self._start_background_task(
-                lambda: update_controller.download_and_install(manifest),
+                lambda: update_controller.download_and_install(
+                    manifest, on_progress=progress_emitter.progressed.emit, cancel_requested=cancel_event.is_set
+                ),
                 on_result=handle_install_result,
                 on_error=handle_install_error,
             )
@@ -1332,7 +1489,7 @@ def create_main_window(
                 target_path=target_path,
             )
             self._refresh_activity_page()
-            self.statusBar().showMessage(str(error))
+            self.statusBar().showMessage(describe_error(error))
 
         def _make_progress_callback(
             self,
@@ -1387,7 +1544,10 @@ def create_main_window(
 
         def _notify_task_error(self, error, title: str, **record_kwargs):
             self._show_task_error(error, **record_kwargs)
-            QtWidgets.QMessageBox.critical(self, title, str(error))
+            message = describe_error(error)
+            details = technical_details(error)
+            # The original boto/urllib text stays visible for support.
+            QtWidgets.QMessageBox.critical(self, title, f"{message}\n\nDetails: {details}" if details else message)
 
         def _start_background_task(
             self,
@@ -1442,9 +1602,20 @@ def create_main_window(
                 refresh()
 
         def _refresh_settings_page(self):
-            refresh = getattr(self._settings_page, "reload_settings", None)
+            # Called after saving/clearing: the stored state is authoritative.
+            refresh = getattr(self._settings_page, "render_saved_settings", None) or getattr(
+                self._settings_page, "reload_settings", None
+            )
             if callable(refresh):
                 refresh()
+
+        def _projects_empty_state_reason(self) -> str:
+            if self._runtime.get("project_provider") is not None:
+                return ""
+            status = str(self._runtime.get("status", "") or "").strip()
+            return (
+                f"{status}. " if status and not status.endswith(".") else (f"{status} " if status else "")
+            ) + "Ohne S3-Verbindung können keine Projekte angezeigt werden."
 
         def _runtime_project_rows(self):
             provider = self._runtime.get("project_provider")
@@ -1454,7 +1625,21 @@ def create_main_window(
         def _reload_runtime_services(self):
             if runtime_reloader is None:
                 return
-            bundle = runtime_reloader()
+            try:
+                bundle = runtime_reloader()
+            except Exception as error:
+                self._runtime.update(
+                    {
+                        "project_provider": None,
+                        "project_controller": None,
+                        "upload_controller": None,
+                        "status": f"Nicht verbunden: {error}",
+                    }
+                )
+                self.statusBar().showMessage(str(self._runtime["status"]))
+                self._show_connection_status()
+                self._refresh_projects_page()
+                return
             self._runtime.update(
                 {
                     "project_provider": getattr(bundle, "project_provider", None),
@@ -1464,7 +1649,39 @@ def create_main_window(
                 }
             )
             self.statusBar().showMessage(str(self._runtime["status"]))
+            self._connection_state = "checking" if self._runtime.get("project_provider") is not None else "none"
+            self._connection_detail = ""
+            self._show_connection_status()
             self._refresh_projects_page()
+
+        def _handle_project_load_finished(self, ok: bool, reason: str):
+            # Only a real S3 round trip (loading the project index) proves the
+            # connection; having credentials and a client object does not.
+            if self._runtime.get("project_provider") is None:
+                self._connection_state, self._connection_detail = "none", ""
+            else:
+                self._connection_state = "ok" if ok else "failed"
+                self._connection_detail = "" if ok else reason
+            self._show_connection_status()
+
+        def _show_connection_status(self):
+            if self._runtime.get("project_provider") is None:
+                self._connection_state = "none"
+            texts = {
+                "ok": "● S3 verbunden",
+                "checking": "● Verbindung wird geprüft...",
+                "failed": "● S3-Verbindung fehlgeschlagen",
+                "none": "● Nicht verbunden",
+            }
+            state = self._connection_state
+            self._connection_label.setText(texts.get(state, texts["none"]))
+            self._connection_label.setProperty("connection", state)
+            self._connection_label.setToolTip(
+                self._connection_detail if state == "failed" and self._connection_detail
+                else str(self._runtime.get("status", "") or "")
+            )
+            self._connection_label.style().unpolish(self._connection_label)
+            self._connection_label.style().polish(self._connection_label)
 
     return MainWindow()
 

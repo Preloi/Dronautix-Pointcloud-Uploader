@@ -5,7 +5,11 @@ from __future__ import annotations
 import os
 import sys
 
-from dronautix_uploader.core.config_service import get_config_locations, migrate_legacy_config_if_missing
+from dronautix_uploader.core.config_service import (
+    get_config_locations,
+    migrate_legacy_config_if_missing,
+    migrate_plaintext_secret_to_keyring,
+)
 
 from .app_identity import QtAppIdentity, resolve_app_identity
 
@@ -23,7 +27,24 @@ def prepare_runtime_config(
 
     resolved = resolve_app_identity(identity)
     locations = get_config_locations(preview=resolved.uses_preview_config, environ=environ)
-    return migrate_legacy_config_if_missing(locations)
+    migrated = migrate_legacy_config_if_missing(locations)
+    _move_plaintext_secret_to_keyring(locations)
+    return migrated
+
+
+def _move_plaintext_secret_to_keyring(locations) -> None:
+    try:
+        from .settings_controller import _load_keyring_password, _write_keyring_password
+
+        migrate_plaintext_secret_to_keyring(
+            locations.current_config,
+            locations.keyring_service,
+            _write_keyring_password,
+            _load_keyring_password,
+        )
+    except Exception:
+        # Credentials stay in config.json; the next "Speichern" moves them.
+        pass
 
 
 def prepare_preview_config(*, preview: bool = True, environ: dict[str, str] | None = None) -> bool:
@@ -102,10 +123,15 @@ def run(
             return 2
         return run_startup_self_test(raw_argv[2])
 
-    from .single_instance import SingleInstanceGuard, show_single_instance_message
+    from .single_instance import (
+        SingleInstanceGuard,
+        activate_existing_window,
+        mutex_name_for_mode,
+        show_single_instance_message,
+    )
 
     identity = resolve_app_identity(mode) if mode is not None else resolve_runtime_identity(raw_argv, environ=environ)
-    instance_guard = SingleInstanceGuard()
+    instance_guard = SingleInstanceGuard(mutex_name=mutex_name_for_mode(identity.uses_preview_config))
     try:
         acquired = instance_guard.acquire()
     except OSError as error:
@@ -115,6 +141,8 @@ def run(
         )
         return 1
     if not acquired:
+        if activate_existing_window(identity.window_title):
+            return 0
         show_single_instance_message(
             identity.window_title,
             "Der Dronautix Pointcloud Uploader läuft bereits.\n"
@@ -147,6 +175,7 @@ def _run_qt_application(raw_argv: list[str], identity: QtAppIdentity) -> int:
     from .settings_controller import SettingsController
     from .update_controller import UpdateController
     from .runtime_services import (
+        RuntimeControllerBundle,
         create_runtime_controller_bundle,
         load_project_management_runtime_config,
     )
@@ -167,8 +196,12 @@ def _run_qt_application(raw_argv: list[str], identity: QtAppIdentity) -> int:
     update_controller = UpdateController(settings_controller=settings_controller)
 
     def load_runtime_bundle():
-        runtime_config = load_project_management_runtime_config(preview=identity.uses_preview_config)
-        return create_runtime_controller_bundle(runtime_config)
+        try:
+            runtime_config = load_project_management_runtime_config(preview=identity.uses_preview_config)
+            return create_runtime_controller_bundle(runtime_config)
+        except Exception as exc:
+            # Eine fehlerhafte Konfiguration muss in den Einstellungen korrigierbar bleiben.
+            return RuntimeControllerBundle(status=f"Nicht verbunden: {exc}")
 
     runtime_bundle = load_runtime_bundle()
 

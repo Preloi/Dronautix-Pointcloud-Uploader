@@ -111,13 +111,13 @@ def converter_status(bundle_available: bool) -> SettingsStatusItem:
 
 
 def output_folder_status(path: str, writable: bool) -> SettingsStatusItem:
-    """Status des lokalen Ausgabeordners für 'Nur konvertieren'."""
+    """Status des lokalen Ausgabeordners für „Nur lokal konvertieren“."""
 
     if not path.strip():
         return SettingsStatusItem(
             "Output-Ordner",
             "Nicht gesetzt",
-            "Für 'Nur konvertieren' wird ein lokaler Ausgabeordner benötigt.",
+            "Für „Nur lokal konvertieren“ wird ein lokaler Ausgabeordner benötigt.",
             STATUS_WARNING,
             "Ordner wählen",
         )

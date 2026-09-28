@@ -203,12 +203,12 @@ def _target_pointcloud_s3_path(
         ]
         if len(cloud_paths) == 1:
             return cloud_paths[0]
-        raise ValueError("Eine konkrete Ziel-Punktwolke ist fuer Multi-Cloud-Replacement erforderlich.")
+        raise ValueError("Eine konkrete Ziel-Punktwolke ist für Multi-Cloud-Replacement erforderlich.")
 
     project_path = str(project.get("s3_path", "") or "").strip()
     if project_path:
         return project_path
-    raise ValueError("Projekt hat keinen S3-Pfad fuer den Punktwolkenaustausch.")
+    raise ValueError("Projekt hat keinen S3-Pfad für den Punktwolkenaustausch.")
 
 
 def _crs_info_by_source_path(

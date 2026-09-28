@@ -195,7 +195,7 @@ def test_classify_pointcloud_source_accepts_potree2_and_rejects_potree1(tmp_path
     assert classify_pointcloud_source(str(metadata_dir)) == "potree"
     with pytest.raises(ValueError, match=r"Potree 1.*PotreeConverter 2\.x.*metadata\.json"):
         classify_pointcloud_source(str(cloud_js_dir))
-    with pytest.raises(ValueError, match="COPC-Dateien werden nicht unterstuetzt"):
+    with pytest.raises(ValueError, match="COPC-Dateien werden nicht unterstützt"):
         classify_pointcloud_source(str(copc))
     assert classify_pointcloud_source(str(raw)) == "raw"
 
@@ -243,5 +243,5 @@ def test_prepare_pointcloud_sources_rejects_copc_before_conversion(tmp_path):
     source = tmp_path / "cloud.copc.laz"
     source.write_bytes(b"copc")
 
-    with pytest.raises(ValueError, match="COPC-Dateien werden nicht unterstuetzt"):
+    with pytest.raises(ValueError, match="COPC-Dateien werden nicht unterstützt"):
         prepare_pointcloud_sources(PointcloudPreparationRequest(sources=(str(source),)))

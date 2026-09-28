@@ -619,7 +619,7 @@ def test_add_from_sources_rejects_legacy_copc_project_before_conversion(tmp_path
         }
     )
 
-    with pytest.raises(ValueError, match="kein unterstuetztes Punktwolkenformat"):
+    with pytest.raises(ValueError, match="kein unterstütztes Punktwolkenformat"):
         make_service(repository).add_project_pointclouds_from_sources(
             "project",
             (str(source),),

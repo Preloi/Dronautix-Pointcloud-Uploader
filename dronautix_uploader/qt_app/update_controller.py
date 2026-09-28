@@ -1,4 +1,4 @@
-"""UI-freier Update-Controller: Manifest pruefen, Installer laden und starten."""
+"""UI-freier Update-Controller: Manifest prüfen, Installer laden und starten."""
 
 from __future__ import annotations
 
@@ -18,9 +18,11 @@ from dronautix_uploader.core.update_service import (
     load_update_manifest,
     validate_installer_sha256,
     validate_update_download_info,
+    verify_installer_hash,
 )
 
 from .dashboard_settings_model import UPDATE_CHANNEL_MANUAL, UPDATE_CHANNEL_STABLE
+from .error_messages import describe_error
 from .project_management_actions import FAILED_STATUS, ProjectOperationSummary, SUCCESS_STATUS
 
 
@@ -31,7 +33,7 @@ InstallerLauncher = Callable[[str], None]
 
 @dataclass(frozen=True)
 class UpdateCheckResult:
-    """Ergebnis einer Update-Pruefung ohne UI-Seiteneffekte."""
+    """Ergebnis einer Update-Prüfung ohne UI-Seiteneffekte."""
 
     status: str
     message: str
@@ -60,7 +62,7 @@ def _launch_installer(installer_path: str) -> None:
 
 
 class UpdateController:
-    """Prueft das Release-Manifest und installiert Updates nach Bestaetigung."""
+    """Prüft das Release-Manifest und installiert Updates nach Bestaetigung."""
 
     def __init__(
         self,
@@ -83,7 +85,7 @@ class UpdateController:
 
     @property
     def checks_on_startup(self) -> bool:
-        """Beim Start wird nur im Stable-Kanal automatisch geprueft."""
+        """Beim Start wird nur im Stable-Kanal automatisch geprüft."""
 
         return self._selected_channel() != UPDATE_CHANNEL_MANUAL
 
@@ -93,20 +95,44 @@ class UpdateController:
         except Exception as exc:
             return UpdateCheckResult(
                 status=FAILED_STATUS,
-                message=f"Update-Manifest konnte nicht geladen werden: {exc}",
+                message=f"Update-Manifest konnte nicht geladen werden: {describe_error(exc)}",
             )
         return evaluate_update_manifest(manifest, current_version=self.current_version)
 
-    def download_and_install(self, manifest: dict[str, object]) -> ProjectOperationSummary:
-        """Laedt den Installer, prueft den SHA-256 und startet die Installation."""
+    def download_and_install(
+        self,
+        manifest: dict[str, object],
+        on_progress=None,
+        cancel_requested=None,
+    ) -> ProjectOperationSummary:
+        """Laedt den Installer, prüft den SHA-256 und startet die Installation."""
 
-        result = self.installer_downloader(manifest, self.download_dir)
+        extra = {}
+        if on_progress is not None:
+            extra["on_progress"] = on_progress
+        if cancel_requested is not None:
+            extra["cancel_requested"] = cancel_requested
+        result = self.installer_downloader(manifest, self.download_dir, **extra)
+        if getattr(result, "cancelled", False):
+            return ProjectOperationSummary(status="cancelled", message="Update-Download abgebrochen.")
         if not getattr(result, "ok", False):
             return ProjectOperationSummary(
                 status=FAILED_STATUS,
                 message=f"Update fehlgeschlagen: {getattr(result, 'message', 'Unbekannter Fehler')}",
             )
         installer_path = str(getattr(result, "installer_path", "") or "")
+        # Re-check right before starting the (elevated) installer so the file
+        # cannot be swapped between the download check and the launch.
+        expected_sha256 = str(getattr(result, "installer_sha256", "") or manifest.get("installer_sha256", "") or "")
+        try:
+            hash_ok, hash_message = verify_installer_hash(installer_path, expected_sha256)
+        except OSError as exc:
+            hash_ok, hash_message = False, str(exc)
+        if not hash_ok:
+            return ProjectOperationSummary(
+                status=FAILED_STATUS,
+                message=f"Update fehlgeschlagen: {hash_message}",
+            )
         try:
             self.installer_launcher(installer_path)
         except Exception as exc:
