@@ -385,6 +385,7 @@ class ProjectManagementService:
             ),
             on_progress=make_cancel_guarded_progress(on_progress, cancel_requested),
             converter_runner=converter_runner,
+            cancel_requested=cancel_requested,
         )
         prepared_sources = _attach_source_overrides(prepared_sources, source_overrides)
         prepared_sources = _attach_crs_info(prepared_sources, tuple(source_paths), crs_info_by_source_path)
@@ -468,6 +469,7 @@ class ProjectManagementService:
             ),
             on_progress=make_cancel_guarded_progress(on_progress, cancel_requested),
             converter_runner=converter_runner,
+            cancel_requested=cancel_requested,
         )
         prepared_sources = _attach_source_overrides(prepared_sources, source_overrides)
         prepared_sources = _attach_crs_info(prepared_sources, tuple(source_paths), crs_info_by_source_path)
@@ -627,6 +629,7 @@ class ProjectManagementService:
             ),
             on_progress=make_cancel_guarded_progress(on_progress, cancel_requested),
             converter_runner=converter_runner,
+            cancel_requested=cancel_requested,
         )
         prepared_sources = _attach_crs_info(
             prepared_sources,

@@ -660,3 +660,48 @@ def test_add_from_sources_rejects_existing_child_slug_collision(tmp_path):
 
     with pytest.raises(ValueError, match="Slug"):
         make_service(repository).add_project_pointclouds_from_sources("project", (str(source),))
+
+
+@pytest.mark.parametrize("method", ["replace_all", "add", "replace_single"])
+def test_from_sources_operations_hand_the_cancel_signal_directly_to_the_converter(tmp_path, monkeypatch, method):
+    from dronautix_uploader.core import project_management_service as module
+
+    seen = {}
+
+    class StopHere(Exception):
+        pass
+
+    def capturing_prepare(request, on_progress=None, converter_runner=None, cancel_requested=None):
+        seen["cancel_requested"] = cancel_requested
+        raise StopHere()
+
+    monkeypatch.setattr(module, "prepare_pointcloud_sources", capturing_prepare)
+    project = {
+        "id": "project",
+        "format": "multi",
+        "viewer_path": "kunde/project/projekt",
+        "s3_path": "pointclouds/kunde/project/projekt",
+        "pointclouds": [
+            {
+                "name": "A",
+                "format": "potree",
+                "viewer_path": "kunde/project/projekt/a",
+                "s3_path": "pointclouds/kunde/project/projekt/a",
+            }
+        ],
+    }
+    service = make_service(FakeRepository({"projects": [project], S3_DISABLED_PROJECTS_KEY: []}))
+    cancel = lambda: False
+    source = str(write_raw(tmp_path))
+
+    with pytest.raises(StopHere):
+        if method == "replace_all":
+            service.replace_project_pointclouds_from_sources("project", (source,), cancel_requested=cancel)
+        elif method == "add":
+            service.add_project_pointclouds_from_sources("project", (source,), cancel_requested=cancel)
+        else:
+            service.replace_single_project_pointcloud_from_source(
+                "project", "pointclouds/kunde/project/projekt/a", source, cancel_requested=cancel
+            )
+
+    assert seen["cancel_requested"] is cancel

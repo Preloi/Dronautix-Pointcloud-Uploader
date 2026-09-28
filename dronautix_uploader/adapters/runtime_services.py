@@ -75,7 +75,7 @@ def load_project_management_runtime_config(
     )
     if use_keyring:
         loader = credential_loader or _load_keyring_password
-        credential_services = get_credential_keyring_services(preview=preview)
+        credential_services = get_credential_keyring_services(preview=preview, config=config)
         # A complete keyring pair wins: a plain-text secret left behind by the
         # legacy app may be outdated.
         keyring_access, keyring_secret = _load_missing_credentials(

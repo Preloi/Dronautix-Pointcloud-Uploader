@@ -133,6 +133,10 @@ class UpdateController:
                 status=FAILED_STATUS,
                 message=f"Update fehlgeschlagen: {hash_message}",
             )
+        # Last point of no return: starting the installer closes the app, so a
+        # cancel after the final chunk or during hashing must still win.
+        if cancel_requested is not None and cancel_requested():
+            return ProjectOperationSummary(status="cancelled", message="Update-Download abgebrochen.")
         try:
             self.installer_launcher(installer_path)
         except Exception as exc:

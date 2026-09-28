@@ -256,3 +256,28 @@ def test_update_controller_reports_cancelled_download_as_cancelled(tmp_path):
 
     assert summary.status == "cancelled"
     assert seen == {"on_progress": print, "cancel_requested": cancel}
+
+
+def test_update_cancelled_after_last_chunk_or_during_hash_never_launches_installer(tmp_path):
+    installer = tmp_path / "setup.exe"
+    installer.write_bytes(b"installer")
+    manifest = _manifest("1.7.13")
+    manifest["installer_sha256"] = hashlib.sha256(b"installer").hexdigest()
+    cancelled = {"now": False}
+    launched = []
+
+    def downloader(_manifest, _dir, **_kwargs):
+        cancelled["now"] = True  # user clicks "Abbrechen" right after the download finished
+        return UpdateDownloadResult(True, "OK", installer_path=str(installer), installer_sha256=manifest["installer_sha256"])
+
+    controller = UpdateController(
+        settings_controller=FakeSettingsController(),
+        installer_downloader=downloader,
+        installer_launcher=launched.append,
+        download_dir=tmp_path,
+    )
+
+    summary = controller.download_and_install(manifest, cancel_requested=lambda: cancelled["now"])
+
+    assert summary.status == "cancelled"
+    assert launched == []

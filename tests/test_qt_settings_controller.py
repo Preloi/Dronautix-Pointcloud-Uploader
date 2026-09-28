@@ -349,7 +349,7 @@ def test_settings_controller_clear_credentials_removes_keyring_entries_and_confi
 
     assert summary.status == "success"
     assert sorted(user for _service, user in deleted) == ["aws_access", "aws_secret"]
-    assert load_config_file(config_path) == {"region_name": "eu-central-1"}
+    assert load_config_file(config_path) == {"region_name": "eu-central-1", "keyring_fallback": False}
 
 
 def test_default_connection_test_reads_project_index_instead_of_head_bucket(monkeypatch):
@@ -387,3 +387,40 @@ def test_default_connection_test_reads_project_index_instead_of_head_bucket(monk
     module._test_s3_connection(state)  # an empty bucket without index is still reachable
 
     assert calls == [("b", "projects_index.json"), ("b", "projects_index.json")]
+
+
+def test_clear_credentials_in_preview_stops_fallback_to_installed_app_keyring(tmp_path):
+    from dronautix_uploader.adapters.runtime_services import load_project_management_runtime_config
+    from dronautix_uploader.core.config_service import (
+        KEYRING_SERVICE,
+        PREVIEW_KEYRING_SERVICE,
+        get_config_locations,
+        load_config_file,
+        save_config_file,
+    )
+
+    environ = {"APPDATA": str(tmp_path)}
+    keyring = {
+        (KEYRING_SERVICE, "aws_access"): "AKIA_PROD",
+        (KEYRING_SERVICE, "aws_secret"): "prod-secret",
+        (PREVIEW_KEYRING_SERVICE, "aws_access"): "AKIA_PREVIEW",
+        (PREVIEW_KEYRING_SERVICE, "aws_secret"): "preview-secret",
+    }
+    loader = lambda service, user: keyring.get((service, user), "")
+    config_path = get_config_locations(preview=True, environ=environ).current_config
+    save_config_file(config_path, {"region_name": "eu-central-1"})
+    controller = SettingsController(
+        preview=True,
+        environ=environ,
+        credential_loader=loader,
+        credential_deleter=lambda service, user: keyring.pop((service, user), None),
+    )
+
+    assert controller.clear_credentials().status == "success"
+
+    state = controller.load_state()
+    runtime = load_project_management_runtime_config(preview=True, environ=environ, credential_loader=loader)
+    assert (state.aws_access_key_id, state.aws_secret_access_key) == ("", "")
+    assert runtime.ready is False
+    assert (KEYRING_SERVICE, "aws_secret") in keyring  # the installed app keeps its own credentials
+    assert load_config_file(config_path)["region_name"] == "eu-central-1"

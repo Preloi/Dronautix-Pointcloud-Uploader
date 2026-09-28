@@ -69,6 +69,9 @@ def get_config_locations(
 
 
 SECRET_CONFIG_KEYS = ("aws_secret_access_key", "aws_secret", "aws_secret_key", "secret_key")
+# Set to False by "Zugangsdaten entfernen": only the app's own keyring service
+# is read afterwards, never the fallback of the installed app.
+KEYRING_FALLBACK_CONFIG_KEY = "keyring_fallback"
 ACCESS_CONFIG_KEYS = ("aws_access_key_id", "aws_access", "aws_access_key", "access_key")
 
 
@@ -176,15 +179,18 @@ def migrate_plaintext_secret_to_keyring(
     return True
 
 
-def get_credential_keyring_services(preview: bool = False) -> tuple[str, ...]:
+def get_credential_keyring_services(preview: bool = False, config: dict[str, Any] | None = None) -> tuple[str, ...]:
     """Return keyring services V2 should read during cutover, in priority order."""
 
     services = [PREVIEW_KEYRING_SERVICE if preview else KEYRING_SERVICE, KEYRING_SERVICE]
+    if isinstance(config, dict) and config.get(KEYRING_FALLBACK_CONFIG_KEY) is False:
+        services = services[:1]
     return tuple(dict.fromkeys(services))
 
 
 __all__ = [
     "ACCESS_CONFIG_KEYS",
+    "KEYRING_FALLBACK_CONFIG_KEY",
     "SECRET_CONFIG_KEYS",
     "CONFIG_FILE_NAME",
     "PREVIEW_APPDATA_FOLDER",

@@ -10,6 +10,7 @@ from typing import Any, Callable
 from dronautix_uploader.core.config_service import (
     get_config_locations,
     ACCESS_CONFIG_KEYS,
+    KEYRING_FALLBACK_CONFIG_KEY,
     SECRET_CONFIG_KEYS,
     get_credential_keyring_services,
     is_valid_aws_region,
@@ -90,15 +91,16 @@ class SettingsController:
             config = {}
         access_key = _first_value(config, *ACCESS_CONFIG_KEYS)
         secret_key = _first_value(config, *SECRET_CONFIG_KEYS)
+        credential_services = self._credential_services_for(config)
         keyring_access, keyring_secret = _load_missing_credentials(
-            self.credential_loader, self.credential_services, need_access=True, need_secret=True
+            self.credential_loader, credential_services, need_access=True, need_secret=True
         )
         if keyring_access and keyring_secret:
             access_key, secret_key = keyring_access, keyring_secret
         else:
             loaded_access, loaded_secret = _load_missing_credentials(
                 self.credential_loader,
-                self.credential_services,
+                credential_services,
                 need_access=not access_key,
                 need_secret=not secret_key,
             )
@@ -149,16 +151,24 @@ class SettingsController:
             except Exception as error:
                 failures.append(f"{username}: {error}")
         config = self.config_loader(self.config_path)
-        if isinstance(config, dict) and any(key in config for key in (*ACCESS_CONFIG_KEYS, *SECRET_CONFIG_KEYS)):
-            for key in (*ACCESS_CONFIG_KEYS, *SECRET_CONFIG_KEYS):
-                config.pop(key, None)
-            self.config_saver(self.config_path, config)
+        if not isinstance(config, dict):
+            config = {}
+        for key in (*ACCESS_CONFIG_KEYS, *SECRET_CONFIG_KEYS):
+            config.pop(key, None)
+        # Otherwise the preview silently reconnects with the installed app's keys.
+        config[KEYRING_FALLBACK_CONFIG_KEY] = False
+        self.config_saver(self.config_path, config)
         if failures:
             return ProjectOperationSummary(
                 status=FAILED_STATUS,
                 message="Zugangsdaten konnten nicht vollständig entfernt werden: " + "; ".join(failures),
             )
         return ProjectOperationSummary(status=SUCCESS_STATUS, message="AWS-Zugangsdaten wurden entfernt.")
+
+    def _credential_services_for(self, config: dict[str, Any]) -> tuple[str, ...]:
+        if isinstance(config, dict) and config.get(KEYRING_FALLBACK_CONFIG_KEY) is False:
+            return self.credential_services[:1]
+        return self.credential_services
 
     def test_connection(self, state: SettingsFormState | None = None) -> ProjectOperationSummary:
         selected = state or self.load_state()
