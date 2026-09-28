@@ -99,7 +99,7 @@ def validate_build_dependencies() -> bool:
     print("[FEHLER] Build-Abhaengigkeiten fehlen:")
     for package_name in missing_packages:
         print(f"  - {package_name}")
-    print("Installation mit: pip install -r requirements-v2-preview.txt")
+    print("Installation mit: pip install -r requirements.txt")
     return False
 
 

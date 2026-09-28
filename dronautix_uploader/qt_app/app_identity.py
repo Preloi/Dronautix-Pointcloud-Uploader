@@ -1,8 +1,8 @@
 """Runtime identity for the QtWidgets app.
 
-Preview must stay isolated until the cutover gates are proven. Final mode is
-explicit so the same UI bootstrap can later use the production config and
-installer identity without rewriting the application start path.
+Preview runs side by side with the installed app (own config, keyring and
+single-instance mutex); final mode uses the production config and installer
+identity.
 """
 
 from __future__ import annotations

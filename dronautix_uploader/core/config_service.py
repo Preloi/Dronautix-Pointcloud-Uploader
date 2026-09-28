@@ -1,4 +1,4 @@
-"""Configuration path and migration helpers for V2 cutover."""
+"""Configuration paths, safe config IO and credential migration."""
 
 from __future__ import annotations
 
@@ -180,7 +180,7 @@ def migrate_plaintext_secret_to_keyring(
 
 
 def get_credential_keyring_services(preview: bool = False, config: dict[str, Any] | None = None) -> tuple[str, ...]:
-    """Return keyring services V2 should read during cutover, in priority order."""
+    """Return keyring services to read, in priority order (preview falls back to the installed app)."""
 
     services = [PREVIEW_KEYRING_SERVICE if preview else KEYRING_SERVICE, KEYRING_SERVICE]
     if isinstance(config, dict) and config.get(KEYRING_FALLBACK_CONFIG_KEY) is False:

@@ -45,7 +45,6 @@ def test_qt_preview_modules_import_without_pyside6():
         "dronautix_uploader.qt_app",
         "dronautix_uploader.qt_app.app",
         "dronautix_uploader.qt_app.app_identity",
-        "dronautix_uploader.qt_app.cutover_readiness_controller",
         "dronautix_uploader.qt_app.main_window",
         "dronautix_uploader.qt_app.pages",
         "dronautix_uploader.qt_app.local_conversion_controller",

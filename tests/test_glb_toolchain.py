@@ -596,15 +596,12 @@ sharp(fs.readFileSync(process.argv[1])).metadata().then((value) => console.log(J
 
 def test_build_and_installer_include_and_gate_the_entire_toolchain_contract():
     build_script = (REPO_ROOT / "build_exe.py").read_text(encoding="utf-8")
-    candidate_script = (REPO_ROOT / "build_v2_final_candidate.py").read_text(encoding="utf-8")
     spec = (REPO_ROOT / "Dronautix_Pointcloud_Uploader.spec").read_text(encoding="utf-8")
     installer = (REPO_ROOT / "Dronautix_Pointcloud_Uploader.iss").read_text(encoding="utf-8")
 
     assert 'os.path.join("bundled_tools", "GLBToolchain")' in build_script
     assert '"toolchain-integrity.v1.json"' in build_script
-    assert '"toolchain-integrity.v1.json"' in candidate_script
     assert "validate_glb_toolchain_for_packaging" in build_script
-    assert "validate_glb_toolchain_for_packaging" in candidate_script
     assert "('bundled_tools/GLBToolchain', 'bundled_tools/GLBToolchain')" in spec
     assert "including bundled_tools\\GLBToolchain" in installer
     packaging_issues = validate_glb_toolchain_for_packaging(REPO_ROOT)

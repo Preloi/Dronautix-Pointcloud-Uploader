@@ -34,17 +34,18 @@ def test_self_test_runs_real_qt_window_in_separate_process(tmp_path):
     assert result["frozen"] is False
 
 
-def test_failed_startup_blocks_candidate_installer_and_manifest(monkeypatch):
-    import build_v2_final_candidate as builder
+def test_failed_startup_blocks_release_installer_and_manifest(monkeypatch):
+    import build_exe as builder
 
-    for name in ("sync_final_candidate_version_file", "sync_final_candidate_installer_files",
-                 "cleanup_previous_final_candidate_build", "validate_required_files"):
-        monkeypatch.setattr(builder, name, lambda: None)
-    monkeypatch.setattr(builder, "validate_build_dependencies", lambda: True)
+    monkeypatch.setattr(builder, "sync_version_files", lambda: None)
+    monkeypatch.setattr(builder, "cleanup_previous_build_artifacts", lambda: None)
+    monkeypatch.setattr(builder, "check_build_prerequisites", lambda: True)
     calls = []
     monkeypatch.setattr(builder.subprocess, "run", lambda command, **kwargs: calls.append(command))
     monkeypatch.setattr(builder, "find_inno_setup", lambda: pytest.fail("Installer reached after failed startup"))
-    monkeypatch.setattr(builder, "write_candidate_manifest", lambda *_: pytest.fail("Manifest reached after failed startup"))
+    monkeypatch.setattr(
+        builder, "write_release_manifest_after_installer_build", lambda: pytest.fail("Manifest reached after failed startup")
+    )
 
     def fail_startup(_executable):
         raise RuntimeError("QtCore DLL import failed")
