@@ -199,8 +199,8 @@ def test_window_closes_promptly_while_detection_hangs_forever(monkeypatch):
         return thread
 
     monkeypatch.setattr(main_window, "cleanup_stale_upload_temp_dirs", lambda: ())
-    monkeypatch.setattr("dronautix_uploader.qt_app.pages.start_crs_detection", recording_start)
-    monkeypatch.setattr("dronautix_uploader.qt_app.pages.detect_pointcloud_crs", lambda path: hang.wait(60) or {})
+    monkeypatch.setattr("dronautix_uploader.qt_app.pages.upload_page.start_crs_detection", recording_start)
+    monkeypatch.setattr("dronautix_uploader.qt_app.pages.upload_page.detect_pointcloud_crs", lambda path: hang.wait(60) or {})
     window = main_window.create_main_window(QtCore, QtGui, QtWidgets)
     try:
         window.show()
@@ -229,7 +229,7 @@ def test_ctrl_enter_does_not_start_upload_while_crs_is_still_detected(monkeypatc
 
     hang = threading.Event()
     monkeypatch.setattr(main_window, "cleanup_stale_upload_temp_dirs", lambda: ())
-    monkeypatch.setattr("dronautix_uploader.qt_app.pages.detect_pointcloud_crs", lambda path: hang.wait(10) or {})
+    monkeypatch.setattr("dronautix_uploader.qt_app.pages.upload_page.detect_pointcloud_crs", lambda path: hang.wait(10) or {})
     window = main_window.create_main_window(QtCore, QtGui, QtWidgets)
     started = []
     monkeypatch.setattr(window, "_run_new_upload", lambda form: started.append(form))
