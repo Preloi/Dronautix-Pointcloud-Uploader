@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .constants import BUCKET_NAME, S3_DISABLED_PROJECTS_KEY, S3_INDEX_CACHE_CONTROL
+from .constants import BUCKET_NAME, S3_DISABLED_PROJECTS_KEY
 from .contracts import (
     CancelCallback,
     OperationCancelledError,
@@ -1069,10 +1069,6 @@ def replace_single_project_pointcloud(
             base_viewer_path,
             s3_prefix,
         )
-    legacy_display_name = (
-        str(original_snapshot_project.get("name", "")).strip()
-        or str(original_snapshot_project.get("projekt", "")).strip()
-    )
     ledger = UploadedKeyLedger()
     replacement_keys = collect_upload_file_keys((prepared_cloud,))
 
@@ -1095,9 +1091,9 @@ def replace_single_project_pointcloud(
                 pointcloud_name = str(original_project.get("name", "")).strip() or str(
                     original_project.get("projekt", "Punktwolke")
                 )
+                # A replaced cloud is always named after its new file.
                 if isinstance(original_project.get("models"), list):
                     pointcloud_entry = prepared_cloud.index_entry
-                    pointcloud_entry["name"] = pointcloud_name
                     project.clear()
                     project.update(
                         build_multi_project_metadata(
@@ -1128,7 +1124,7 @@ def replace_single_project_pointcloud(
                 )
                 if disabled_at is not None:
                     project["disabled_at"] = disabled_at
-                for key in ("visible", "history", "name"):
+                for key in ("visible", "history"):
                     if key in original_project:
                         project[key] = original_project[key]
                 append_project_history(
@@ -1176,13 +1172,6 @@ def replace_single_project_pointcloud(
             append_project_history(project, timestamp, f"Punktwolke '{replaced_name}' wurde ausgetauscht.")
 
         _apply_project_update(index_data, project_id, update_project)
-        if is_legacy_single and legacy_display_name:
-            _overwrite_uploaded_potree_name(
-                s3_client,
-                prepared_cloud,
-                legacy_display_name,
-                bucket_name=bucket_name,
-            )
         _save_index_with_rebase(
             index_data,
             snapshot,
@@ -1224,43 +1213,6 @@ def replace_single_project_pointcloud(
         uploaded_keys=ledger.as_tuple(),
         deleted_keys=orphaned_keys,
         message="Punktwolke wurde ersetzt.",
-    )
-
-
-def _overwrite_uploaded_potree_name(
-    s3_client,
-    prepared_cloud: PreparedCloudUpload,
-    display_name: str,
-    *,
-    bucket_name: str,
-) -> None:
-    """Keep a legacy cloud's display name when its Potree data is replaced."""
-
-    if prepared_cloud.input_format != "potree":
-        return
-    metadata_upload = next(
-        (
-            (local_path, s3_key)
-            for local_path, s3_key in prepared_cloud.files_to_upload
-            if s3_key.casefold().endswith("/metadata.json")
-        ),
-        None,
-    )
-    if metadata_upload is None:
-        return
-    local_path, metadata_key = metadata_upload
-    with open(local_path, "r", encoding="utf-8") as handle:
-        metadata = json.load(handle)
-    if not isinstance(metadata, dict):
-        raise ValueError(f"Potree-Metadaten sind ungültig: {metadata_key}")
-    metadata["name"] = display_name
-    payload = (json.dumps(metadata, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
-    s3_client.put_object(
-        Bucket=bucket_name,
-        Key=metadata_key,
-        Body=payload,
-        ContentType="application/json",
-        CacheControl=S3_INDEX_CACHE_CONTROL,
     )
 
 
@@ -2085,11 +2037,11 @@ def apply_project_rename_metadata(
             if index < len(pointclouds) and isinstance(pointclouds[index], dict):
                 pointclouds[index]["name"] = name
     elif pointcloud_names:
+        # Keep "name" even when it equals the project name: without it the
+        # viewer labels the cloud "Kunde - Projekt".
         pointcloud_name = str(pointcloud_names[0] or "").strip()
-        if pointcloud_name and pointcloud_name != str(new_projekt or "").strip():
+        if pointcloud_name:
             updated["name"] = pointcloud_name
-        else:
-            updated.pop("name", None)
     return updated
 
 

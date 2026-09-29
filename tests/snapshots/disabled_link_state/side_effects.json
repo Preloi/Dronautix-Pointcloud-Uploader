@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "scenario_id": "disabled_link_state",
-  "event_count": 13,
+  "event_count": 12,
   "events": [
     {
       "sequence": 1,
@@ -102,15 +102,6 @@
     {
       "sequence": 11,
       "type": "put_object",
-      "key": "pointclouds/golden/disabled_target/versions/golden-data/metadata.json",
-      "content_type": "application/json",
-      "cache_control": "no-cache",
-      "purpose": "save_object",
-      "bucket": "potreedronautix"
-    },
-    {
-      "sequence": 12,
-      "type": "put_object",
       "key": "projects_index.json",
       "content_type": "application/json",
       "cache_control": "no-cache",
@@ -118,7 +109,7 @@
       "bucket": "potreedronautix"
     },
     {
-      "sequence": 13,
+      "sequence": 12,
       "type": "delete_objects",
       "keys": [
         "pointclouds/golden/disabled_target/cloud.js",
@@ -143,7 +134,6 @@
     "put_object_keys": [
       "projects_index.json",
       "projects_index.json",
-      "pointclouds/golden/disabled_target/versions/golden-data/metadata.json",
       "projects_index.json"
     ]
   },
@@ -161,7 +151,6 @@
   "put_object_keys": [
     "projects_index.json",
     "projects_index.json",
-    "pointclouds/golden/disabled_target/versions/golden-data/metadata.json",
     "projects_index.json"
   ]
 }

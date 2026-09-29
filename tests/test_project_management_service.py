@@ -1008,6 +1008,38 @@ def test_rename_project_updates_active_project_without_changing_paths():
     assert repository.saved_indexes[-1]["projects"][0] == renamed
 
 
+def test_rename_retries_on_a_concurrent_change_of_another_project():
+    from dronautix_uploader.core.project_repository import ProjectMetadataConflictError
+
+    index = {
+        "projects": [
+            {"id": "mine", "kunde": "K", "projekt": "Alt", "pointclouds": [{"name": "A"}]},
+            {"id": "other", "kunde": "K", "projekt": "Fremd"},
+        ],
+        S3_DISABLED_PROJECTS_KEY: [],
+    }
+
+    class ConcurrentOtherEditRepository(FakeRepository):
+        def save_projects_index(self, index_data):
+            if not self.saved_indexes and not getattr(self, "conflicted", False):
+                self.conflicted = True
+                fresh = copy.deepcopy(index)
+                fresh["projects"][1]["projekt"] = "Fremd geändert"  # another PC edited another project
+                conflict = ProjectMetadataConflictError("projects_index.json", current_data=fresh)
+                conflict.current_snapshot = fresh
+                raise conflict
+            super().save_projects_index(index_data)
+
+    repository = ConcurrentOtherEditRepository(index)
+
+    result = make_service(repository).rename_project("mine", "K", "Neu", ("A",))
+
+    assert result.status == "success"
+    saved = repository.saved_indexes[-1]["projects"]
+    assert saved[0]["projekt"] == "Neu"
+    assert saved[1]["projekt"] == "Fremd geändert"  # the concurrent winner is kept
+
+
 def test_rename_project_stores_legacy_cloud_name_and_updates_existing_potree_metadata():
     metadata_key = "pointclouds/alt/legacy/altprojekt/metadata.json"
     s3_client = FakeS3Client()

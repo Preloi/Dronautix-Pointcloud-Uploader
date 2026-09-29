@@ -576,6 +576,15 @@ def test_apply_project_rename_metadata_changes_names_without_paths():
     assert project["kunde"] == "Alt"
 
 
+def test_apply_project_rename_metadata_keeps_a_single_cloud_name_equal_to_the_project_name():
+    project = {"kunde": "Kunde", "projekt": "Alt", "name": "Befliegung", "format": "potree"}
+
+    renamed = apply_project_rename_metadata(project, "Kunde", "Mast", ("Mast",))
+
+    # Without "name" the viewer would label the cloud "Kunde - Mast" instead of "Mast".
+    assert renamed["name"] == "Mast"
+
+
 def test_apply_project_rename_metadata_keeps_legacy_cloud_name_independent_when_only_project_changes():
     project = {
         "kunde": "Kunde",
@@ -1356,7 +1365,50 @@ def test_replace_single_project_pointcloud_supports_disabled_legacy_single_proje
     assert deleted_keys == ["pointclouds/kunde/project/projekt/old.bin"]
 
 
-def test_replace_empty_legacy_potree_with_models_migrates_custom_name_to_child_and_metadata(tmp_path):
+def test_replacing_the_cloud_of_a_single_project_takes_the_new_file_name(tmp_path):
+    replacement = write_potree(tmp_path, "replacement", b"replacement")
+    prepared = prepare_single_project_upload(
+        PointcloudSource(str(replacement), name="Befliegung_2027", input_format="potree", crs_info={"value": "EPSG:4326"}),
+        "kunde/project/projekt",
+        "pointclouds/kunde/project/projekt",
+    )
+    index_data = {
+        "projects": [
+            {
+                "id": "project",
+                "datum": "2026-06-20T12:00:00",
+                "kunde": "Kunde",
+                "projekt": "Single",
+                "name": "Selbst umbenannt",
+                "format": "potree",
+                "link": "https://viewer/?id=project",
+                "viewer_path": "kunde/project/projekt",
+                "s3_path": "pointclouds/kunde/project/projekt",
+            }
+        ],
+    }
+    s3_client = FakeS3Client()
+
+    result = replace_single_project_pointcloud(
+        s3_client=s3_client,
+        index_data=index_data,
+        project_id="project",
+        base_viewer_path="kunde/project/projekt",
+        s3_prefix="pointclouds/kunde/project/projekt",
+        prepared_cloud=prepared,
+        target_pointcloud_s3_path="pointclouds/kunde/project/projekt",
+        existing_target_keys=("pointclouds/kunde/project/projekt/old.bin",),
+        save_index=lambda _data: True,
+        delete_keys=lambda _keys: None,
+    )
+
+    project = index_data["projects"][0]
+    assert result.status == "success"
+    assert project["name"] == "Befliegung_2027"
+    assert s3_client.puts == []  # the uploaded metadata.json is not rewritten afterwards
+
+
+def test_replace_empty_legacy_potree_with_models_uses_the_new_file_name_for_the_child(tmp_path):
     crs_info = {"value": "EPSG:25832", "vertical_crs": "EPSG:7837"}
     replacement = tmp_path / "potree"
     replacement.mkdir()
@@ -1413,11 +1465,10 @@ def test_replace_empty_legacy_potree_with_models_migrates_custom_name_to_child_a
     project = index_data["projects"][0]
     assert result.status == "success"
     assert project["format"] == "multi"
-    assert project["pointclouds"][0]["name"] == "Separater Name"
+    assert project["pointclouds"][0]["name"] == "Replacement"
     assert "name" not in project
     assert project["models"] == [model]
-    assert json.loads(s3_client.puts[0]["Body"])["name"] == "Separater Name"
-    assert s3_client.puts[0]["CacheControl"] == "no-cache"
+    assert s3_client.puts == []  # the uploaded metadata.json is not rewritten afterwards
 
 
 def test_replace_single_project_model_switches_only_selected_model_after_verified_upload(tmp_path):

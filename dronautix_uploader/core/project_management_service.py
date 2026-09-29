@@ -38,6 +38,7 @@ from .project_index_service import (
 )
 from .project_operations import (
     PreparedCloudUpload,
+    _save_index_with_rebase,
     add_project_models as add_project_models_operation,
     add_project_pointclouds as add_project_pointclouds_operation,
     apply_project_rename_metadata,
@@ -170,8 +171,15 @@ class ProjectManagementService:
                     expected_etag=update["original_etag"],
                 )
                 applied_metadata_updates.append(update)
-            if not self._save_projects_index(index_data):
-                raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
+            # A concurrent edit of another project is rebased like for the other
+            # actions; a change of this project still raises and rolls back.
+            _save_index_with_rebase(
+                index_data,
+                original_index,
+                self._save_projects_index,
+                reapply=lambda fresh: update_project_in_index(fresh, project_id, apply_rename),
+                project_id=project_id,
+            )
         except Exception as error:
             index_data.clear()
             index_data.update(original_index)
