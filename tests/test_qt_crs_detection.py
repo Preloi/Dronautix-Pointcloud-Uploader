@@ -138,6 +138,36 @@ def test_mode_switch_during_detection_keeps_results_for_both_modes():
         page.deleteLater()
 
 
+def test_source_removed_in_convert_mode_is_detected_again_after_switching_back_to_upload():
+    QtCore, _QtGui, QtWidgets = _import_qt()
+    app = _app(QtWidgets)
+    detector = ControlledDetector()
+    detector.results[("nas/b.laz", 2)] = {"value": "EPSG:31256"}
+    page = _page(QtCore, QtWidgets, detector)
+    source_list = page.findChild(QtWidgets.QListWidget, "UploadSourceList")
+    start = _button(QtWidgets, page, "Hochladen")
+    try:
+        page.add_source_paths(("nas/a.laz", "nas/b.laz"))
+        detector.gate("nas/a.laz").set()
+        detector.gate("nas/b.laz").set()
+        assert _process_until(app, lambda: not page.crs_detection_pending())
+
+        _button(QtWidgets, page, "Nur lokal konvertieren").click()
+        source_list.selectAll()
+        _button(QtWidgets, page, "Entfernen").click()  # forgets the CRS of nas/b.laz
+        _button(QtWidgets, page, "Upload zu S3").click()  # both sources are back
+
+        assert page.crs_detection_pending() and not start.isEnabled()
+        assert _process_until(app, lambda: detector.calls.count("nas/b.laz") == 2)
+        detector.gate("nas/b.laz", 2).set()
+        assert _process_until(app, lambda: not page.crs_detection_pending())
+        assert start.isEnabled()
+        assert page.crs_info_by_source_path()["nas/b.laz"]["value"] == "EPSG:31256"
+    finally:
+        detector.gate("nas/b.laz", 2).set()
+        page.deleteLater()
+
+
 def test_manual_crs_is_never_overwritten_by_a_late_detection_result():
     QtCore, _QtGui, QtWidgets = _import_qt()
     app = _app(QtWidgets)

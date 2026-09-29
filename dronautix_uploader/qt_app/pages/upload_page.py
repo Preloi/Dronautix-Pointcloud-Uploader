@@ -455,7 +455,9 @@ def create_upload_page(
             state["detected_crs"].pop(path, None)
 
     def crs_detection_pending() -> bool:
-        return any(path in state["crs_pending"] for path in state["sources"])
+        # "Pending" means "no result yet", not only "detection running": a
+        # source whose detection was never started must block the upload too.
+        return any(path not in state["detected_crs"] for path in state["sources"])
 
     def apply_crs_result(path, generation, info):
         if state["crs_generation"].get(path) != generation:
@@ -708,6 +710,9 @@ def create_upload_page(
         models_panel.setVisible(not is_convert)
         render_sources()
         render_models()
+        # The restored list of the other mode may hold sources whose result
+        # was forgotten meanwhile (removed in this mode).
+        detect_sources_crs()
 
     def read_form() -> UploadFormInputs:
         return UploadFormInputs(
