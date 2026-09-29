@@ -165,6 +165,7 @@ def test_build_new_project_upload_single_potree_uses_legacy_project_shape(tmp_pa
         "link": "https://viewer/?id=abc123ef",
         "viewer_path": "kunde/abc123ef/projekt",
         "s3_path": "pointclouds/kunde/abc123ef/projekt",
+        "name": "single",  # viewer label of the cloud: the source name, not the project name
         "crs": "EPSG:25832",
         "projection": "EPSG:25832",
         "crs_info": {"value": "EPSG:25832"},

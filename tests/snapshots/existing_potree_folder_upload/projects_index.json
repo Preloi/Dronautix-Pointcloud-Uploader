@@ -9,6 +9,7 @@
       "link": "https://pointcloud.dronautix.at/index.html?id=abc123e4",
       "viewer_path": "golden_kunde/abc123e4/existing_potree",
       "s3_path": "pointclouds/golden_kunde/abc123e4/existing_potree",
+      "name": "Existing Potree",
       "crs": "EPSG:4326",
       "projection": "EPSG:4326",
       "epsg": "EPSG:4326",

@@ -9,6 +9,7 @@
       "link": "https://pointcloud.dronautix.at/index.html?id=abc123e3",
       "viewer_path": "golden_kunde/abc123e3/vertical_crs",
       "s3_path": "pointclouds/golden_kunde/abc123e3/vertical_crs",
+      "name": "Vertical CRS",
       "crs": "EPSG:25832",
       "projection": "EPSG:25832",
       "epsg": "EPSG:25832",

@@ -220,6 +220,10 @@ def build_single_project_metadata(
         "viewer_path": prepared_cloud.viewer_path,
         "s3_path": prepared_cloud.s3_prefix,
     }
+    # The viewer treats a single-cloud entry as the cloud itself and labels it
+    # with ``name`` (falling back to "Kunde - Projekt"): use the file name.
+    if str(prepared_cloud.name or "").strip():
+        metadata["name"] = str(prepared_cloud.name).strip()
     apply_crs_metadata(metadata, prepared_cloud.crs_info)
     return metadata
 
