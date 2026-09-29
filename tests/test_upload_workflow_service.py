@@ -649,22 +649,29 @@ def test_raw_upload_cancels_silent_builtin_converter_within_deadline(tmp_path, m
             return self.returncode
 
     process = SilentProcess()
-    monkeypatch.setattr(converter_service.subprocess, "Popen", lambda *args, **kwargs: process)
-    started = time.monotonic()
+    converter_started = []
+
+    def start_converter(*args, **kwargs):
+        converter_started.append(time.monotonic())
+        return process
+
+    monkeypatch.setattr(converter_service.subprocess, "Popen", start_converter)
     repository = FakeRepository()
     s3_client = FakeS3Client()
 
+    # Cancel only once the converter runs: a slow CI machine may otherwise
+    # cancel during preparation, before there is a process to terminate.
     result = make_service(repository, s3_client=s3_client).upload_new_project(
         NewProjectUploadWorkflowRequest(
             source_paths=(str(raw),), kunde="Kunde", projekt="Projekt",
             converter_path=str(converter), output_base_dir=str(tmp_path / "converted"), overwrite=True,
         ),
-        cancel_requested=lambda: time.monotonic() - started >= 0.15,
+        cancel_requested=lambda: bool(converter_started) and time.monotonic() - converter_started[0] >= 0.15,
     )
 
     assert result.status == "cancelled"
     assert process.terminated is True
-    assert time.monotonic() - started < 1.0
+    assert time.monotonic() - converter_started[0] < 1.0
     assert s3_client.uploads == [] and repository.saved_indexes == []
 
 
