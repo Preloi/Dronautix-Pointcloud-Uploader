@@ -217,7 +217,7 @@ def test_list_projects_for_management_returns_active_and_disabled_with_status():
     ]
 
 
-def test_replace_single_model_from_source_keeps_model_identity_and_cleans_staging(tmp_path, monkeypatch):
+def test_replace_single_model_from_source_keeps_model_identity_takes_file_name_and_cleans_staging(tmp_path, monkeypatch):
     old_prefix = "pointclouds/kunde/project/projekt/models/fassade/versions/old"
     repository = FakeRepository(
         {
@@ -282,14 +282,14 @@ def test_replace_single_model_from_source_keeps_model_identity_and_cleans_stagin
     model = repository.index_data["projects"][0]["models"][0]
     assert result.status == "success"
     assert prepared_input.source_path == str(source)
-    assert prepared_input.name == "Fassade Bestand"
+    assert prepared_input.name == ""  # the pipeline names the model after the new file
     assert prepared_input.slug == "fassade"
     assert prepared_input.model_json_path == "C:/input/model.json"
     assert project_crs["value"] == "EPSG:25833"
     assert viewer_root == "kunde/project/projekt"
     assert s3_root == "pointclouds/kunde/project/projekt"
-    assert model["id"] == "fassade"
-    assert model["name"] == "Fassade Bestand"
+    assert model["id"] == "fassade"  # id and paths stay stable for links
+    assert model["name"] == "replacement"
     assert model["s3_path"].endswith(f"/models/fassade/versions/{'e' * 64}")
     assert source.read_bytes() == b"user-original"
     assert staging_root.exists()

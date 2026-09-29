@@ -707,7 +707,6 @@ class ProjectManagementService:
             raise ValueError("Das ausgewählte GLB konnte nicht eindeutig gefunden werden.")
         target_model = matches[0]
         model_id = str(target_model.get("id", "")).strip()
-        model_name = str(target_model.get("name", "")).strip() or model_id
         if not model_id:
             raise ValueError("Das ausgewählte GLB hat keine Modell-ID.")
         project_crs_info, crs_repair_plan = _resolve_project_model_crs(
@@ -722,9 +721,10 @@ class ProjectManagementService:
         prepared_models = ()
         try:
             prepared_model = (self.glb_service or GLBOptimizationService()).prepare(
+                # No name: a replaced model is named after its new file. The id
+                # (slug) stays, so paths and viewer references do not change.
                 ModelUploadInput(
                     source_path=source_path,
-                    name=model_name,
                     slug=model_id,
                     model_json_path=model_json_path,
                 ),
