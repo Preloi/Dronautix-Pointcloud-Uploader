@@ -19,7 +19,8 @@ from dronautix_uploader.core.crs_detection import detect_pointcloud_crs
 CrsDetector = Callable[[str], "dict | None"]
 ResultCallback = Callable[[str, int, dict], None]
 
-# Files detect_potree_crs() reads, in the order it reads them.
+# Files detect_potree_crs() may read (cloud.js is the fallback when
+# metadata.json has no CRS); all of them go into the cache fingerprint.
 POTREE_METADATA_FILES = ("metadata.json", "cloud.js")
 
 
@@ -27,19 +28,22 @@ def detection_fingerprint(path: str) -> tuple | None:
     """Identify the bytes a detection depends on; ``None`` disables caching.
 
     For a Potree folder the folder's own mtime does not change when its
-    ``metadata.json`` is rewritten, so the fingerprint uses the metadata file.
+    metadata files are rewritten, so the fingerprint covers every metadata
+    file that exists: a ``metadata.json`` without CRS falls back to
+    ``cloud.js``, so both can decide the result.
     Called in the worker thread: ``stat`` on a NAS can block as well.
     """
 
     try:
         absolute = os.path.abspath(path)
         if os.path.isdir(absolute):
+            files = []
             for name in POTREE_METADATA_FILES:
                 candidate = os.path.join(absolute, name)
                 if os.path.isfile(candidate):
                     stat = os.stat(candidate)
-                    return ("potree", os.path.normcase(absolute), name, stat.st_size, stat.st_mtime_ns)
-            return None
+                    files.append((name, stat.st_size, stat.st_mtime_ns))
+            return ("potree", os.path.normcase(absolute), tuple(files)) if files else None
         stat = os.stat(absolute)
         return ("file", os.path.normcase(absolute), stat.st_size, stat.st_mtime_ns)
     except OSError:

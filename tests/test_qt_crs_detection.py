@@ -183,6 +183,26 @@ def test_cache_redetects_potree_folder_when_its_metadata_file_changes(tmp_path):
     assert len(calls) == 2
 
 
+def test_cache_follows_cloud_js_when_metadata_json_has_no_crs(tmp_path):
+    from dronautix_uploader.core.crs_detection import detect_pointcloud_crs
+    from dronautix_uploader.qt_app.crs_detection_worker import CrsDetectionCache
+
+    folder = tmp_path / "potree"
+    folder.mkdir()
+    (folder / "metadata.json").write_text('{"version": "2.0"}', encoding="utf-8")  # no CRS -> cloud.js is read
+    cloud_js = folder / "cloud.js"
+    cloud_js.write_text('{"projection": "EPSG:25832"}', encoding="utf-8")
+    cache = CrsDetectionCache()
+    assert cache.detect(str(folder), detect_pointcloud_crs)["value"] == "EPSG:25832"
+
+    stat = cloud_js.stat()
+    cloud_js.write_text('{"projection": "EPSG:31256"}', encoding="utf-8")
+    os.utime(cloud_js, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+
+    assert detect_pointcloud_crs(str(folder))["value"] == "EPSG:31256"
+    assert cache.detect(str(folder), detect_pointcloud_crs)["value"] == "EPSG:31256"
+
+
 def test_window_closes_promptly_while_detection_hangs_forever(monkeypatch):
     QtCore, QtGui, QtWidgets = _import_qt()
     app = _app(QtWidgets)
