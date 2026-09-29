@@ -36,7 +36,7 @@ PREVIEW_IDENTITY = QtAppIdentity(
     mode=APP_MODE_PREVIEW,
     application_name="Dronautix Pointcloud Uploader Preview",
     window_title="Dronautix Pointcloud Uploader V2 Preview",
-    sidebar_badge="QtWidgets Preview",
+    sidebar_badge=f"Vorschau · Version {APP_VERSION}",
     uses_preview_config=True,
     default_runtime_status="Qt Preview - keine Service-Integration aktiv",
 )
