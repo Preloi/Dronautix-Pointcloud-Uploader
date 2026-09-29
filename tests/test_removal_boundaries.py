@@ -34,6 +34,11 @@ REMOVED_MODULES = {
     "dronautix_uploader.qt_app.cutover_readiness_controller",
 }
 
+REMOVED_ROOT_FILES = (
+    "Dronautix_Pointcloud_Uploader.py",  # compatibility entry point, unused by build and installer
+    "pointcloud-uploader-memory.md",  # notes from the V1 era (1.7.8)
+)
+
 
 def _module_name(path: Path) -> str:
     relative = path.relative_to(REPO_ROOT).with_suffix("")
@@ -88,7 +93,6 @@ def test_no_kept_module_imports_code_scheduled_for_removal():
 
 def test_release_entry_points_do_not_use_removed_code():
     for entry in (
-        "Dronautix_Pointcloud_Uploader.py",
         "Dronautix_Pointcloud_Uploader_v2_final.py",
         "Dronautix_Pointcloud_Uploader_v2.py",
         "build_exe.py",
@@ -107,4 +111,5 @@ def test_removed_modules_stay_deleted():
         has_sources = package_dir.is_dir() and any(package_dir.rglob("*.py"))
         if (REPO_ROOT / relative.with_suffix(".py")).exists() or has_sources:
             leftovers.append(module)
+    leftovers += [name for name in REMOVED_ROOT_FILES if (REPO_ROOT / name).exists()]
     assert leftovers == []

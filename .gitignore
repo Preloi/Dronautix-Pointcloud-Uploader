@@ -5,6 +5,8 @@ __pycache__/
 build/
 dist/
 Output/
+# written by PyInstaller during build_exe.py
+Dronautix_Pointcloud_Uploader.spec
 bucket-cors.json
 AGENTS.md
 CLAUDE.md
