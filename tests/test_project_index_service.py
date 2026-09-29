@@ -131,3 +131,29 @@ def test_apply_common_crs_or_clear_applies_common_crs_when_present():
     )
 
     assert project == {"id": "project", "crs": "EPSG:25832", "crs_info": common_crs}
+
+
+def test_apply_common_crs_or_clear_drops_stale_fields_missing_from_new_crs():
+    from dronautix_uploader.core.metadata_service import apply_crs_metadata
+
+    project = {
+        "id": "project",
+        "crs": "EPSG:31256",
+        "projection": "EPSG:31256",
+        "epsg": "EPSG:31256",
+        "crs_name": "MGI / Austria GK East",
+        "vertical_crs": "EPSG:5778",
+        "vertical_epsg": "EPSG:5778",
+        "vertical_projection": "EPSG:5778",
+        "vertical_datum": "GHA",
+        "vertical_name": "GHA",
+        "pointclouds": [{"name": "keep", "vertical_crs": "EPSG:5778"}],
+    }
+
+    apply_common_crs_or_clear(project, {"value": "EPSG:25833"}, apply_crs_metadata)
+
+    assert project["crs"] == "EPSG:25833"
+    for stale_key in ("vertical_crs", "vertical_epsg", "vertical_projection", "vertical_datum", "vertical_name", "crs_name"):
+        assert stale_key not in project
+    assert project.get("epsg") in (None, "EPSG:25833")
+    assert project["pointclouds"] == [{"name": "keep", "vertical_crs": "EPSG:5778"}]

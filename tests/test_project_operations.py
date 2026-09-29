@@ -165,6 +165,7 @@ def test_build_new_project_upload_single_potree_uses_legacy_project_shape(tmp_pa
         "link": "https://viewer/?id=abc123ef",
         "viewer_path": "kunde/abc123ef/projekt",
         "s3_path": "pointclouds/kunde/abc123ef/projekt",
+        "name": "single",  # viewer label of the cloud: the source name, not the project name
         "crs": "EPSG:25832",
         "projection": "EPSG:25832",
         "crs_info": {"value": "EPSG:25832"},
@@ -575,6 +576,15 @@ def test_apply_project_rename_metadata_changes_names_without_paths():
     assert project["kunde"] == "Alt"
 
 
+def test_apply_project_rename_metadata_keeps_a_single_cloud_name_equal_to_the_project_name():
+    project = {"kunde": "Kunde", "projekt": "Alt", "name": "Befliegung", "format": "potree"}
+
+    renamed = apply_project_rename_metadata(project, "Kunde", "Mast", ("Mast",))
+
+    # Without "name" the viewer would label the cloud "Kunde - Mast" instead of "Mast".
+    assert renamed["name"] == "Mast"
+
+
 def test_apply_project_rename_metadata_keeps_legacy_cloud_name_independent_when_only_project_changes():
     project = {
         "kunde": "Kunde",
@@ -762,7 +772,7 @@ def test_duplicate_project_cleans_first_copy_when_second_copy_fails(cleanup_fail
         if cleanup_fails:
             raise RuntimeError("cleanup denied")
 
-    expected = "Cleanup unvollstaendig" if cleanup_fails else "second copy failed"
+    expected = "Cleanup unvollständig" if cleanup_fails else "second copy failed"
     with pytest.raises(RuntimeError, match=expected):
         duplicate_project(
             s3_client=s3_client,
@@ -1355,7 +1365,50 @@ def test_replace_single_project_pointcloud_supports_disabled_legacy_single_proje
     assert deleted_keys == ["pointclouds/kunde/project/projekt/old.bin"]
 
 
-def test_replace_empty_legacy_potree_with_models_migrates_custom_name_to_child_and_metadata(tmp_path):
+def test_replacing_the_cloud_of_a_single_project_takes_the_new_file_name(tmp_path):
+    replacement = write_potree(tmp_path, "replacement", b"replacement")
+    prepared = prepare_single_project_upload(
+        PointcloudSource(str(replacement), name="Befliegung_2027", input_format="potree", crs_info={"value": "EPSG:4326"}),
+        "kunde/project/projekt",
+        "pointclouds/kunde/project/projekt",
+    )
+    index_data = {
+        "projects": [
+            {
+                "id": "project",
+                "datum": "2026-06-20T12:00:00",
+                "kunde": "Kunde",
+                "projekt": "Single",
+                "name": "Selbst umbenannt",
+                "format": "potree",
+                "link": "https://viewer/?id=project",
+                "viewer_path": "kunde/project/projekt",
+                "s3_path": "pointclouds/kunde/project/projekt",
+            }
+        ],
+    }
+    s3_client = FakeS3Client()
+
+    result = replace_single_project_pointcloud(
+        s3_client=s3_client,
+        index_data=index_data,
+        project_id="project",
+        base_viewer_path="kunde/project/projekt",
+        s3_prefix="pointclouds/kunde/project/projekt",
+        prepared_cloud=prepared,
+        target_pointcloud_s3_path="pointclouds/kunde/project/projekt",
+        existing_target_keys=("pointclouds/kunde/project/projekt/old.bin",),
+        save_index=lambda _data: True,
+        delete_keys=lambda _keys: None,
+    )
+
+    project = index_data["projects"][0]
+    assert result.status == "success"
+    assert project["name"] == "Befliegung_2027"
+    assert s3_client.puts == []  # the uploaded metadata.json is not rewritten afterwards
+
+
+def test_replace_empty_legacy_potree_with_models_uses_the_new_file_name_for_the_child(tmp_path):
     crs_info = {"value": "EPSG:25832", "vertical_crs": "EPSG:7837"}
     replacement = tmp_path / "potree"
     replacement.mkdir()
@@ -1412,11 +1465,10 @@ def test_replace_empty_legacy_potree_with_models_migrates_custom_name_to_child_a
     project = index_data["projects"][0]
     assert result.status == "success"
     assert project["format"] == "multi"
-    assert project["pointclouds"][0]["name"] == "Separater Name"
+    assert project["pointclouds"][0]["name"] == "Replacement"
     assert "name" not in project
     assert project["models"] == [model]
-    assert json.loads(s3_client.puts[0]["Body"])["name"] == "Separater Name"
-    assert s3_client.puts[0]["CacheControl"] == "no-cache"
+    assert s3_client.puts == []  # the uploaded metadata.json is not rewritten afterwards
 
 
 def test_replace_single_project_model_switches_only_selected_model_after_verified_upload(tmp_path):
@@ -1825,7 +1877,7 @@ def test_add_project_pointclouds_preserves_multi_project_identity_and_existing_c
     assert project["pointclouds"][0] == original_child
     assert project["pointclouds"][0] is not original_child
     assert project["pointclouds"][1]["s3_path"] == f"{project_root}/versions/versionid/new"
-    assert project["history"][-1]["message"] == "1 Punktwolke(n) wurden hinzugefuegt."
+    assert project["history"][-1]["message"] == "1 Punktwolke(n) wurden hinzugefügt."
 
 
 def test_add_project_pointclouds_ignores_hidden_cloud_for_common_crs(tmp_path):
@@ -2399,3 +2451,387 @@ def test_replacing_single_pointcloud_preserves_models_and_never_cleans_model_obj
     assert result.status == "success"
     assert index_data["projects"][0]["models"] == models
     assert deleted_keys == [f"{project_root}/target/cloud.js"]
+
+
+def test_build_multi_project_metadata_replaces_old_project_crs_completely():
+    from dronautix_uploader.core.project_operations import build_multi_project_metadata
+
+    old_project = {
+        "id": "abc123",
+        "projekt": "Alt",
+        "kunde": "Kunde",
+        "format": "multi",
+        "crs": "EPSG:31256",
+        "epsg": "EPSG:31256",
+        "crs_name": "MGI / Austria GK East",
+        "vertical_crs": "EPSG:5778",
+        "vertical_epsg": "EPSG:5778",
+        "vertical_datum": "GHA",
+    }
+    entries = [
+        {"name": name, "format": "potree", "s3_path": f"pointclouds/k/abc123/{name}", "crs": "EPSG:25833",
+         "crs_info": {"value": "EPSG:25833"}}
+        for name in ("a", "b")
+    ]
+
+    updated = build_multi_project_metadata(old_project, "k/abc123", "pointclouds/k/abc123", entries)
+
+    assert updated["crs"] == "EPSG:25833"
+    assert updated.get("epsg") in (None, "EPSG:25833")
+    assert "vertical_crs" not in updated and "vertical_datum" not in updated and "crs_name" not in updated
+
+
+VERSIONED_ROOT = "pointclouds/kunde/abc123/projekt"
+VERSIONED_MODEL_SHA = "d" * 64
+
+
+def _replaced_single_project_with_model():
+    return {
+        "id": "abc123",
+        "kunde": "Kunde",
+        "projekt": "Projekt",
+        "format": "potree",
+        "link": "https://viewer/?id=abc123",
+        "viewer_path": "kunde/abc123/projekt/versions/v2",
+        "s3_path": f"{VERSIONED_ROOT}/versions/v2",
+        "models": [
+            {
+                "id": "haus",
+                "name": "Haus",
+                "viewer_path": f"kunde/abc123/projekt/models/haus/versions/{VERSIONED_MODEL_SHA}/model.json",
+                "s3_path": f"{VERSIONED_ROOT}/models/haus/versions/{VERSIONED_MODEL_SHA}",
+            }
+        ],
+    }
+
+
+def _versioned_project_s3_client():
+    return FakeProjectS3Client(
+        pages=[
+            {
+                "Contents": [
+                    {"Key": f"{VERSIONED_ROOT}/versions/v2/metadata.json", "Size": 4},
+                    {"Key": f"{VERSIONED_ROOT}/models/haus/versions/{VERSIONED_MODEL_SHA}/model.json", "Size": 4},
+                    {"Key": f"{VERSIONED_ROOT}/models/haus/versions/{VERSIONED_MODEL_SHA}/scene.glb", "Size": 4},
+                    {"Key": "pointclouds/kunde/other1/projekt/metadata.json", "Size": 4},
+                ]
+            }
+        ]
+    )
+
+
+def test_delete_replaced_single_project_also_deletes_models_under_stable_root():
+    s3_client = _versioned_project_s3_client()
+    project = _replaced_single_project_with_model()
+    index_data = {"projects": [copy.deepcopy(project)], S3_DISABLED_PROJECTS_KEY: []}
+
+    result = delete_project(
+        s3_client=s3_client,
+        index_data=index_data,
+        deleted_data={"deleted_projects": []},
+        project_info=project,
+        deleted_at="2026-09-28T12:00:00",
+        save_index=lambda _data: True,
+        save_deleted=lambda _data: True,
+    )
+
+    assert result.status == "success"
+    assert sorted(s3_client.deleted) == sorted(
+        [
+            f"{VERSIONED_ROOT}/versions/v2/metadata.json",
+            f"{VERSIONED_ROOT}/models/haus/versions/{VERSIONED_MODEL_SHA}/model.json",
+            f"{VERSIONED_ROOT}/models/haus/versions/{VERSIONED_MODEL_SHA}/scene.glb",
+        ]
+    )
+
+
+def test_download_replaced_single_project_includes_models(tmp_path):
+    s3_client = _versioned_project_s3_client()
+
+    download_dir, downloaded = download_project(
+        s3_client=s3_client,
+        project_info=_replaced_single_project_with_model(),
+        target_dir=str(tmp_path),
+        sanitize_func=lambda value: str(value).lower(),
+    )
+
+    relative = sorted(os.path.relpath(path, download_dir).replace("\\", "/") for path in downloaded)
+    assert relative == [
+        "metadata.json",
+        f"models/haus/versions/{VERSIONED_MODEL_SHA}/model.json",
+        f"models/haus/versions/{VERSIONED_MODEL_SHA}/scene.glb",
+    ]
+
+
+def test_duplicate_replaced_single_project_copies_and_rebases_models():
+    s3_client = _versioned_project_s3_client()
+    source = _replaced_single_project_with_model()
+    index_data = {"projects": [copy.deepcopy(source)]}
+
+    result = duplicate_project(
+        s3_client=s3_client,
+        index_data=index_data,
+        source_project=source,
+        timestamp="2026-09-28T12:00:00",
+        new_kunde="Neu",
+        new_projekt="Kopie",
+        new_project_id="new456",
+        new_project_url="https://viewer/?id=new456",
+        new_viewer_root="neu/new456/kopie",
+        new_s3_prefix="pointclouds/neu/new456/kopie",
+        save_index=lambda _data: True,
+        delete_keys=lambda _keys: None,
+        on_progress=lambda _event: None,
+    )
+
+    assert result.status == "success"
+    assert sorted(result.uploaded_keys) == sorted(
+        [
+            "pointclouds/neu/new456/kopie/versions/v2/metadata.json",
+            f"pointclouds/neu/new456/kopie/models/haus/versions/{VERSIONED_MODEL_SHA}/model.json",
+            f"pointclouds/neu/new456/kopie/models/haus/versions/{VERSIONED_MODEL_SHA}/scene.glb",
+        ]
+    )
+    clone = index_data["projects"][0]
+    assert clone["s3_path"] == "pointclouds/neu/new456/kopie/versions/v2"
+    assert clone["viewer_path"] == "neu/new456/kopie/versions/v2"
+    assert clone["models"][0]["s3_path"] == f"pointclouds/neu/new456/kopie/models/haus/versions/{VERSIONED_MODEL_SHA}"
+    assert clone["models"][0]["viewer_path"].startswith("neu/new456/kopie/models/haus/")
+
+
+def _raise_delete_denied(_keys):
+    raise RuntimeError("delete denied")
+
+
+def test_upload_new_project_cleanup_failure_keeps_original_error_and_restores_index(tmp_path):
+    potree = write_potree(tmp_path, "single")
+    prepared_upload = build_new_project_upload(
+        sources=(PointcloudSource(str(potree), input_format="potree"),),
+        timestamp="2026-06-21T12:00:00",
+        kunde="Kunde",
+        projekt="Projekt",
+        project_id="abc123ef",
+        project_url="https://viewer/?id=abc123ef",
+        project_viewer_root="kunde/abc123ef/projekt",
+        project_s3_prefix="pointclouds/kunde/abc123ef/projekt",
+    )
+    index_data = {"projects": [{"id": "old"}]}
+
+    def failing_save(_data):
+        raise RuntimeError("index save timeout")
+
+    with pytest.raises(RuntimeError) as error:
+        upload_new_project(
+            s3_client=FakeS3Client(),
+            index_data=index_data,
+            prepared_upload=prepared_upload,
+            save_index=failing_save,
+            delete_keys=_raise_delete_denied,
+        )
+
+    message = str(error.value)
+    assert "index save timeout" in message and "delete denied" in message
+    assert "pointclouds/kunde/abc123ef/projekt/metadata.json" in message
+    assert set(error.value.orphaned_keys) == {
+        "pointclouds/kunde/abc123ef/projekt/cloud.js",
+        "pointclouds/kunde/abc123ef/projekt/metadata.json",
+    }
+    assert index_data == {"projects": [{"id": "old"}]}
+
+
+def test_replace_project_pointclouds_cleanup_failure_still_restores_index(tmp_path):
+    first = write_potree(tmp_path, "first", b"first")
+    prepared = prepare_cloud_uploads(
+        (PointcloudSource(str(first), name="First", input_format="potree"),),
+        "kunde/project/projekt/versions/v2",
+        "pointclouds/kunde/project/projekt/versions/v2",
+    )
+    index_data = {"projects": [{"id": "project", "projekt": "Old"}]}
+
+    with pytest.raises(RuntimeError, match="verwaiste S3-Keys") as error:
+        replace_project_pointclouds(
+            s3_client=FakeS3Client(),
+            index_data=index_data,
+            project_id="project",
+            base_viewer_path="kunde/project/projekt/versions/v2",
+            s3_prefix="pointclouds/kunde/project/projekt/versions/v2",
+            prepared_clouds=prepared,
+            existing_keys=(),
+            save_index=lambda _data: False,
+            delete_keys=_raise_delete_denied,
+        )
+
+    assert "konnte nicht gespeichert" in str(error.value)
+    assert index_data == {"projects": [{"id": "project", "projekt": "Old"}]}
+
+
+def test_conflict_rollback_deletes_fresh_version_below_referenced_stable_root():
+    from dronautix_uploader.core.project_operations import _rollback_keys_preserving_conflict
+
+    root = "pointclouds/kunde/project/projekt"
+    conflict = ProjectMetadataConflictError("index changed")
+    conflict.current_data = {"projects": [{"id": "project", "s3_path": root}]}
+    uploaded = (f"{root}/versions/v2/metadata.json", f"{root}/versions/v2/octree.bin")
+
+    assert _rollback_keys_preserving_conflict(uploaded, {"projects": []}, conflict) == uploaded
+
+
+def test_conflict_rollback_keeps_keys_referenced_by_concurrent_winner():
+    from dronautix_uploader.core.project_operations import _rollback_keys_preserving_conflict
+
+    root = "pointclouds/kunde/project/projekt"
+    conflict = ProjectMetadataConflictError("index changed")
+    conflict.current_data = {"projects": [{"id": "project", "s3_path": f"{root}/versions/v2"}]}
+    uploaded = (f"{root}/versions/v2/metadata.json", f"{root}/models/haus/versions/x/model.json")
+
+    assert _rollback_keys_preserving_conflict(uploaded, {"projects": []}, conflict) == (
+        f"{root}/models/haus/versions/x/model.json",
+    )
+
+
+def test_upload_new_project_retries_index_save_on_unrelated_conflict_without_rollback(tmp_path):
+    potree = write_potree(tmp_path, "single")
+    prepared_upload = build_new_project_upload(
+        sources=(PointcloudSource(str(potree), input_format="potree"),),
+        timestamp="2026-06-21T12:00:00",
+        kunde="Kunde",
+        projekt="Projekt",
+        project_id="abc123ef",
+        project_url="https://viewer/?id=abc123ef",
+        project_viewer_root="kunde/abc123ef/projekt",
+        project_s3_prefix="pointclouds/kunde/abc123ef/projekt",
+    )
+    index_data = {"projects": [{"id": "old"}]}
+    saves = []
+    deleted_keys = []
+
+    def save_index(data):
+        saves.append(copy.deepcopy(data))
+        if len(saves) == 1:
+            conflict = ProjectMetadataConflictError("projects_index.json", {"projects": [{"id": "other"}, {"id": "old"}]})
+            conflict.current_snapshot = {"projects": [{"id": "other"}, {"id": "old"}]}
+            raise conflict
+        return True
+
+    result = upload_new_project(
+        s3_client=FakeS3Client(),
+        index_data=index_data,
+        prepared_upload=prepared_upload,
+        save_index=save_index,
+        delete_keys=lambda keys: deleted_keys.extend(keys),
+    )
+
+    assert result.status == "success"
+    assert deleted_keys == []
+    assert [project["id"] for project in saves[-1]["projects"]] == ["abc123ef", "other", "old"]
+    assert [project["id"] for project in index_data["projects"]] == ["abc123ef", "other", "old"]
+
+
+def test_upload_new_project_gives_up_after_repeated_conflicts_and_rolls_back(tmp_path):
+    potree = write_potree(tmp_path, "single")
+    prepared_upload = build_new_project_upload(
+        sources=(PointcloudSource(str(potree), input_format="potree"),),
+        timestamp="2026-06-21T12:00:00",
+        kunde="Kunde",
+        projekt="Projekt",
+        project_id="abc123ef",
+        project_url="https://viewer/?id=abc123ef",
+        project_viewer_root="kunde/abc123ef/projekt",
+        project_s3_prefix="pointclouds/kunde/abc123ef/projekt",
+    )
+    index_data = {"projects": [{"id": "old"}]}
+    attempts = []
+    deleted_keys = []
+
+    def always_conflicting(data):
+        attempts.append(data)
+        conflict = ProjectMetadataConflictError("projects_index.json", {"projects": [{"id": "old"}]})
+        conflict.current_snapshot = {"projects": [{"id": "old"}]}
+        raise conflict
+
+    with pytest.raises(ProjectMetadataConflictError):
+        upload_new_project(
+            s3_client=FakeS3Client(),
+            index_data=index_data,
+            prepared_upload=prepared_upload,
+            save_index=always_conflicting,
+            delete_keys=lambda keys: deleted_keys.extend(keys),
+        )
+
+    assert len(attempts) == 3
+    assert index_data == {"projects": [{"id": "old"}]}
+    assert sorted(deleted_keys) == [
+        "pointclouds/kunde/abc123ef/projekt/cloud.js",
+        "pointclouds/kunde/abc123ef/projekt/metadata.json",
+    ]
+
+
+def test_replace_project_pointclouds_cancel_after_first_file_rolls_back_and_restores_index(tmp_path):
+    from dronautix_uploader.core.contracts import OperationCancelledError
+
+    first = write_potree(tmp_path, "first", b"first")
+    prepared = prepare_cloud_uploads(
+        (PointcloudSource(str(first), name="First", input_format="potree"),),
+        "kunde/project/projekt/versions/v2",
+        "pointclouds/kunde/project/projekt/versions/v2",
+    )
+    s3_client = FakeS3Client()
+    index_data = {"projects": [{"id": "project", "projekt": "Old"}]}
+    deleted_keys = []
+    saves = []
+
+    with pytest.raises(OperationCancelledError):
+        replace_project_pointclouds(
+            s3_client=s3_client,
+            index_data=index_data,
+            project_id="project",
+            base_viewer_path="kunde/project/projekt/versions/v2",
+            s3_prefix="pointclouds/kunde/project/projekt/versions/v2",
+            prepared_clouds=prepared,
+            existing_keys=(),
+            save_index=lambda data: saves.append(data) or True,
+            delete_keys=lambda keys: deleted_keys.extend(keys),
+            cancel_requested=lambda: len(s3_client.uploads) >= 1,
+        )
+
+    assert saves == []
+    assert deleted_keys == [key for _bucket, key, _args in s3_client.uploads]
+    assert index_data == {"projects": [{"id": "project", "projekt": "Old"}]}
+
+
+def test_duplicate_project_cancel_during_copy_removes_already_copied_objects():
+    from dronautix_uploader.core.contracts import OperationCancelledError
+
+    s3_client = FakeProjectS3Client(
+        pages=[
+            {
+                "Contents": [
+                    {"Key": "pointclouds/old/root/a.bin", "Size": 4},
+                    {"Key": "pointclouds/old/root/b.bin", "Size": 4},
+                ]
+            }
+        ]
+    )
+    index_data = {"projects": [{"id": "src", "s3_path": "pointclouds/old/root", "viewer_path": "old/root"}]}
+    deleted_keys = []
+
+    with pytest.raises(OperationCancelledError):
+        duplicate_project(
+            s3_client=s3_client,
+            index_data=index_data,
+            source_project=index_data["projects"][0],
+            timestamp="t",
+            new_kunde="Neu",
+            new_projekt="Kopie",
+            new_project_id="new1",
+            new_project_url="u",
+            new_viewer_root="neu/new1/kopie",
+            new_s3_prefix="pointclouds/neu/new1/kopie",
+            save_index=lambda _data: True,
+            delete_keys=lambda keys: deleted_keys.extend(keys),
+            cancel_requested=lambda: len(s3_client.copies) >= 1,
+        )
+
+    assert [copy["Key"] for copy in s3_client.copies] == ["pointclouds/neu/new1/kopie/a.bin"]
+    assert deleted_keys == ["pointclouds/neu/new1/kopie/a.bin"]
+    assert [project["id"] for project in index_data["projects"]] == ["src"]

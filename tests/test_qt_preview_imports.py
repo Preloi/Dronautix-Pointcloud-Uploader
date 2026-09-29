@@ -1,5 +1,6 @@
 import ast
 import importlib
+import importlib.util
 import inspect
 from pathlib import Path
 
@@ -45,7 +46,6 @@ def test_qt_preview_modules_import_without_pyside6():
         "dronautix_uploader.qt_app",
         "dronautix_uploader.qt_app.app",
         "dronautix_uploader.qt_app.app_identity",
-        "dronautix_uploader.qt_app.cutover_readiness_controller",
         "dronautix_uploader.qt_app.main_window",
         "dronautix_uploader.qt_app.pages",
         "dronautix_uploader.qt_app.local_conversion_controller",
@@ -63,8 +63,30 @@ def test_qt_preview_modules_import_without_pyside6():
         "dronautix_uploader.qt_app.upload_dialog_models",
         "dronautix_uploader.qt_app.upload_workflow_controller",
         "dronautix_uploader.qt_app.upload_wizard_model",
+        "dronautix_uploader.qt_app.window.project_actions",
+        "dronautix_uploader.qt_app.window.runtime",
+        "dronautix_uploader.qt_app.window.support",
+        "dronautix_uploader.qt_app.window.tasks",
+        "dronautix_uploader.qt_app.window.updates",
+        "dronautix_uploader.qt_app.window.uploads",
     ):
         importlib.import_module(module_name)
+
+
+def test_every_relative_import_resolves_including_lazy_imports_in_functions():
+    """Lazy imports only fail when the code path runs; moving code between packages breaks them silently."""
+
+    package_root = Path(__file__).resolve().parents[1] / "dronautix_uploader"
+    unresolved = []
+    for source_path in package_root.rglob("*.py"):
+        package = ".".join(source_path.relative_to(package_root.parent).parent.parts)
+        for node in ast.walk(ast.parse(source_path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.ImportFrom) and node.level:
+                name = importlib.util.resolve_name("." * node.level + (node.module or ""), package)
+                if importlib.util.find_spec(name) is None:
+                    unresolved.append(f"{source_path.relative_to(package_root.parent)}:{node.lineno} {name}")
+
+    assert unresolved == []
 
 
 def test_qt_app_identity_defaults_to_isolated_preview_and_requires_explicit_final():
@@ -260,9 +282,9 @@ def test_projects_page_defers_reload_until_project_action_result_without_qt():
 
 
 def test_main_window_project_actions_check_busy_state_before_starting_worker_without_qt():
-    from dronautix_uploader.qt_app.main_window import create_main_window
+    from dronautix_uploader.qt_app.window.project_actions import ProjectActionsMixin
 
-    tree = ast.parse(inspect.getsource(create_main_window))
+    tree = ast.parse(inspect.getsource(ProjectActionsMixin))
     action_handler = next(
         node
         for node in ast.walk(tree)
@@ -280,18 +302,19 @@ def test_main_window_project_actions_check_busy_state_before_starting_worker_wit
 
 
 def test_project_link_toggle_has_no_confirmation_or_success_popup():
-    from dronautix_uploader.qt_app.main_window import create_main_window
+    from dronautix_uploader.qt_app import main_window
+    from dronautix_uploader.qt_app.window import project_actions
 
-    source = inspect.getsource(create_main_window)
+    source = inspect.getsource(main_window) + inspect.getsource(project_actions)
 
     assert "confirm_set_project_link_state" not in source
     assert 'action_id not in {ACTION_DISABLE_LINK, ACTION_ENABLE_LINK} or summary.status != "success"' in source
 
 
 def test_main_window_records_detail_progress_events_but_not_high_frequency_progress_without_qt():
-    from dronautix_uploader.qt_app.main_window import create_main_window
+    from dronautix_uploader.qt_app.window.tasks import TaskRunnerMixin
 
-    tree = ast.parse(inspect.getsource(create_main_window))
+    tree = ast.parse(inspect.getsource(TaskRunnerMixin))
     progress_handler = next(
         node
         for node in ast.walk(tree)
@@ -315,3 +338,16 @@ def test_runtime_dialogs_accept_settings_defaults_without_qt():
 
     assert "defaults" in inspect.signature(prompt_replace_all_pointclouds).parameters
     assert "defaults" in inspect.signature(prompt_replace_single_pointcloud).parameters
+
+
+def test_every_catalog_project_action_has_a_builder_or_is_a_link_action():
+    from dronautix_uploader.qt_app.project_management_actions import (
+        ACTION_COPY_LINK,
+        ACTION_OPEN_LINK,
+        PROJECT_MANAGEMENT_ACTIONS,
+    )
+    from dronautix_uploader.qt_app.window.project_actions import _PROJECT_ACTION_BUILDERS
+
+    catalog = {action.action_id for action in PROJECT_MANAGEMENT_ACTIONS}
+
+    assert catalog - {ACTION_OPEN_LINK, ACTION_COPY_LINK} == set(_PROJECT_ACTION_BUILDERS)

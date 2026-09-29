@@ -13,6 +13,7 @@ PROJECT_CRS_METADATA_KEYS = (
     "crs",
     "projection",
     "epsg",
+    "crs_name",
     "vertical_crs",
     "vertical_epsg",
     "vertical_projection",
@@ -184,12 +185,16 @@ def apply_common_crs_or_clear(
     common_crs: dict[str, Any] | None,
     apply_func: Callable[[MutableMapping[str, Any], dict[str, Any]], None],
 ) -> MutableMapping[str, Any]:
-    """Apply common CRS metadata to a project, or clear stale project-level CRS fields."""
+    """Replace project-level CRS fields with the common CRS, or clear them.
 
+    The fields are always cleared first: the apply function only writes keys
+    present in ``common_crs``, so a replacement without vertical CRS would
+    otherwise keep the previous project's vertical datum or EPSG code.
+    """
+
+    clear_project_crs_metadata(project)
     if common_crs:
         apply_func(project, common_crs)
-    else:
-        clear_project_crs_metadata(project)
     return project
 
 

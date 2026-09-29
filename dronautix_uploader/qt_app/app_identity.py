@@ -1,8 +1,8 @@
 """Runtime identity for the QtWidgets app.
 
-Preview must stay isolated until the cutover gates are proven. Final mode is
-explicit so the same UI bootstrap can later use the production config and
-installer identity without rewriting the application start path.
+Preview runs side by side with the installed app (own config, keyring and
+single-instance mutex); final mode uses the production config and installer
+identity.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ PREVIEW_IDENTITY = QtAppIdentity(
     mode=APP_MODE_PREVIEW,
     application_name="Dronautix Pointcloud Uploader Preview",
     window_title="Dronautix Pointcloud Uploader V2 Preview",
-    sidebar_badge="QtWidgets Preview",
+    sidebar_badge=f"Vorschau · Version {APP_VERSION}",
     uses_preview_config=True,
     default_runtime_status="Qt Preview - keine Service-Integration aktiv",
 )

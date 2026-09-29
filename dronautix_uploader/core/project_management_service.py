@@ -15,7 +15,14 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from .constants import BUCKET_NAME, S3_INDEX_CACHE_CONTROL
-from .contracts import CancelCallback, DownloadResult, ModelUploadInput, ProgressEvent, ProjectOperationResult
+from .contracts import (
+    CancelCallback,
+    DownloadResult,
+    ModelUploadInput,
+    ProgressEvent,
+    ProjectOperationResult,
+    make_cancel_guarded_progress,
+)
 from .crs_detection import detect_crs_from_metadata_dict
 from .crs_service import CrsValidationError, extract_pointcloud_crs_metadata, normalize_crs_metadata
 from .glb_optimization_service import GLBOptimizationService
@@ -31,6 +38,7 @@ from .project_index_service import (
 )
 from .project_operations import (
     PreparedCloudUpload,
+    _save_index_with_rebase,
     add_project_models as add_project_models_operation,
     add_project_pointclouds as add_project_pointclouds_operation,
     apply_project_rename_metadata,
@@ -49,13 +57,14 @@ from .project_operations import (
     replace_single_project_pointcloud as replace_single_project_pointcloud_operation,
     replace_single_project_model as replace_single_project_model_operation,
     resolve_unique_multi_project_child,
+    strip_data_version,
     validate_project_pointcloud_add_target,
 )
 from .project_repository import (
     ProjectMetadataRepository,
     ProjectMetadataWriteUncertainError,
 )
-from .s3_service import collect_project_objects, delete_s3_objects
+from .s3_service import JAVASCRIPT_CONTENT_TYPE, collect_project_objects, delete_s3_objects
 from .upload_workflow_service import (
     build_model_pointcloud_spatial_warning_for_bounds,
     cleanup_glb_upload_run_staging_root,
@@ -162,8 +171,15 @@ class ProjectManagementService:
                     expected_etag=update["original_etag"],
                 )
                 applied_metadata_updates.append(update)
-            if not self._save_projects_index(index_data):
-                raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
+            # A concurrent edit of another project is rebased like for the other
+            # actions; a change of this project still raises and rolls back.
+            _save_index_with_rebase(
+                index_data,
+                original_index,
+                self._save_projects_index,
+                reapply=lambda fresh: update_project_in_index(fresh, project_id, apply_rename),
+                project_id=project_id,
+            )
         except Exception as error:
             index_data.clear()
             index_data.update(original_index)
@@ -210,7 +226,14 @@ class ProjectManagementService:
             bucket_name=self._bucket_name,
         )
 
-    def duplicate_project(self, project_id: str, new_kunde: str, new_projekt: str, on_progress=None):
+    def duplicate_project(
+        self,
+        project_id: str,
+        new_kunde: str,
+        new_projekt: str,
+        on_progress=None,
+        cancel_requested: CancelCallback | None = None,
+    ):
         index_data = self.repository.load_projects_index()
         source_project, _is_disabled = self._find_project(index_data, project_id)
         new_project_id = self.id_factory()
@@ -231,6 +254,7 @@ class ProjectManagementService:
             delete_keys=lambda keys: delete_s3_objects(self.s3_client, keys, bucket_name=self._bucket_name),
             bucket_name=self._bucket_name,
             on_progress=on_progress,
+            cancel_requested=cancel_requested,
         )
 
     def download_project(
@@ -309,6 +333,7 @@ class ProjectManagementService:
         project_id: str,
         prepared_clouds: tuple[PreparedCloudUpload, ...] | list[PreparedCloudUpload],
         on_progress=None,
+        cancel_requested: CancelCallback | None = None,
     ):
         index_data = self.repository.load_projects_index()
         project_info, _is_disabled = self._find_project(index_data, project_id)
@@ -339,6 +364,7 @@ class ProjectManagementService:
             on_progress=on_progress,
             bucket_name=self._bucket_name,
             timestamp=self.timestamp_factory(),
+            cancel_requested=cancel_requested,
         )
 
     def replace_project_pointclouds_from_sources(
@@ -349,6 +375,7 @@ class ProjectManagementService:
         output_base_dir: str = "",
         overwrite: bool = False,
         on_progress=None,
+        cancel_requested: CancelCallback | None = None,
         converter_runner=None,
         crs_info_by_source_path: dict[str, dict[str, Any]] | None = None,
         source_overrides=None,
@@ -364,8 +391,9 @@ class ProjectManagementService:
                 output_base_dir=output_base_dir,
                 overwrite=overwrite,
             ),
-            on_progress=on_progress,
+            on_progress=make_cancel_guarded_progress(on_progress, cancel_requested),
             converter_runner=converter_runner,
+            cancel_requested=cancel_requested,
         )
         prepared_sources = _attach_source_overrides(prepared_sources, source_overrides)
         prepared_sources = _attach_crs_info(prepared_sources, tuple(source_paths), crs_info_by_source_path)
@@ -389,6 +417,7 @@ class ProjectManagementService:
                 on_progress=on_progress,
                 bucket_name=self._bucket_name,
                 timestamp=self.timestamp_factory(),
+                cancel_requested=cancel_requested,
             )
 
     def add_project_pointclouds(
@@ -396,6 +425,7 @@ class ProjectManagementService:
         project_id: str,
         prepared_clouds: tuple[PreparedCloudUpload, ...] | list[PreparedCloudUpload],
         on_progress=None,
+        cancel_requested: CancelCallback | None = None,
     ):
         index_data = self.repository.load_projects_index()
         project_info, _is_disabled = self._find_project(index_data, project_id)
@@ -418,6 +448,7 @@ class ProjectManagementService:
             on_progress=on_progress,
             bucket_name=self._bucket_name,
             timestamp=self.timestamp_factory(),
+            cancel_requested=cancel_requested,
         )
 
     def add_project_pointclouds_from_sources(
@@ -428,6 +459,7 @@ class ProjectManagementService:
         output_base_dir: str = "",
         overwrite: bool = False,
         on_progress=None,
+        cancel_requested: CancelCallback | None = None,
         converter_runner=None,
         crs_info_by_source_path: dict[str, dict[str, Any]] | None = None,
         source_overrides=None,
@@ -443,8 +475,9 @@ class ProjectManagementService:
                 output_base_dir=output_base_dir,
                 overwrite=overwrite,
             ),
-            on_progress=on_progress,
+            on_progress=make_cancel_guarded_progress(on_progress, cancel_requested),
             converter_runner=converter_runner,
+            cancel_requested=cancel_requested,
         )
         prepared_sources = _attach_source_overrides(prepared_sources, source_overrides)
         prepared_sources = _attach_crs_info(prepared_sources, tuple(source_paths), crs_info_by_source_path)
@@ -463,6 +496,7 @@ class ProjectManagementService:
                 on_progress=on_progress,
                 bucket_name=self._bucket_name,
                 timestamp=self.timestamp_factory(),
+                cancel_requested=cancel_requested,
             )
 
     def remove_project_pointcloud(
@@ -535,6 +569,7 @@ class ProjectManagementService:
         target_pointcloud_s3_path: str,
         prepared_cloud: PreparedCloudUpload,
         on_progress=None,
+        cancel_requested: CancelCallback | None = None,
     ):
         index_data = self.repository.load_projects_index()
         project_info, _is_disabled = self._find_project(index_data, project_id)
@@ -571,6 +606,7 @@ class ProjectManagementService:
             on_progress=on_progress,
             bucket_name=self._bucket_name,
             timestamp=self.timestamp_factory(),
+            cancel_requested=cancel_requested,
         )
 
     def replace_single_project_pointcloud_from_source(
@@ -582,6 +618,7 @@ class ProjectManagementService:
         output_base_dir: str = "",
         overwrite: bool = False,
         on_progress=None,
+        cancel_requested: CancelCallback | None = None,
         converter_runner=None,
         crs_info: dict[str, Any] | None = None,
     ):
@@ -598,8 +635,9 @@ class ProjectManagementService:
                 output_base_dir=output_base_dir,
                 overwrite=overwrite,
             ),
-            on_progress=on_progress,
+            on_progress=make_cancel_guarded_progress(on_progress, cancel_requested),
             converter_runner=converter_runner,
+            cancel_requested=cancel_requested,
         )
         prepared_sources = _attach_crs_info(
             prepared_sources,
@@ -641,6 +679,7 @@ class ProjectManagementService:
                 on_progress=on_progress,
                 bucket_name=self._bucket_name,
                 timestamp=self.timestamp_factory(),
+                cancel_requested=cancel_requested,
             )
 
     def replace_single_project_model_from_source(
@@ -651,6 +690,7 @@ class ProjectManagementService:
         *,
         model_json_path: str = "",
         on_progress=None,
+        cancel_requested: CancelCallback | None = None,
         confirm_spatial_warning: Callable[[str], bool] | None = None,
         confirm_crs_repair: Callable[[str], bool] | None = None,
     ):
@@ -667,7 +707,6 @@ class ProjectManagementService:
             raise ValueError("Das ausgewählte GLB konnte nicht eindeutig gefunden werden.")
         target_model = matches[0]
         model_id = str(target_model.get("id", "")).strip()
-        model_name = str(target_model.get("name", "")).strip() or model_id
         if not model_id:
             raise ValueError("Das ausgewählte GLB hat keine Modell-ID.")
         project_crs_info, crs_repair_plan = _resolve_project_model_crs(
@@ -682,9 +721,10 @@ class ProjectManagementService:
         prepared_models = ()
         try:
             prepared_model = (self.glb_service or GLBOptimizationService()).prepare(
+                # No name: a replaced model is named after its new file. The id
+                # (slug) stays, so paths and viewer references do not change.
                 ModelUploadInput(
                     source_path=source_path,
-                    name=model_name,
                     slug=model_id,
                     model_json_path=model_json_path,
                 ),
@@ -692,7 +732,8 @@ class ProjectManagementService:
                 staging_root=staging_run_root,
                 project_viewer_root=project_viewer_root,
                 project_s3_prefix=project_s3_prefix,
-                on_progress=on_progress,
+                on_progress=make_cancel_guarded_progress(on_progress, cancel_requested),
+                cancel_requested=cancel_requested,
             )
             prepared_models = (prepared_model,)
             spatial_warning = _existing_project_model_spatial_warning(
@@ -735,6 +776,7 @@ class ProjectManagementService:
                     on_progress=on_progress,
                     bucket_name=self._bucket_name,
                     timestamp=self.timestamp_factory(),
+                    cancel_requested=cancel_requested,
                 )
             except Exception as error:
                 _restore_index_data(index_data, original_index_data)
@@ -771,6 +813,7 @@ class ProjectManagementService:
         *,
         model_json_by_source_path: dict[str, str] | None = None,
         on_progress=None,
+        cancel_requested: CancelCallback | None = None,
         confirm_spatial_warning: Callable[[str], bool] | None = None,
         confirm_crs_repair: Callable[[str], bool] | None = None,
     ):
@@ -816,7 +859,8 @@ class ProjectManagementService:
                         used_slugs=used_slugs,
                         project_viewer_root=project_viewer_root,
                         project_s3_prefix=project_s3_prefix,
-                        on_progress=on_progress,
+                        on_progress=make_cancel_guarded_progress(on_progress, cancel_requested),
+                        cancel_requested=cancel_requested,
                     )
                 )
             spatial_warning = _existing_project_model_spatial_warning(
@@ -854,6 +898,7 @@ class ProjectManagementService:
                     on_progress=on_progress,
                     bucket_name=self._bucket_name,
                     timestamp=self.timestamp_factory(),
+                    cancel_requested=cancel_requested,
                 )
             except Exception as error:
                 _restore_index_data(index_data, original_index_data)
@@ -959,7 +1004,7 @@ class ProjectManagementService:
             if str(project.get("id", "")).strip() == normalized_project_id:
                 if project.get("cleanup_pending") and not allow_cleanup_pending:
                     raise RuntimeError(
-                        "Projektloeschung ist noch nicht abgeschlossen; nur ein erneuter Loeschversuch ist erlaubt."
+                        "Projektlöschung ist noch nicht abgeschlossen; nur ein erneuter Löschversuch ist erlaubt."
                     )
                 return project, is_disabled
         raise ValueError(f"Projekt mit ID '{project_id}' wurde nicht gefunden.")
@@ -995,7 +1040,7 @@ class ProjectManagementService:
         viewer_root, s3_root = self._stable_project_roots(project)
         version = str(self.data_version_factory()).strip()
         if not version or "/" in version or "\\" in version:
-            raise ValueError("Ungueltige Datenversion fuer den Punktwolken-Upload.")
+            raise ValueError("Ungültige Datenversion für den Punktwolken-Upload.")
         return f"{viewer_root}/versions/{version}", f"{s3_root}/versions/{version}"
 
     def _save_projects_index(self, index_data: dict[str, Any]) -> bool:
@@ -1148,11 +1193,7 @@ def _attach_source_overrides(prepared_sources, source_overrides):
     return tuple(updated_sources)
 
 
-def _strip_data_version(path: str) -> str:
-    marker = "/versions/"
-    normalized = str(path or "").strip().rstrip("/")
-    stable_root, separator, version = normalized.rpartition(marker)
-    return stable_root if separator and version and "/" not in version else normalized
+_strip_data_version = strip_data_version
 
 
 def _confirm_spatial_warning(
@@ -1319,7 +1360,7 @@ def _ensure_potree_project(project: dict[str, Any]) -> None:
         for entry in _cloud_entries(project)
     }
     if any(cloud_format and cloud_format != "potree" for cloud_format in formats):
-        raise ValueError("Das Projekt enthaelt ein nicht unterstuetztes Punktwolkenformat.")
+        raise ValueError("Das Projekt enthält ein nicht unterstütztes Punktwolkenformat.")
 
 
 def _cloud_label(entry: dict[str, Any], index: int) -> str:
@@ -1370,7 +1411,7 @@ def _s3_potree_documents(s3_client, bucket_name: str, entry: dict[str, Any], pro
         if not isinstance(document, dict):
             raise ValueError(f"Potree-Metadaten sind ungültig: {key}")
         headers = _s3_object_headers(response)
-        headers.setdefault("ContentType", "application/javascript" if filename == "cloud.js" else "application/json")
+        headers.setdefault("ContentType", JAVASCRIPT_CONTENT_TYPE if filename == "cloud.js" else "application/json")
         documents.append((key, document, raw, filename == "cloud.js", headers, _require_s3_etag(response, key)))
     return tuple(documents)
 
@@ -1576,12 +1617,16 @@ def _repair_s3_potree_crs_metadata(
                 )
                 if payload == raw:
                     continue
+                # Potree metadata is uploaded as immutable; a repaired copy under
+                # the same key must not stay cached with the old CRS for a year.
+                repair_headers = dict(headers)
+                repair_headers["CacheControl"] = S3_INDEX_CACHE_CONTROL
                 written_etag = _put_s3_metadata(
                     s3_client,
                     bucket_name,
                     key,
                     payload,
-                    headers,
+                    repair_headers,
                     expected_etag=original_etag,
                 )
                 backups.append((key, raw, headers, written_etag))
@@ -1625,7 +1670,7 @@ def _s3_object_headers(response) -> dict[str, Any]:
 def _require_s3_etag(response, key: str) -> str:
     etag = str(response.get("ETag", "") or "").strip() if isinstance(response, dict) else ""
     if not etag:
-        raise RuntimeError(f"S3-Metadaten liefern keinen ETag fuer sichere Aenderungen: {key}")
+        raise RuntimeError(f"S3-Metadaten liefern keinen ETag für sichere Änderungen: {key}")
     return etag
 
 
@@ -1652,7 +1697,7 @@ def _put_s3_metadata(
         response_data = getattr(error, "response", None)
         code = str((response_data or {}).get("Error", {}).get("Code", "")) if isinstance(response_data, dict) else ""
         if code in {"PreconditionFailed", "412", "ConditionalRequestConflict"}:
-            raise RuntimeError(f"S3-Metadatenkonflikt bei {key}; Datei wurde inzwischen geaendert.") from error
+            raise RuntimeError(f"S3-Metadatenkonflikt bei {key}; Datei wurde inzwischen geändert.") from error
         raise ProjectMetadataWriteUncertainError(key) from error
     etag = str((response or {}).get("ETag", "") or "").strip()
     if not etag:

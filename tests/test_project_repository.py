@@ -172,3 +172,85 @@ def test_commit_then_transport_error_is_reported_with_verified_current_index():
         repository.save_projects_index(snapshot)
 
     assert exc_info.value.current_data["projects"][0]["id"] == "winner"
+
+
+def _two_user_repository():
+    initial = {"projects": [{"id": "a", "projekt": "A"}, {"id": "b", "projekt": "B"}]}
+    s3_client = FakeS3Client({S3_INDEX_JSON: json.dumps(initial).encode("utf-8")})
+    return s3_client, ProjectMetadataRepository(s3_client=s3_client, bucket_name="bucket")
+
+
+def _stored_index(s3_client):
+    return json.loads(s3_client.objects[S3_INDEX_JSON].decode("utf-8"))
+
+
+def test_conflict_error_carries_saveable_current_snapshot():
+    from dronautix_uploader.core.project_repository import ProjectMetadataConflictError
+
+    s3_client, repository = _two_user_repository()
+    stale = repository.load_projects_index()
+    winner = repository.load_projects_index()
+    winner["projects"][1]["projekt"] = "B2"
+    repository.save_projects_index(winner)
+
+    with pytest.raises(ProjectMetadataConflictError) as error:
+        repository.save_projects_index(stale)
+
+    fresh = error.value.current_snapshot
+    assert fresh["projects"][1]["projekt"] == "B2"
+    fresh["projects"][0]["projekt"] = "A2"
+    repository.save_projects_index(fresh)
+    assert [p["projekt"] for p in _stored_index(s3_client)["projects"]] == ["A2", "B2"]
+
+
+def test_upload_is_rebased_when_another_project_changed_during_the_upload():
+    from dronautix_uploader.core.project_operations import _insert_project, _save_index_with_rebase
+
+    s3_client, repository = _two_user_repository()
+    index_data = repository.load_projects_index()
+    snapshot = json.loads(json.dumps(index_data))
+    concurrent = repository.load_projects_index()
+    concurrent["projects"][1]["disabled_at"] = "x"
+    repository.save_projects_index(concurrent)
+
+    new_project = {"id": "new", "projekt": "Neu"}
+    _insert_project(index_data, new_project)
+    _save_index_with_rebase(
+        index_data,
+        snapshot,
+        lambda data: repository.save_projects_index(data) or True,
+        reapply=lambda fresh: _insert_project(fresh, new_project),
+        project_id="new",
+    )
+
+    stored = _stored_index(s3_client)["projects"]
+    assert [p["id"] for p in stored] == ["new", "a", "b"]
+    assert stored[2]["disabled_at"] == "x"
+    assert [p["id"] for p in index_data["projects"]] == ["new", "a", "b"]
+
+
+def test_update_is_not_rebased_when_the_own_project_changed_concurrently():
+    from dronautix_uploader.core.project_operations import _apply_project_update, _save_index_with_rebase
+    from dronautix_uploader.core.project_repository import ProjectMetadataConflictError
+
+    s3_client, repository = _two_user_repository()
+    index_data = repository.load_projects_index()
+    snapshot = json.loads(json.dumps(index_data))
+    concurrent = repository.load_projects_index()
+    concurrent["projects"][0]["projekt"] = "Umbenannt"
+    repository.save_projects_index(concurrent)
+
+    def update(project):
+        project["pointcloud_count"] = 2
+
+    _apply_project_update(index_data, "a", update)
+    with pytest.raises(ProjectMetadataConflictError):
+        _save_index_with_rebase(
+            index_data,
+            snapshot,
+            lambda data: repository.save_projects_index(data) or True,
+            reapply=lambda fresh: _apply_project_update(fresh, "a", update),
+            project_id="a",
+        )
+
+    assert _stored_index(s3_client)["projects"][0] == {"id": "a", "projekt": "Umbenannt"}

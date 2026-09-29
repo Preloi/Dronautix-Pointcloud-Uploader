@@ -73,17 +73,25 @@ def load_project_management_runtime_config(
         "aws_secret_key",
         "secret_key",
     )
-    if use_keyring and (not access or not secret):
+    if use_keyring:
         loader = credential_loader or _load_keyring_password
-        credential_services = get_credential_keyring_services(preview=preview)
-        loaded_access, loaded_secret = _load_missing_credentials(
-            loader,
-            credential_services,
-            need_access=not access,
-            need_secret=not secret,
+        credential_services = get_credential_keyring_services(preview=preview, config=config)
+        # A complete keyring pair wins: a plain-text secret left behind by the
+        # legacy app may be outdated.
+        keyring_access, keyring_secret = _load_missing_credentials(
+            loader, credential_services, need_access=True, need_secret=True
         )
-        access = access or loaded_access
-        secret = secret or loaded_secret
+        if keyring_access and keyring_secret:
+            access, secret = keyring_access, keyring_secret
+        elif not access or not secret:
+            loaded_access, loaded_secret = _load_missing_credentials(
+                loader,
+                credential_services,
+                need_access=not access,
+                need_secret=not secret,
+            )
+            access = access or loaded_access
+            secret = secret or loaded_secret
 
     return ProjectManagementRuntimeConfig(
         aws_access_key_id=access,
@@ -218,7 +226,28 @@ def _create_s3_client(
         aws_secret_access_key=config.aws_secret_access_key,
         region_name=config.region_name,
     )
-    return session.client("s3")
+    client_config = s3_client_config()
+    return session.client("s3", config=client_config) if client_config is not None else session.client("s3")
+
+
+def s3_client_config():
+    """Bounded timeouts and standard retries for every S3 client of the app.
+
+    boto3's defaults retry only a few times and wait 60 s per read; on a stalled
+    connection a background task (and with it the close button) could hang for
+    many minutes.
+    """
+
+    try:
+        from botocore.config import Config
+    except ImportError:
+        return None
+    return Config(
+        connect_timeout=15,
+        read_timeout=120,
+        retries={"max_attempts": 5, "mode": "standard"},
+        tcp_keepalive=True,
+    )
 
 
 def _first_config_value(config: dict[str, Any], *keys: str) -> str:

@@ -66,7 +66,7 @@ def create_pointcloud_index_entry(
 
     normalized_format = str(input_format or "").strip().lower()
     if normalized_format != "potree":
-        raise ValueError(f"Nicht unterstuetztes Punktwolkenformat: {input_format}")
+        raise ValueError(f"Nicht unterstütztes Punktwolkenformat: {input_format}")
     entry: dict[str, Any] = {
         "name": name,
         "format": normalized_format,

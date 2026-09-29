@@ -129,6 +129,7 @@ def test_load_runtime_config_accepts_current_and_legacy_aws_key_aliases(
         preview=True,
         environ={"APPDATA": "unused"},
         config_loader=lambda _path: dict(config_data),
+        credential_loader=lambda _service, _username: "",
     )
 
     assert config.aws_access_key_id == expected_access_key
@@ -253,6 +254,42 @@ def test_create_runtime_controller_bundle_reports_missing_credentials(monkeypatc
     assert "fehlende Angaben" in bundle.status
 
 
+def test_create_runtime_controller_bundle_reports_invalid_region_without_raising(monkeypatch):
+    runtime_services = import_runtime_services_without_optional_modules(monkeypatch)
+    config = runtime_services.ProjectManagementRuntimeConfig(
+        aws_access_key_id="AKIA_TEST",
+        aws_secret_access_key="secret",
+        region_name="eu central 1",
+        bucket_name="bucket",
+    )
+
+    bundle = runtime_services.create_runtime_controller_bundle(
+        config,
+        boto3_session_factory=lambda **_kwargs: pytest.fail("session must not be created"),
+    )
+
+    assert bundle.ready is False
+    assert "Region" in bundle.status and "eu central 1" in bundle.status
+
+
+def test_create_runtime_controller_bundle_turns_boto_value_errors_into_status(monkeypatch):
+    runtime_services = import_runtime_services_without_optional_modules(monkeypatch)
+    config = runtime_services.ProjectManagementRuntimeConfig(
+        aws_access_key_id="AKIA_TEST",
+        aws_secret_access_key="secret",
+        region_name="eu-central-1",
+        bucket_name="bucket",
+    )
+
+    def failing_session_factory(**_kwargs):
+        raise ValueError("Provided region_name is not valid")
+
+    bundle = runtime_services.create_runtime_controller_bundle(config, boto3_session_factory=failing_session_factory)
+
+    assert bundle.ready is False
+    assert bundle.status.startswith("Nicht verbunden")
+
+
 class FakeS3Client:
     def __init__(self):
         self.objects = {
@@ -274,8 +311,9 @@ class FakeSession:
         self.s3_client = FakeS3Client()
         self.client_calls = []
 
-    def client(self, service_name):
+    def client(self, service_name, **kwargs):
         self.client_calls.append(service_name)
+        self.client_kwargs = kwargs
         assert service_name == "s3"
         return self.s3_client
 
@@ -408,10 +446,46 @@ def test_create_runtime_controller_bundle_wires_provider_and_controllers_to_shar
     bundle = runtime_services.create_runtime_controller_bundle(config, s3_client=shared_client)
 
     assert bundle.ready is True
-    assert bundle.status == "Projektverwaltung mit S3 verbunden"
+    assert bundle.status == "S3-Zugangsdaten geladen - Verbindung wird geprüft"
     assert bundle.project_provider.s3_client is shared_client
     assert bundle.project_controller.service.s3_client is shared_client
     assert bundle.upload_controller.service.s3_client is shared_client
     assert isinstance(bundle.core_api, CoreServiceApi)
     assert bundle.core_api.project_service is bundle.project_controller.service
     assert bundle.core_api.upload_service is bundle.upload_controller.service
+
+
+def test_s3_clients_use_bounded_timeouts_and_standard_retries():
+    pytest.importorskip("botocore")
+    from dronautix_uploader.adapters import runtime_services as adapter_runtime_services
+
+    sessions = []
+
+    def fake_session_factory(**kwargs):
+        sessions.append(FakeSession(**kwargs))
+        return sessions[-1]
+
+    config = adapter_runtime_services.ProjectManagementRuntimeConfig(
+        aws_access_key_id="AKIA", aws_secret_access_key="secret", region_name="eu-central-1", bucket_name="bucket"
+    )
+    adapter_runtime_services.create_project_management_service(config, boto3_session_factory=fake_session_factory)
+
+    client_config = sessions[0].client_kwargs["config"]
+    assert client_config.connect_timeout == 15
+    assert client_config.read_timeout == 120
+    assert client_config.retries == {"max_attempts": 5, "mode": "standard"}
+
+
+def test_load_runtime_config_prefers_complete_keyring_pair_over_stale_plaintext(monkeypatch):
+    runtime_services = import_runtime_services_without_optional_modules(monkeypatch)
+    stored = {"aws_access": "AKIA_KEYRING", "aws_secret": "keyring-secret"}
+
+    config = runtime_services.load_project_management_runtime_config(
+        config_path="ignored.json",
+        preview=False,
+        environ={"APPDATA": "unused"},
+        config_loader=lambda _path: {"aws_access": "AKIA_OLD", "aws_secret": "old-secret"},
+        credential_loader=lambda _service, username: stored.get(username, ""),
+    )
+
+    assert (config.aws_access_key_id, config.aws_secret_access_key) == ("AKIA_KEYRING", "keyring-secret")

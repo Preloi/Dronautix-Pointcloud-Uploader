@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "scenario_id": "single_replace",
+  "event_count": 8,
+  "events": [
+    {
+      "sequence": 1,
+      "type": "get_object",
+      "key": "projects_index.json",
+      "found": true,
+      "purpose": "read_projects_index",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 2,
+      "type": "list_objects_v2",
+      "prefix": "pointclouds/golden/replace_single/cloud_b/",
+      "keys": [
+        "pointclouds/golden/replace_single/cloud_b/cloud.js",
+        "pointclouds/golden/replace_single/cloud_b/hierarchy.bin",
+        "pointclouds/golden/replace_single/cloud_b/metadata.json"
+      ],
+      "purpose": "orphan_cleanup_scan"
+    },
+    {
+      "sequence": 3,
+      "type": "upload_file",
+      "key": "pointclouds/golden/replace_single/versions/golden-data/cloud_b_replacement/cloud.js",
+      "local_name": "cloud.js",
+      "extra_args": {
+        "ContentType": "text/javascript",
+        "CacheControl": "public, max-age=31536000, immutable"
+      },
+      "purpose": "replacement_upload"
+    },
+    {
+      "sequence": 4,
+      "type": "upload_file",
+      "key": "pointclouds/golden/replace_single/versions/golden-data/cloud_b_replacement/hierarchy.bin",
+      "local_name": "hierarchy.bin",
+      "extra_args": {
+        "ContentType": "application/octet-stream",
+        "CacheControl": "public, max-age=31536000, immutable"
+      },
+      "purpose": "replacement_upload"
+    },
+    {
+      "sequence": 5,
+      "type": "upload_file",
+      "key": "pointclouds/golden/replace_single/versions/golden-data/cloud_b_replacement/octree.bin",
+      "local_name": "octree.bin",
+      "extra_args": {
+        "ContentType": "application/octet-stream",
+        "CacheControl": "public, max-age=31536000, immutable"
+      },
+      "purpose": "replacement_upload"
+    },
+    {
+      "sequence": 6,
+      "type": "upload_file",
+      "key": "pointclouds/golden/replace_single/versions/golden-data/cloud_b_replacement/metadata.json",
+      "local_name": "metadata.json",
+      "extra_args": {
+        "ContentType": "application/json",
+        "CacheControl": "public, max-age=31536000, immutable"
+      },
+      "purpose": "replacement_upload"
+    },
+    {
+      "sequence": 7,
+      "type": "put_object",
+      "key": "projects_index.json",
+      "content_type": "application/json",
+      "cache_control": "no-cache",
+      "purpose": "save_projects_index",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 8,
+      "type": "delete_objects",
+      "keys": [
+        "pointclouds/golden/replace_single/cloud_b/cloud.js",
+        "pointclouds/golden/replace_single/cloud_b/hierarchy.bin",
+        "pointclouds/golden/replace_single/cloud_b/metadata.json"
+      ],
+      "purpose": "orphan_cleanup",
+      "bucket": "potreedronautix"
+    }
+  ],
+  "summary": {
+    "uploaded_keys": [
+      "pointclouds/golden/replace_single/versions/golden-data/cloud_b_replacement/cloud.js",
+      "pointclouds/golden/replace_single/versions/golden-data/cloud_b_replacement/hierarchy.bin",
+      "pointclouds/golden/replace_single/versions/golden-data/cloud_b_replacement/octree.bin",
+      "pointclouds/golden/replace_single/versions/golden-data/cloud_b_replacement/metadata.json"
+    ],
+    "copied_keys": [],
+    "deleted_keys": [
+      "pointclouds/golden/replace_single/cloud_b/cloud.js",
+      "pointclouds/golden/replace_single/cloud_b/hierarchy.bin",
+      "pointclouds/golden/replace_single/cloud_b/metadata.json"
+    ],
+    "put_object_keys": [
+      "projects_index.json"
+    ]
+  },
+  "uploaded_keys": [
+    "pointclouds/golden/replace_single/versions/golden-data/cloud_b_replacement/cloud.js",
+    "pointclouds/golden/replace_single/versions/golden-data/cloud_b_replacement/hierarchy.bin",
+    "pointclouds/golden/replace_single/versions/golden-data/cloud_b_replacement/octree.bin",
+    "pointclouds/golden/replace_single/versions/golden-data/cloud_b_replacement/metadata.json"
+  ],
+  "copied_keys": [],
+  "deleted_keys": [
+    "pointclouds/golden/replace_single/cloud_b/cloud.js",
+    "pointclouds/golden/replace_single/cloud_b/hierarchy.bin",
+    "pointclouds/golden/replace_single/cloud_b/metadata.json"
+  ],
+  "put_object_keys": [
+    "projects_index.json"
+  ]
+}

@@ -169,122 +169,146 @@ def find_inno_setup():
             return candidate
     return ""
 
-print("=" * 70)
-print(f"  {APP_NAME} {APP_VERSION} - EXE Builder")
-print("=" * 70)
-print()
+def missing_build_files():
+    required_files = [
+        ENTRYPOINT,
+        "icon.ico",
+        VERSION_INFO_FILE,
+        INSTALLER_VERSION_FILE,
+        INNO_SETUP_SCRIPT,
+        os.path.join("bundled_tools", "PotreeConverter", "PotreeConverter.exe"),
+        os.path.join("bundled_tools", "PotreeConverter", "laszip.dll"),
+        *GLB_TOOLCHAIN_FILES,
+    ]
+    return [file for file in required_files if not os.path.exists(file)]
 
-sync_version_files()
-cleanup_previous_build_artifacts()
-print("[OK] Versionsdateien synchronisiert")
-print("[OK] Vorherige Build-Artefakte bereinigt")
 
-# Prüfe ob PyInstaller installiert ist
-try:
-    import PyInstaller
-    print("[OK] PyInstaller ist installiert")
-except ImportError:
-    print("[FEHLER] PyInstaller nicht gefunden!")
+def pyinstaller_command(extra_args=(), root=None):
+    """PyInstaller call of the release build; the CI build check uses the same one.
+
+    With ``root`` all input paths are absolute, so the spec file can be written
+    outside the repository (``--specpath``) without changing tracked files.
+    """
+
+    def path(relative):
+        return os.path.join(root, relative) if root else relative
+
+    data_separator = ";" if sys.platform == "win32" else ":"
+    return [
+        sys.executable,
+        "-m",
+        "PyInstaller",
+        "--name=Dronautix_Pointcloud_Uploader",
+        "--onefile",                              # Eine einzelne .exe Datei
+        "--windowed",                             # Kein Konsolen-Fenster (GUI-App)
+        f"--icon={path('icon.ico')}",             # Icon einbinden
+        f"--version-file={path(VERSION_INFO_FILE)}",  # Windows-Dateiversion
+        f"--add-data={path('icon.ico')}{data_separator}.",
+        *[
+            f"--add-data={path(source)}{data_separator}{source}"
+            for source in BUNDLED_TOOL_DIRECTORIES
+        ],
+        "--hidden-import=keyring",
+        "--hidden-import=keyring.backends.Windows",
+        "--hidden-import=PySide6.QtCore",
+        "--hidden-import=PySide6.QtGui",
+        "--hidden-import=PySide6.QtWidgets",
+        "--hidden-import=boto3",
+        *extra_args,
+        path(ENTRYPOINT),
+    ]
+
+
+def check_build_prerequisites():
+    """Return True when PyInstaller, all bundled files and a sealed GLB toolchain are present."""
+
+    try:
+        import PyInstaller  # noqa: F401
+        print("[OK] PyInstaller ist installiert")
+    except ImportError:
+        print("[FEHLER] PyInstaller nicht gefunden!")
+        print()
+        print("Installation mit:")
+        print("  pip install pyinstaller")
+        print()
+        return False
+
+    missing_files = missing_build_files()
+    if missing_files:
+        print("[FEHLER] Folgende Dateien fehlen:")
+        for file in missing_files:
+            print(f"  - {file}")
+        return False
+
+    print("[OK] Alle erforderlichen Dateien gefunden")
+    glb_toolchain_issues = validate_glb_toolchain_for_packaging()
+    if glb_toolchain_issues:
+        print("[FEHLER] Die gebündelte GLB-Toolchain ist nicht produktionsbereit:")
+        for issue in glb_toolchain_issues:
+            print(f"  - {issue}")
+        return False
+    print("[OK] Gebündelte GLB-Toolchain ist versiegelt und lokal getestet")
     print()
-    print("Installation mit:")
-    print("  pip install pyinstaller")
-    print()
-    sys.exit(1)
+    return True
 
-# Prüfe ob alle erforderlichen Dateien vorhanden sind
-required_files = [
-    ENTRYPOINT,
-    "icon.ico",
-    VERSION_INFO_FILE,
-    INSTALLER_VERSION_FILE,
-    INNO_SETUP_SCRIPT,
-    os.path.join("bundled_tools", "PotreeConverter", "PotreeConverter.exe"),
-    os.path.join("bundled_tools", "PotreeConverter", "laszip.dll"),
-    *GLB_TOOLCHAIN_FILES,
-]
 
-missing_files = []
-for file in required_files:
-    if not os.path.exists(file):
-        missing_files.append(file)
-
-if missing_files:
-    print("[FEHLER] Folgende Dateien fehlen:")
-    for file in missing_files:
-        print(f"  - {file}")
-    sys.exit(1)
-
-print("[OK] Alle erforderlichen Dateien gefunden")
-glb_toolchain_issues = validate_glb_toolchain_for_packaging()
-if glb_toolchain_issues:
-    print("[FEHLER] Die gebündelte GLB-Toolchain ist nicht produktionsbereit:")
-    for issue in glb_toolchain_issues:
-        print(f"  - {issue}")
-    sys.exit(1)
-print("[OK] Gebündelte GLB-Toolchain ist versiegelt und lokal getestet")
-print()
-
-# PyInstaller Befehl
-print("Starte PyInstaller...")
-print()
-
-data_separator = ";" if sys.platform == "win32" else ":"
-cmd = [
-    sys.executable,
-    "-m",
-    "PyInstaller",
-    "--name=Dronautix_Pointcloud_Uploader",
-    "--onefile",                              # Eine einzelne .exe Datei
-    "--windowed",                             # Kein Konsolen-Fenster (GUI-App)
-    "--icon=icon.ico",                        # Icon einbinden
-    f"--version-file={VERSION_INFO_FILE}",    # Windows-Dateiversion
-    f"--add-data=icon.ico{data_separator}.",
-    *[
-        f"--add-data={source}{data_separator}{source}"
-        for source in BUNDLED_TOOL_DIRECTORIES
-    ],
-    "--hidden-import=keyring",
-    "--hidden-import=keyring.backends.Windows",
-    "--hidden-import=PySide6.QtCore",
-    "--hidden-import=PySide6.QtGui",
-    "--hidden-import=PySide6.QtWidgets",
-    "--hidden-import=boto3",
-    ENTRYPOINT,
-]
-
-print("Befehl:", " ".join(cmd))
-print()
-
-try:
-    subprocess.run(cmd, check=True, env=build_environment())
-    verify_frozen_startup(os.path.join("dist", APP_EXE_NAME))
-    inno_setup = find_inno_setup()
-    if inno_setup:
-        print("[OK] Inno Setup gefunden - baue Setup...")
-        subprocess.run([inno_setup, INNO_SETUP_SCRIPT], check=True)
-        write_release_manifest_after_installer_build()
-        sync_output_manifest()
-        print("[OK] Update-Manifest synchronisiert")
-    else:
-        print("[WARNUNG] Inno Setup nicht gefunden - Setup wurde nicht gebaut")
-    print()
+def main():
     print("=" * 70)
-    print("[ERFOLG] BUILD ERFOLGREICH!")
+    print(f"  {APP_NAME} {APP_VERSION} - EXE Builder")
     print("=" * 70)
     print()
-    print("Die .exe Datei findest du in:")
-    print("  dist/Dronautix_Pointcloud_Uploader.exe")
-    print("Das Setup findest du in:")
-    print(f"  Output/Dronautix_Pointcloud_Uploader_Setup_{APP_VERSION}.exe")
+
+    sync_version_files()
+    cleanup_previous_build_artifacts()
+    print("[OK] Versionsdateien synchronisiert")
+    print("[OK] Vorherige Build-Artefakte bereinigt")
+
+    if not check_build_prerequisites():
+        sys.exit(1)
+
+    # PyInstaller Befehl
+    print("Starte PyInstaller...")
     print()
-    print("Du kannst diese Datei nun auf jedem Windows-Computer ausführen,")
-    print("ohne dass Python installiert sein muss!")
+    cmd = pyinstaller_command()
+    print("Befehl:", " ".join(cmd))
     print()
-except subprocess.CalledProcessError as e:
-    print()
-    print("=" * 70)
-    print("[FEHLER] BUILD FEHLGESCHLAGEN")
-    print("=" * 70)
-    print()
-    print(f"Fehler: {e}")
-    sys.exit(1)
+
+    try:
+        subprocess.run(cmd, check=True, env=build_environment())
+        verify_frozen_startup(os.path.join("dist", APP_EXE_NAME))
+        inno_setup = find_inno_setup()
+        if inno_setup:
+            print("[OK] Inno Setup gefunden - baue Setup...")
+            subprocess.run([inno_setup, INNO_SETUP_SCRIPT], check=True)
+            # Creates the manifest locally only; publishing it (push to master)
+            # is a separate step, see docs/RELEASE.md.
+            write_release_manifest_after_installer_build()
+            sync_output_manifest()
+            print("[OK] Update-Manifest synchronisiert")
+        else:
+            print("[WARNUNG] Inno Setup nicht gefunden - Setup wurde nicht gebaut")
+        print()
+        print("=" * 70)
+        print("[ERFOLG] BUILD ERFOLGREICH!")
+        print("=" * 70)
+        print()
+        print("Die .exe Datei findest du in:")
+        print("  dist/Dronautix_Pointcloud_Uploader.exe")
+        print("Das Setup findest du in:")
+        print(f"  Output/Dronautix_Pointcloud_Uploader_Setup_{APP_VERSION}.exe")
+        print()
+        print("Du kannst diese Datei nun auf jedem Windows-Computer ausführen,")
+        print("ohne dass Python installiert sein muss!")
+        print()
+    except subprocess.CalledProcessError as e:
+        print()
+        print("=" * 70)
+        print("[FEHLER] BUILD FEHLGESCHLAGEN")
+        print("=" * 70)
+        print()
+        print(f"Fehler: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -54,6 +54,9 @@ def test_second_instance_exits_before_qt_start_and_shows_message(monkeypatch):
     messages = []
 
     class DuplicateGuard:
+        def __init__(self, **_kwargs):
+            pass
+
         def acquire(self):
             return False
 
@@ -62,6 +65,7 @@ def test_second_instance_exits_before_qt_start_and_shows_message(monkeypatch):
 
     monkeypatch.setattr(single_instance, "SingleInstanceGuard", DuplicateGuard)
     monkeypatch.setattr(single_instance, "show_single_instance_message", lambda title, message: messages.append(message))
+    monkeypatch.setattr(single_instance, "activate_existing_window", lambda _title: False)
     monkeypatch.setattr(
         qt_app,
         "_run_qt_application",
@@ -76,6 +80,9 @@ def test_first_instance_releases_mutex_after_qt_exit(monkeypatch):
     released = []
 
     class FirstGuard:
+        def __init__(self, **_kwargs):
+            pass
+
         def acquire(self):
             return True
 
@@ -87,3 +94,27 @@ def test_first_instance_releases_mutex_after_qt_exit(monkeypatch):
 
     assert qt_app.run(argv=["app.exe"], mode="final") == 17
     assert released == [True]
+
+
+def test_second_instance_brings_running_window_to_front_without_message(monkeypatch):
+    messages = []
+    activated = []
+
+    class DuplicateGuard:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def acquire(self):
+            return False
+
+    monkeypatch.setattr(single_instance, "SingleInstanceGuard", DuplicateGuard)
+    monkeypatch.setattr(single_instance, "show_single_instance_message", lambda title, message: messages.append(message))
+    monkeypatch.setattr(single_instance, "activate_existing_window", lambda title: activated.append(title) or True)
+
+    assert qt_app.run(argv=["app.exe"], mode="final") == 0
+    assert activated == ["Dronautix Pointcloud Uploader"] and messages == []
+
+
+def test_preview_and_final_use_separate_mutexes():
+    assert single_instance.mutex_name_for_mode(False) == single_instance.MUTEX_NAME
+    assert single_instance.mutex_name_for_mode(True) != single_instance.MUTEX_NAME

@@ -211,7 +211,7 @@ def progress_event_to_activity_entry(
 
 
 def normalize_progress_value(percent: float) -> int:
-    """Map core progress (Bruch 0..1 oder Prozent >1) auf 0..100 fuer Balken."""
+    """Map core progress (Bruch 0..1 oder Prozent >1) auf 0..100 für Balken."""
 
     value = float(percent)
     if 0 <= value <= 1:

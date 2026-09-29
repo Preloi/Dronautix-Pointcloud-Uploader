@@ -1,0 +1,156 @@
+{
+  "schema_version": 1,
+  "scenario_id": "disabled_link_state",
+  "event_count": 12,
+  "events": [
+    {
+      "sequence": 1,
+      "type": "get_object",
+      "key": "projects_index.json",
+      "found": true,
+      "purpose": "read_projects_index",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 2,
+      "type": "put_object",
+      "key": "projects_index.json",
+      "content_type": "application/json",
+      "cache_control": "no-cache",
+      "purpose": "save_projects_index",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 3,
+      "type": "get_object",
+      "key": "projects_index.json",
+      "found": true,
+      "purpose": "read_projects_index",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 4,
+      "type": "put_object",
+      "key": "projects_index.json",
+      "content_type": "application/json",
+      "cache_control": "no-cache",
+      "purpose": "save_projects_index",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 5,
+      "type": "get_object",
+      "key": "projects_index.json",
+      "found": true,
+      "purpose": "read_projects_index",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 6,
+      "type": "list_objects_v2",
+      "prefix": "pointclouds/golden/disabled_target/",
+      "keys": [
+        "pointclouds/golden/disabled_target/cloud.js",
+        "pointclouds/golden/disabled_target/metadata.json"
+      ],
+      "purpose": "list_objects"
+    },
+    {
+      "sequence": 7,
+      "type": "upload_file",
+      "key": "pointclouds/golden/disabled_target/versions/golden-data/cloud.js",
+      "local_name": "cloud.js",
+      "extra_args": {
+        "ContentType": "text/javascript",
+        "CacheControl": "public, max-age=31536000, immutable"
+      },
+      "purpose": "replacement_upload"
+    },
+    {
+      "sequence": 8,
+      "type": "upload_file",
+      "key": "pointclouds/golden/disabled_target/versions/golden-data/hierarchy.bin",
+      "local_name": "hierarchy.bin",
+      "extra_args": {
+        "ContentType": "application/octet-stream",
+        "CacheControl": "public, max-age=31536000, immutable"
+      },
+      "purpose": "replacement_upload"
+    },
+    {
+      "sequence": 9,
+      "type": "upload_file",
+      "key": "pointclouds/golden/disabled_target/versions/golden-data/octree.bin",
+      "local_name": "octree.bin",
+      "extra_args": {
+        "ContentType": "application/octet-stream",
+        "CacheControl": "public, max-age=31536000, immutable"
+      },
+      "purpose": "replacement_upload"
+    },
+    {
+      "sequence": 10,
+      "type": "upload_file",
+      "key": "pointclouds/golden/disabled_target/versions/golden-data/metadata.json",
+      "local_name": "metadata.json",
+      "extra_args": {
+        "ContentType": "application/json",
+        "CacheControl": "public, max-age=31536000, immutable"
+      },
+      "purpose": "replacement_upload"
+    },
+    {
+      "sequence": 11,
+      "type": "put_object",
+      "key": "projects_index.json",
+      "content_type": "application/json",
+      "cache_control": "no-cache",
+      "purpose": "save_projects_index",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 12,
+      "type": "delete_objects",
+      "keys": [
+        "pointclouds/golden/disabled_target/cloud.js",
+        "pointclouds/golden/disabled_target/metadata.json"
+      ],
+      "purpose": "delete_objects",
+      "bucket": "potreedronautix"
+    }
+  ],
+  "summary": {
+    "uploaded_keys": [
+      "pointclouds/golden/disabled_target/versions/golden-data/cloud.js",
+      "pointclouds/golden/disabled_target/versions/golden-data/hierarchy.bin",
+      "pointclouds/golden/disabled_target/versions/golden-data/octree.bin",
+      "pointclouds/golden/disabled_target/versions/golden-data/metadata.json"
+    ],
+    "copied_keys": [],
+    "deleted_keys": [
+      "pointclouds/golden/disabled_target/cloud.js",
+      "pointclouds/golden/disabled_target/metadata.json"
+    ],
+    "put_object_keys": [
+      "projects_index.json",
+      "projects_index.json",
+      "projects_index.json"
+    ]
+  },
+  "uploaded_keys": [
+    "pointclouds/golden/disabled_target/versions/golden-data/cloud.js",
+    "pointclouds/golden/disabled_target/versions/golden-data/hierarchy.bin",
+    "pointclouds/golden/disabled_target/versions/golden-data/octree.bin",
+    "pointclouds/golden/disabled_target/versions/golden-data/metadata.json"
+  ],
+  "copied_keys": [],
+  "deleted_keys": [
+    "pointclouds/golden/disabled_target/cloud.js",
+    "pointclouds/golden/disabled_target/metadata.json"
+  ],
+  "put_object_keys": [
+    "projects_index.json",
+    "projects_index.json",
+    "projects_index.json"
+  ]
+}

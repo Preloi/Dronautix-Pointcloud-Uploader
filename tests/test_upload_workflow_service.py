@@ -432,6 +432,32 @@ def test_upload_new_project_raw_las_is_prepared_by_converter_and_uploaded_as_pot
     ]
 
 
+def test_single_las_upload_labels_the_cloud_with_its_file_name_not_the_project_name(tmp_path):
+    raw = tmp_path / "Befliegung_Nord.las"
+    raw.write_bytes(b"las")
+    converter = tmp_path / "PotreeConverter.exe"
+    converter.write_bytes(b"exe")
+    repository = FakeRepository()
+
+    result = make_service(repository, s3_client=FakeS3Client()).upload_new_project(
+        NewProjectUploadWorkflowRequest(
+            source_paths=(str(raw),),
+            kunde="Kunde",
+            projekt="Freileitung 2026",
+            converter_path=str(converter),
+            output_base_dir=str(tmp_path / "converted"),
+            overwrite=True,
+        ),
+        converter_runner=make_converter_runner(),
+    )
+
+    assert result.status == "success"
+    project = repository.index_data["projects"][0]
+    assert project["projekt"] == "Freileitung 2026"
+    # The viewer labels a single-cloud project's cloud with "name" (not the temp conversion folder).
+    assert project["name"] == "Befliegung_Nord"
+
+
 def test_upload_new_project_multi_mix_builds_multi_metadata_and_pointcloud_list(tmp_path):
     scan = write_potree(tmp_path, "Scan")
     potree_dir = tmp_path / "Potree Cloud"

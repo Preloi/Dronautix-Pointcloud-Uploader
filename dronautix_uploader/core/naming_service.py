@@ -48,9 +48,25 @@ class ProjectPaths:
     project_url: str
 
 
+def require_folder_name(name: str, label: str) -> str:
+    """Return the sanitized folder name or explain why it cannot be used."""
+
+    folder_name = sanitize_folder_name(name)
+    if not folder_name:
+        raise ValueError(
+            f"{label} „{str(name or '').strip()}“ enthält keine für Speicherpfade verwendbaren Zeichen. "
+            "Bitte mindestens einen lateinischen Buchstaben oder eine Ziffer verwenden."
+        )
+    return folder_name
+
+
 def build_project_paths(kunde: str, projekt: str, project_id: str) -> ProjectPaths:
-    folder_kunde = sanitize_folder_name(kunde)
-    folder_project = sanitize_folder_name(projekt)
+    # Empty segments would produce keys like ``pointclouds//<id>/`` that later
+    # replace/add operations reject as outside the project.
+    folder_kunde = require_folder_name(kunde, "Kunde")
+    folder_project = require_folder_name(projekt, "Projektname")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", str(project_id or "")):
+        raise ValueError("Projekt-ID enthält ungültige Zeichen.")
     project_viewer_root = f"{folder_kunde}/{project_id}/{folder_project}"
     return ProjectPaths(
         folder_kunde=folder_kunde,
@@ -67,5 +83,6 @@ __all__ = [
     "get_pointcloud_display_name",
     "make_unique_cloud_slug",
     "make_unique_slug",
+    "require_folder_name",
     "sanitize_folder_name",
 ]

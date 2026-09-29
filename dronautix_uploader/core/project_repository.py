@@ -28,16 +28,19 @@ class ProjectMetadataConflictError(RuntimeError):
     """Raised when a loaded S3 metadata snapshot is no longer current."""
 
     def __init__(self, key: str, current_data: JsonObject | None = None) -> None:
-        super().__init__(f"S3-Metadatenkonflikt bei {key}; Daten wurden inzwischen geaendert.")
+        super().__init__(f"S3-Metadatenkonflikt bei {key}; Daten wurden inzwischen geändert.")
         self.key = key
         self.current_data = current_data
         self.cleanup_deferred_keys: tuple[str, ...] = ()
+        # Freshly loaded, saveable snapshot (with ETag) for callers that can
+        # re-apply their change on top of the concurrent winner.
+        self.current_snapshot: JsonObject | None = None
 
     def __str__(self) -> str:
         message = super().__str__()
         if self.cleanup_deferred_keys:
             return (
-                f"{message} Cleanup fuer {len(self.cleanup_deferred_keys)} hochgeladene S3-Objekte wurde "
+                f"{message} Cleanup für {len(self.cleanup_deferred_keys)} hochgeladene S3-Objekte wurde "
                 "aus Sicherheitsgruenden ausgelassen, weil der aktuelle Index nicht verifiziert werden konnte."
             )
         return message
@@ -49,11 +52,12 @@ class ProjectMetadataWriteUncertainError(ProjectMetadataConflictError):
     def __init__(self, key: str, current_data: JsonObject | None = None) -> None:
         RuntimeError.__init__(
             self,
-            f"S3-Schreibergebnis bei {key} ist unklar; ein sicherer Cleanup ist nur nach Indexpruefung moeglich.",
+            f"S3-Schreibergebnis bei {key} ist unklar; ein sicherer Cleanup ist nur nach Indexprüfung möglich.",
         )
         self.key = key
         self.current_data = current_data
         self.cleanup_deferred_keys = ()
+        self.current_snapshot = None
 
 
 class _VersionedJson(dict):
@@ -181,7 +185,7 @@ class ProjectMetadataRepository:
             raise RuntimeError(f"Invalid JSON in S3 object {key}: expected object at top level")
         etag = str(response.get("ETag", "") or "").strip()
         if not etag:
-            raise RuntimeError(f"S3 object {key} liefert keinen ETag fuer sichere Aenderungen.")
+            raise RuntimeError(f"S3 object {key} liefert keinen ETag für sichere Änderungen.")
         return _VersionedJson(data, s3_etag=etag, s3_exists=True)
 
     def save_json(
@@ -207,13 +211,16 @@ class ProjectMetadataRepository:
                 **condition,
             )
         except Exception as error:
-            current_data = None
+            current_snapshot = None
             try:
-                current_data = dict(self.load_json(key, {}))
+                current_snapshot = self.load_json(key, {})
             except Exception:
                 pass
+            current_data = dict(current_snapshot) if current_snapshot is not None else None
             if _is_precondition_error(error):
-                raise ProjectMetadataConflictError(key, current_data) from error
+                conflict = ProjectMetadataConflictError(key, current_data)
+                conflict.current_snapshot = current_snapshot
+                raise conflict from error
             raise ProjectMetadataWriteUncertainError(key, current_data) from error
         etag = str((response or {}).get("ETag", "") or "").strip()
         if not etag:

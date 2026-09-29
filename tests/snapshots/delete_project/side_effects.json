@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "scenario_id": "delete_project",
+  "event_count": 8,
+  "events": [
+    {
+      "sequence": 1,
+      "type": "get_object",
+      "key": "projects_index.json",
+      "found": true,
+      "purpose": "read_projects_index",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 2,
+      "type": "get_object",
+      "key": "deleted_projects.json",
+      "found": true,
+      "purpose": "read_deleted_projects",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 3,
+      "type": "put_object",
+      "key": "deleted_projects.json",
+      "content_type": "application/json",
+      "cache_control": "no-cache, no-store, must-revalidate",
+      "purpose": "save_deleted_projects",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 4,
+      "type": "put_object",
+      "key": "projects_index.json",
+      "content_type": "application/json",
+      "cache_control": "no-cache",
+      "purpose": "save_projects_index",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 5,
+      "type": "list_objects_v2",
+      "prefix": "pointclouds/golden/delete_target/",
+      "keys": [
+        "pointclouds/golden/delete_target/cloud.js",
+        "pointclouds/golden/delete_target/metadata.json"
+      ],
+      "purpose": "project_delete_scan"
+    },
+    {
+      "sequence": 6,
+      "type": "delete_objects",
+      "keys": [
+        "pointclouds/golden/delete_target/cloud.js",
+        "pointclouds/golden/delete_target/metadata.json"
+      ],
+      "purpose": "project_delete",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 7,
+      "type": "put_object",
+      "key": "deleted_projects.json",
+      "content_type": "application/json",
+      "cache_control": "no-cache, no-store, must-revalidate",
+      "purpose": "save_deleted_projects",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 8,
+      "type": "put_object",
+      "key": "projects_index.json",
+      "content_type": "application/json",
+      "cache_control": "no-cache",
+      "purpose": "save_projects_index",
+      "bucket": "potreedronautix"
+    }
+  ],
+  "summary": {
+    "uploaded_keys": [],
+    "copied_keys": [],
+    "deleted_keys": [
+      "pointclouds/golden/delete_target/cloud.js",
+      "pointclouds/golden/delete_target/metadata.json"
+    ],
+    "put_object_keys": [
+      "deleted_projects.json",
+      "projects_index.json",
+      "deleted_projects.json",
+      "projects_index.json"
+    ]
+  },
+  "uploaded_keys": [],
+  "copied_keys": [],
+  "deleted_keys": [
+    "pointclouds/golden/delete_target/cloud.js",
+    "pointclouds/golden/delete_target/metadata.json"
+  ],
+  "put_object_keys": [
+    "deleted_projects.json",
+    "projects_index.json",
+    "deleted_projects.json",
+    "projects_index.json"
+  ]
+}

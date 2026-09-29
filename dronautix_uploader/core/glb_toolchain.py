@@ -133,7 +133,7 @@ def _get_glb_toolchain_status_uncached(resource_root: Path) -> GLBToolchainStatu
     if capabilities_error:
         return _fallback_status(
             (),
-            f"Viewer-Capability-Datei fehlt oder ist ungueltig: {capabilities_path}",
+            f"Viewer-Capability-Datei fehlt oder ist ungültig: {capabilities_path}",
             capabilities,
             decoder_support,
             toolchain_version=version,
@@ -142,7 +142,7 @@ def _get_glb_toolchain_status_uncached(resource_root: Path) -> GLBToolchainStatu
     if manifest_error:
         return _fallback_status(
             REQUIRED_TOOL_IDS,
-            f"Lokale GLB-Toolchain fehlt oder ist ungueltig: {manifest_path}",
+            f"Lokale GLB-Toolchain fehlt oder ist ungültig: {manifest_path}",
             capabilities,
             decoder_support,
             toolchain_version=version,
@@ -156,7 +156,7 @@ def _get_glb_toolchain_status_uncached(resource_root: Path) -> GLBToolchainStatu
         suffix = f" ({details})" if details else ""
         return _fallback_status(
             missing_tools,
-            "Lokale GLB-Toolchain ist nicht vollstaendig versiegelt; unveraendertes, selbststaendiges GLB verwenden."
+            "Lokale GLB-Toolchain ist nicht vollständig versiegelt; unverändertes, selbststaendiges GLB verwenden."
             + suffix,
             capabilities,
             decoder_support,
@@ -167,7 +167,7 @@ def _get_glb_toolchain_status_uncached(resource_root: Path) -> GLBToolchainStatu
     if not decoder_support:
         return _fallback_status(
             (),
-            "Produktiver Viewer aktiviert die benoetigten GLB-Decoder nicht; unkomprimiertes GLB verwenden.",
+            "Produktiver Viewer aktiviert die benötigten GLB-Decoder nicht; unkomprimiertes GLB verwenden.",
             capabilities,
             False,
             toolchain_available=True,
@@ -179,7 +179,7 @@ def _get_glb_toolchain_status_uncached(resource_root: Path) -> GLBToolchainStatu
     if runtime_errors:
         return _fallback_status(
             (),
-            "Lokale GLB-Toolchain-Selbstpruefung ist fehlgeschlagen; unveraendertes, selbststaendiges GLB verwenden."
+            "Lokale GLB-Toolchain-Selbstprüfung ist fehlgeschlagen; unverändertes, selbststaendiges GLB verwenden."
             + f" ({'; '.join(runtime_errors[:3])})",
             capabilities,
             decoder_support,
@@ -311,7 +311,7 @@ def _verify_manifest_integrity(manifest: Mapping[str, Any], toolchain_dir: Path)
     if manifest.get("bundle_state") != "sealed":
         return ("Bundle ist nicht versiegelt.",)
     if manifest.get("platform") != {"os": "win32", "arch": "x64"}:
-        return ("Bundle ist nicht fuer win32-x64 festgelegt.",)
+        return ("Bundle ist nicht für win32-x64 festgelegt.",)
 
     errors: list[str] = []
     entries = _entries_by_id(manifest.get("tools"))
@@ -330,7 +330,7 @@ def _verify_manifest_integrity(manifest: Mapping[str, Any], toolchain_dir: Path)
     integrity_path = toolchain_dir / integrity_name
     integrity, integrity_error = _load_json(integrity_path)
     if integrity_error:
-        errors.append("Integrity-Datei fehlt oder ist ungueltig.")
+        errors.append("Integrity-Datei fehlt oder ist ungültig.")
         return tuple(errors)
     if integrity.get("toolchain_version") != manifest.get("toolchain_version"):
         errors.append("Integrity-Datei hat eine andere Toolchain-Version.")
@@ -341,12 +341,12 @@ def _verify_manifest_integrity(manifest: Mapping[str, Any], toolchain_dir: Path)
     declared_paths: set[str] = set()
     for file_entry in files:
         if not isinstance(file_entry, dict):
-            errors.append("Integrity-Datei enthält einen ungueltigen Eintrag.")
+            errors.append("Integrity-Datei enthält einen ungültigen Eintrag.")
             continue
         relative_path = _safe_relative_path(file_entry.get("relative_path"))
         sha256 = str(file_entry.get("sha256", "") or "").casefold()
         if relative_path is None or not _SHA256_RE.fullmatch(sha256):
-            errors.append("Integrity-Datei enthält Pfad oder SHA-256 ungueltig.")
+            errors.append("Integrity-Datei enthält Pfad oder SHA-256 ungültig.")
             continue
         key = relative_path.as_posix()
         if key in declared_paths:
@@ -384,7 +384,7 @@ def _verify_entry(entry: Mapping[str, Any], identifier: str, toolchain_dir: Path
         errors.append(f"{identifier} hat einen unsicheren Pfad.")
         return
     if not _SHA256_RE.fullmatch(expected_sha256):
-        errors.append(f"{identifier} hat keine gueltige SHA-256.")
+        errors.append(f"{identifier} hat keine gültige SHA-256.")
         return
     if not _is_file_within(toolchain_dir, relative_path):
         errors.append(f"{identifier} fehlt.")
@@ -451,8 +451,17 @@ def _entry_value(manifest: Mapping[str, Any], section: str, identifier: str, key
     return str(_entries_by_id(manifest.get(section)).get(identifier, {}).get(key, "") or "")
 
 
+_FOREIGN_NODE_ENVIRONMENT_PREFIXES = ("node_", "npm_", "yarn_", "pnpm_")
+
+
 def _isolated_toolchain_environment(toolchain_dir: Path) -> dict[str, str]:
-    environment = dict(os.environ)
+    # NODE_OPTIONS (--require/--import), NODE_PATH or package-manager settings
+    # of the workstation would inject foreign code into the sealed runtime.
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.casefold().startswith(_FOREIGN_NODE_ENVIRONMENT_PREFIXES)
+    }
     ktx_dir = toolchain_dir / "ktx" / "bin"
     environment["PATH"] = str(ktx_dir)
     environment["Path"] = str(ktx_dir)

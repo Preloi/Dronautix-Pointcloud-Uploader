@@ -24,6 +24,7 @@ import signal
 import struct
 import subprocess
 import tempfile
+import time
 from typing import Any, Callable, Protocol
 from urllib.parse import unquote_to_bytes
 import zlib
@@ -133,6 +134,7 @@ class BundledGLBOptimizationToolchain:
                     "optimizer",
                     (codec, str(candidate_source), str(target)),
                     cancel_requested,
+                    timeout_seconds=runner_timeout_seconds(candidate_source),
                 )
             except OperationCancelledError:
                 if target.exists():
@@ -177,6 +179,7 @@ class BundledGLBCompressedAssetDecoder:
             "decoder",
             ("decode", ",".join(extensions), str(source_path), str(target)),
             cancel_requested,
+            timeout_seconds=runner_timeout_seconds(source_path),
         )
         if not target.is_file():
             raise GLBValidationError("Der gebündelte GLB-Decoder hat keine unkomprimierte Ausgabe erzeugt.")
@@ -637,8 +640,8 @@ def build_model_index_entry(
     data_version = prepared.package_sha256
     if re.fullmatch(r"[0-9a-f]{64}", data_version) is None:
         raise ValueError(
-            "GLB-Upload abgebrochen: data_version fehlt oder ist kein gueltiger "
-            "Paket-SHA-256 mit 64 Hex-Zeichen. Es wurden keine S3-Daten geaendert."
+            "GLB-Upload abgebrochen: data_version fehlt oder ist kein gültiger "
+            "Paket-SHA-256 mit 64 Hex-Zeichen. Es wurden keine S3-Daten geändert."
         )
     relative = f"models/{prepared.slug}/versions/{data_version}"
     return ModelIndexEntry(
@@ -2548,7 +2551,7 @@ def _model_package_sha256(scene_sha256: str, manifest: Mapping[str, Any]) -> str
 
     scene_hash = str(scene_sha256 or "").lower()
     if re.fullmatch(r"[0-9a-f]{64}", scene_hash) is None:
-        raise GLBValidationError("scene.glb besitzt keinen gueltigen SHA-256-Hash.")
+        raise GLBValidationError("scene.glb besitzt keinen gültigen SHA-256-Hash.")
     canonical_manifest = json.dumps(
         manifest,
         ensure_ascii=False,
@@ -2678,11 +2681,31 @@ def _copy_with_cancel(source: Path, target: Path, cancel_requested: CancelCallba
     shutil.copystat(source, target, follow_symlinks=True)
 
 
+# Only a safety net against hung codecs, not a performance budget: KTX2/UASTC
+# encoding time depends on texture resolution (a small GLB with several 8k
+# textures can take well over ten minutes), not on the GLB byte size.
+RUNNER_BASE_TIMEOUT_SECONDS = 60 * 60
+RUNNER_TIMEOUT_SECONDS_PER_100_MB = 15 * 60
+RUNNER_MAX_TIMEOUT_SECONDS = 8 * 60 * 60
+
+
+def runner_timeout_seconds(input_path: str | Path | None) -> float:
+    """Generous size-scaled limit so a hung codec never blocks forever."""
+
+    try:
+        size = Path(input_path).stat().st_size if input_path else 0
+    except OSError:
+        size = 0
+    scaled = RUNNER_BASE_TIMEOUT_SECONDS + RUNNER_TIMEOUT_SECONDS_PER_100_MB * (size / (100 * 1024 * 1024))
+    return float(min(scaled, RUNNER_MAX_TIMEOUT_SECONDS))
+
+
 def _run_bundled_runner(
     resource_root: str | Path | None,
     runner_id: str,
     arguments: tuple[str, ...],
     cancel_requested: CancelCallback | None,
+    timeout_seconds: float | None = None,
 ) -> None:
     """Invoke a declared runner with the declared node executable only."""
 
@@ -2709,9 +2732,15 @@ def _run_bundled_runner(
         )
     except OSError as error:
         raise GLBValidationError(f"Gebündelter GLB-{runner_id}-Runner startet nicht: {error}") from error
+    deadline = time.monotonic() + timeout_seconds if timeout_seconds else None
     try:
         while True:
             _raise_if_cancelled(cancel_requested)
+            if deadline is not None and time.monotonic() > deadline:
+                raise GLBValidationError(
+                    f"Gebündelter GLB-{runner_id}-Runner hat das Zeitlimit von "
+                    f"{int(timeout_seconds // 60)} Minuten überschritten."
+                )
             try:
                 stdout, stderr = process.communicate(timeout=0.2)
                 break

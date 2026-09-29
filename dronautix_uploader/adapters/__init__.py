@@ -1,6 +1,5 @@
 """UI-free adapters for connecting core services to presentation layers."""
 
-from .legacy_project_ops import LegacyProjectOpsAdapter, normalize_legacy_sources
 from .progress import ProgressDispatchError, ProgressDispatcher, ProgressRecorder
 from .runtime_services import (
     ConfigLoader,
@@ -17,7 +16,6 @@ __all__ = [
     "ConfigLoader",
     "CoreServiceApi",
     "CredentialLoader",
-    "LegacyProjectOpsAdapter",
     "ProgressDispatchError",
     "ProgressDispatcher",
     "ProgressRecorder",
@@ -26,5 +24,4 @@ __all__ = [
     "create_project_management_service",
     "create_upload_workflow_service",
     "load_project_management_runtime_config",
-    "normalize_legacy_sources",
 ]

@@ -73,6 +73,7 @@ def test_startup_cleanup_removes_only_dedicated_glb_stages_older_than_24_hours(t
 
 def test_startup_cleanup_retries_locked_dedicated_glb_stages_and_reports_failure(tmp_path, monkeypatch):
     from dronautix_uploader.qt_app import main_window
+    from dronautix_uploader.qt_app.window import support as window_support
 
     dedicated_root = tmp_path / main_window.GLB_UPLOAD_STAGING_ROOT_NAME
     old_stage = dedicated_root / ".glb-upload-locked"
@@ -86,7 +87,7 @@ def test_startup_cleanup_retries_locked_dedicated_glb_stages_and_reports_failure
         raise OSError("locked")
 
     monkeypatch.setattr(main_window.tempfile, "gettempdir", lambda: str(tmp_path))
-    monkeypatch.setattr(main_window.shutil, "rmtree", locked)
+    monkeypatch.setattr(window_support.shutil, "rmtree", locked)
 
     warnings = main_window.cleanup_stale_upload_temp_dirs()
 
@@ -489,7 +490,7 @@ def test_projects_page_lists_models_and_routes_selected_glb_replace_when_qt_avai
         model_list = page.findChild(QtWidgets.QListWidget, "ModelList")
         assert model_list is not None
         assert model_list.count() == 1
-        assert "Fassade - GLB" in model_list.item(0).text()
+        assert "Fassade  ·  GLB" in model_list.item(0).text()
         model_list.setCurrentRow(0)
         replace_action = next(
             action
@@ -541,7 +542,7 @@ def test_upload_page_accepts_optional_native_glbs_when_qt_available(tmp_path):
     try:
         page.add_source_paths(("scan.copc.laz",))
         label_texts = {label.text() for label in page.findChildren(QtWidgets.QLabel)}
-        assert "Punktwolken (las,laz)" in label_texts
+        assert "Punktwolken (LAS/LAZ)" in label_texts
         assert "3D-Modelle (GLB)" in label_texts
         assert not any("nativ X=Ost" in text for text in label_texts)
         page.findChild(QtWidgets.QLineEdit, "UploadCustomerInput").setText("Kunde")
@@ -699,11 +700,272 @@ def test_upload_page_requires_pointcloud_crs_and_hides_models_for_local_conversi
         vertical.setText("EPSG:7837")
         assert page.model_inputs()[0].source_path == str(glb_path)
 
-        next(button for button in page.findChildren(QtWidgets.QPushButton) if button.text() == "Nur konvertieren").click()
+        next(button for button in page.findChildren(QtWidgets.QPushButton) if button.text() == "Nur lokal konvertieren").click()
         assert page.findChild(QtWidgets.QFrame, "UploadModelsPanel").isHidden()
         assert page.model_inputs() == ()
     finally:
         page.deleteLater()
+
+
+def test_upload_page_mode_switch_keeps_each_modes_sources_when_qt_available():
+    QtCore, _QtGui, QtWidgets = _import_qt()
+    _app(QtWidgets)
+
+    from dronautix_uploader.qt_app.pages import create_upload_page
+
+    page = create_upload_page(QtCore, QtWidgets, on_start=lambda: None)
+
+    def button(text):
+        return next(b for b in page.findChildren(QtWidgets.QPushButton) if b.text() == text)
+
+    try:
+        page.add_source_paths(("nord.laz", "sued.laz", "west.laz"))
+        source_list = page.findChild(QtWidgets.QListWidget, "UploadSourceList")
+        source_list.item(1).setSelected(True)
+
+        button("Nur lokal konvertieren").click()
+        assert page.read_form().source_paths == ("sued.laz",)
+
+        button("Upload zu S3").click()
+        assert page.read_form().source_paths == ("nord.laz", "sued.laz", "west.laz")
+
+        button("Nur lokal konvertieren").click()
+        assert page.read_form().source_paths == ("sued.laz",)
+    finally:
+        page.deleteLater()
+
+
+def test_upload_source_drop_list_grows_with_many_pointclouds_then_scrolls_when_qt_available():
+    QtCore, _QtGui, QtWidgets = _import_qt()
+    _app(QtWidgets)
+
+    from dronautix_uploader.qt_app.pages import DROP_LIST_MAX_VISIBLE_ROWS, create_upload_page
+
+    page = create_upload_page(QtCore, QtWidgets, on_start=lambda: None)
+    try:
+        source_list = page.findChild(QtWidgets.QListWidget, "UploadSourceList")
+        empty_height = source_list.height()
+
+        page.add_source_paths(tuple(f"teil_{index}.laz" for index in range(4)))
+        four_rows = source_list.height()
+        page.add_source_paths(tuple(f"teil_{index}.laz" for index in range(4, DROP_LIST_MAX_VISIBLE_ROWS)))
+        max_rows = source_list.height()
+        page.add_source_paths(tuple(f"teil_{index}.laz" for index in range(20, 30)))
+
+        assert empty_height <= four_rows < max_rows
+        assert source_list.height() == max_rows
+        assert source_list.count() == DROP_LIST_MAX_VISIBLE_ROWS + 10
+
+        source_list.selectAll()
+        next(b for b in page.findChildren(QtWidgets.QPushButton) if b.text() == "Entfernen").click()
+        assert source_list.count() == 0 and source_list.height() == empty_height
+    finally:
+        page.deleteLater()
+
+
+def test_upload_form_scroll_area_does_not_paint_light_system_palette_when_qt_available():
+    QtCore, QtGui, QtWidgets = _import_qt()
+    app = _app(QtWidgets)
+
+    from dronautix_uploader.qt_app.pages import create_upload_page
+    from dronautix_uploader.qt_app.style import APP_STYLE
+
+    light = QtGui.QPalette(QtGui.QColor("#efefef"))
+    previous_palette = app.palette()
+    app.setPalette(light)
+    page = create_upload_page(QtCore, QtWidgets, on_start=lambda: None)
+    page.setStyleSheet(APP_STYLE)
+    try:
+        page.resize(1200, 1600)
+        page.show()
+        app.processEvents()
+        scroll = page.findChild(QtWidgets.QScrollArea, "UploadFormScrollArea")
+        viewport = scroll.viewport()
+        image = viewport.grab().toImage()
+        # Bottom of the form area is empty background below the last card.
+        color = image.pixelColor(image.width() // 2, image.height() - 5)
+        assert color.lightness() < 100, color.name()
+    finally:
+        page.deleteLater()
+        app.setPalette(previous_palette)
+
+
+def test_projects_page_shows_project_crs_clean_cloud_lines_and_empty_state_reason_when_qt_available():
+    QtCore, QtGui, QtWidgets = _import_qt()
+    _app(QtWidgets)
+
+    from dronautix_uploader.qt_app.pages import create_projects_page
+    from dronautix_uploader.qt_app.project_management import make_project_preview as build_project_preview
+
+    project = build_project_preview(
+        {
+            "id": "p1",
+            "projekt": "Brücke",
+            "kunde": "ASFINAG",
+            "crs": "EPSG:31256",
+            "vertical_crs": "EPSG:5778",
+            "pointclouds": [{"name": "Teil 1", "format": "potree", "s3_path": "pointclouds/a/p1/t1", "crs": "EPSG:31256"}],
+            "format": "multi",
+        },
+        False,
+    )
+    opened = []
+    page = create_projects_page(QtCore, QtGui, QtWidgets, project_previews=(project,))
+    empty_page = create_projects_page(
+        QtCore,
+        QtGui,
+        QtWidgets,
+        project_previews=(),
+        empty_state_provider=lambda: "Nicht verbunden.",
+        on_open_settings=lambda: opened.append(True),
+    )
+    try:
+        empty_page.reload_projects()
+        empty_frame = empty_page.findChild(QtWidgets.QFrame, "ProjectsEmptyState")
+        assert not empty_frame.isHidden()
+        assert "Nicht verbunden" in " ".join(label.text() for label in empty_frame.findChildren(QtWidgets.QLabel))
+        next(b for b in empty_frame.findChildren(QtWidgets.QPushButton) if b.text() == "Einstellungen öffnen").click()
+        assert opened == [True]
+
+        table = page.findChild(QtWidgets.QTableView, "ProjectsTable")
+        table.selectRow(0)
+        texts = [label.text() for label in page.findChildren(QtWidgets.QLabel)]
+        assert any("EPSG:31256" in text and "5778" in text for text in texts)
+        cloud_line = page.findChild(QtWidgets.QListWidget, "PointcloudList").item(0).text()
+        assert cloud_line == "Teil 1  ·  potree  ·  CRS: EPSG:31256"
+        assert page.findChild(QtWidgets.QFrame, "ProjectsEmptyState").isHidden()
+    finally:
+        page.deleteLater()
+        empty_page.deleteLater()
+
+
+def test_settings_page_region_choice_unsaved_changes_prompt_and_clear_credentials(monkeypatch):
+    QtCore, _QtGui, QtWidgets = _import_qt()
+    _app(QtWidgets)
+
+    from dronautix_uploader.qt_app.pages import create_settings_page
+    from dronautix_uploader.qt_app.settings_controller import SettingsFormState
+
+    stored = SettingsFormState(aws_access_key_id="AKIA", aws_secret_access_key="s", region_name="eu-central-1", bucket_name="b")
+    actions = []
+    questions = []
+    page = create_settings_page(
+        QtCore,
+        QtWidgets,
+        settings_state_provider=lambda: stored,
+        on_settings_action=lambda action_id, payload=None: actions.append((action_id, payload)),
+    )
+    try:
+        region = page.findChild(QtWidgets.QComboBox, "AwsRegionInput")
+        assert region.isEditable() and region.findText("eu-west-1") >= 0
+        region.setCurrentText("eu-west-1")
+        next(b for b in page.findChildren(QtWidgets.QPushButton) if b.text() == "Speichern").click()
+        assert actions[-1][0] == "save" and actions[-1][1].region_name == "eu-west-1"
+
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "question",
+            lambda *args, **kwargs: questions.append(args) or QtWidgets.QMessageBox.No,
+        )
+        assert page.has_unsaved_changes()
+        assert page.reload_settings() is False
+        assert questions and region.currentText() == "eu-west-1"
+
+        region.setCurrentText("eu-central-1")
+        questions.clear()
+        assert page.reload_settings() is True and questions == []
+
+        next(b for b in page.findChildren(QtWidgets.QPushButton) if b.text() == "Zugangsdaten entfernen").click()
+        assert actions[-1] == ("clear_credentials", None)
+    finally:
+        page.deleteLater()
+
+
+def test_long_project_action_dialog_offers_cancel_and_stays_visible_during_rollback(monkeypatch):
+    QtCore, QtGui, QtWidgets = _import_qt()
+    app = _app(QtWidgets)
+    from dronautix_uploader.qt_app import main_window
+
+    monkeypatch.setattr(main_window, "cleanup_stale_upload_temp_dirs", lambda: ())
+    window = main_window.create_main_window(QtCore, QtGui, QtWidgets)
+    cancel_event = threading.Event()
+    try:
+        window.show()
+        dialog = window._create_action_progress_dialog("Punktwolken austauschen", "läuft...", cancel_event=cancel_event)
+        button = next(b for b in dialog.findChildren(QtWidgets.QPushButton) if b.text() == "Abbrechen")
+        button.click()
+        _process_until(app, lambda: False, timeout=0.2)
+
+        assert cancel_event.is_set()
+        assert dialog.isVisible()
+        assert "abgebrochen" in dialog.labelText()
+        assert not [b for b in dialog.findChildren(QtWidgets.QPushButton) if b.isVisible()]
+
+        plain = window._create_action_progress_dialog("Projekt löschen", "läuft...")
+        assert not [b for b in plain.findChildren(QtWidgets.QPushButton) if b.isVisible()]
+        plain.close()
+        dialog.close()
+    finally:
+        window.deleteLater()
+
+
+def test_connection_status_reflects_real_s3_round_trip_not_just_credentials(monkeypatch):
+    QtCore, QtGui, QtWidgets = _import_qt()
+    app = _app(QtWidgets)
+    from dronautix_uploader.qt_app import main_window
+
+    class WorkingProvider:
+        def list_projects_for_management(self):
+            return []
+
+    monkeypatch.setattr(main_window, "cleanup_stale_upload_temp_dirs", lambda: ())
+    windows = {
+        "failing": main_window.create_main_window(QtCore, QtGui, QtWidgets, project_provider=FailingProvider()),
+        "working": main_window.create_main_window(QtCore, QtGui, QtWidgets, project_provider=WorkingProvider()),
+        "none": main_window.create_main_window(QtCore, QtGui, QtWidgets),
+    }
+    try:
+        for window in windows.values():
+            _process_until(app, lambda w=window: not w._has_active_background_tasks())
+            _process_until(app, lambda: False, timeout=0.1)
+        labels = {name: w.findChild(QtWidgets.QLabel, "ConnectionStatus") for name, w in windows.items()}
+
+        assert labels["failing"].text().endswith("S3-Verbindung fehlgeschlagen")
+        assert "S3 unavailable" in labels["failing"].toolTip()
+        assert labels["working"].text().endswith("S3 verbunden")
+        assert labels["none"].text().endswith("Nicht verbunden")
+    finally:
+        for window in windows.values():
+            window.deleteLater()
+
+
+def test_closing_cancellable_action_dialog_never_brings_it_back(monkeypatch):
+    QtCore, QtGui, QtWidgets = _import_qt()
+    app = _app(QtWidgets)
+    from dronautix_uploader.qt_app import main_window
+
+    monkeypatch.setattr(main_window, "cleanup_stale_upload_temp_dirs", lambda: ())
+    window = main_window.create_main_window(QtCore, QtGui, QtWidgets)
+    try:
+        window.show()
+        # Early-return / error path: closed without the user cancelling.
+        closed_event = threading.Event()
+        closed = window._create_action_progress_dialog("Projekt duplizieren", "läuft...", cancel_event=closed_event)
+        window._close_action_progress_dialog(closed)
+        _process_until(app, lambda: False, timeout=0.2)
+        assert not closed.isVisible()
+        assert not closed_event.is_set()
+
+        # Cancel clicked while the task finishes in the same event-loop turn.
+        race_event = threading.Event()
+        racing = window._create_action_progress_dialog("Punktwolken austauschen", "läuft...", cancel_event=race_event)
+        next(b for b in racing.findChildren(QtWidgets.QPushButton) if b.text() == "Abbrechen").click()
+        window._close_action_progress_dialog(racing)
+        _process_until(app, lambda: False, timeout=0.2)
+        assert race_event.is_set()
+        assert not racing.isVisible()
+    finally:
+        window.deleteLater()
 
 
 def test_main_window_releases_busy_state_after_background_task_completes_when_qt_available():
@@ -896,7 +1158,7 @@ def test_pending_update_resumes_after_project_loader_finishes(tmp_path, monkeypa
         def __init__(self):
             self.downloads = 0
 
-        def download_and_install(self, _manifest):
+        def download_and_install(self, _manifest, **_kwargs):
             self.downloads += 1
             return ProjectOperationSummary(status="failed", message="simulated")
 
@@ -923,6 +1185,51 @@ def test_pending_update_resumes_after_project_loader_finishes(tmp_path, monkeypa
         window.deleteLater()
 
 
+def test_startup_update_check_deferred_by_project_loader_runs_after_load(monkeypatch):
+    QtCore, QtGui, QtWidgets = _import_qt()
+    app = _app(QtWidgets)
+    from dronautix_uploader.qt_app import main_window
+    from dronautix_uploader.qt_app.update_controller import UpdateCheckResult
+
+    release = threading.Event()
+
+    class Provider:
+        def list_projects_for_management(self):
+            release.wait(2)
+            return []
+
+    class Updater:
+        checks_on_startup = False
+
+        def __init__(self):
+            self.checks = 0
+
+        def check_for_updates(self):
+            self.checks += 1
+            return UpdateCheckResult("success", "current", False, "1.0", "", "", {})
+
+    updater = Updater()
+    monkeypatch.setattr(main_window, "cleanup_stale_upload_temp_dirs", lambda: ())
+    window = main_window.create_main_window(
+        QtCore, QtGui, QtWidgets, project_provider=Provider(), update_controller=updater,
+    )
+    try:
+        assert _process_until(app, lambda: bool(window._projects_page._active_project_loads))
+        window._run_update_check(silent=True)
+        window._run_update_check(silent=True)
+        assert updater.checks == 0
+        release.set()
+        assert _process_until(app, lambda: updater.checks == 1)
+        assert _process_until(app, lambda: not window._has_active_background_tasks())
+        _process_until(app, lambda: False, timeout=0.2)
+        assert updater.checks == 1
+        assert window._pending_update_check_silent is None
+    finally:
+        release.set()
+        _process_until(app, lambda: not window._has_active_background_tasks())
+        window.deleteLater()
+
+
 def test_update_worker_exception_allows_a_later_install_attempt(monkeypatch):
     QtCore, QtGui, QtWidgets = _import_qt()
     app = _app(QtWidgets)
@@ -933,7 +1240,7 @@ def test_update_worker_exception_allows_a_later_install_attempt(monkeypatch):
         def __init__(self):
             self.downloads = 0
 
-        def download_and_install(self, _manifest):
+        def download_and_install(self, _manifest, **_kwargs):
             self.downloads += 1
             raise RuntimeError("installer failed unexpectedly")
 
@@ -968,7 +1275,7 @@ def test_update_check_and_install_are_deferred_during_active_operation(monkeypat
         def check_for_updates(self):
             self.checks += 1
 
-        def download_and_install(self, _manifest):
+        def download_and_install(self, _manifest, **_kwargs):
             self.downloads += 1
 
     updater = Updater()
@@ -1000,7 +1307,7 @@ def test_update_download_blocks_refresh_and_connection_test(monkeypatch):
     release = threading.Event()
 
     class Updater:
-        def download_and_install(self, _manifest):
+        def download_and_install(self, _manifest, **_kwargs):
             release.wait(2)
             return ProjectOperationSummary(status="failed", message="simulated")
 
@@ -1050,7 +1357,7 @@ def test_update_rechecks_busy_state_after_confirmation(monkeypatch):
     downloads = []
 
     class Updater:
-        def download_and_install(self, manifest):
+        def download_and_install(self, manifest, **_kwargs):
             downloads.append(manifest)
 
     window = main_window.create_main_window(QtCore, QtGui, QtWidgets, update_controller=Updater())

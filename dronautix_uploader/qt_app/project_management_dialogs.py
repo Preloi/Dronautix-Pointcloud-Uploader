@@ -215,7 +215,7 @@ def prompt_replace_all_pointclouds(QtWidgets, parent, project: ProjectPreview, d
         QtWidgets,
         parent,
         "Punktwolken austauschen",
-        f"Neue Punktwolke(n) fuer „{project.project}“ auswaehlen - "
+        f"Neue Punktwolke(n) für „{project.project}“ auswählen - "
         "LAS/LAZ oder bereits konvertierte Potree-Ordner. "
         "Konvertierung und CRS-Erkennung laufen automatisch.",
         allow_multiple=True,
@@ -256,7 +256,7 @@ def prompt_replace_single_pointcloud(QtWidgets, parent, project: ProjectPreview,
         QtWidgets,
         parent,
         "Punktwolke austauschen",
-        f"Neue Punktwolke fuer „{pointcloud.name}“ auswaehlen - "
+        f"Neue Punktwolke für „{pointcloud.name}“ auswählen - "
         "LAS/LAZ oder ein bereits konvertierter Potree-Ordner. "
         "Konvertierung und CRS-Erkennung laufen automatisch.",
         allow_multiple=False,
@@ -445,7 +445,7 @@ def _build_replace_dialog(
 
     source_paths = create_path_drop_plain_text_edit(QtWidgets, append_paths)
     source_paths.setPlaceholderText(
-        "Datei oder Potree-Ordner hierher ziehen oder waehlen"
+        "Datei oder Potree-Ordner hierher ziehen oder wählen"
         if not allow_multiple
         else "Dateien/Potree-Ordner hierher ziehen, eine Quelle pro Zeile"
     )

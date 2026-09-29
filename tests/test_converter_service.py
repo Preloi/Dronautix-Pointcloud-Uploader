@@ -252,3 +252,53 @@ def test_silent_converter_is_terminated_promptly_when_cancelled(monkeypatch, tmp
 
     assert process.terminated is True
     assert time.monotonic() - started < 1.0
+
+
+def test_unicode_source_alias_is_staged_on_the_source_drive(monkeypatch, tmp_path):
+    source = tmp_path / "Bäume.las"
+    source.write_bytes(b"LAS")
+    used_parents = []
+    real_mkdtemp = converter_service.tempfile.mkdtemp
+
+    def recording_mkdtemp(**kwargs):
+        used_parents.append(kwargs.get("dir"))
+        return real_mkdtemp(**kwargs)
+
+    monkeypatch.setattr(converter_service, "_windows_short_path", lambda path: "")
+    monkeypatch.setattr(converter_service.tempfile, "mkdtemp", recording_mkdtemp)
+
+    with converter_service._converter_safe_source_path(str(source), str(tmp_path / "out")) as alias:
+        assert os.stat(alias).st_ino == os.stat(source).st_ino
+
+    source_drive = os.path.splitdrive(str(source))[0].casefold()
+    assert used_parents and all(os.path.splitdrive(parent)[0].casefold() == source_drive for parent in used_parents)
+
+
+def test_unicode_output_dir_without_short_name_is_converted_in_ascii_staging_and_moved(monkeypatch, tmp_path):
+    output_dir = tmp_path / "Ausgabe Bäume"
+    seen = {}
+
+    class SuccessfulProcess:
+        stdout = iter(())
+        returncode = 0
+
+        def wait(self):
+            return self.returncode
+
+    def fake_popen(args, **kwargs):
+        seen["output"] = args[3]
+        seen["kwargs"] = kwargs
+        from pathlib import Path
+
+        write_valid_potree(Path(args[3]))
+        return SuccessfulProcess()
+
+    monkeypatch.setattr(converter_service, "_windows_short_path", lambda path: path if path.isascii() else "")
+    monkeypatch.setattr(converter_service.subprocess, "Popen", fake_popen)
+
+    converter_service.run_potree_conversion("scan.las", "PotreeConverter.exe", str(output_dir))
+
+    assert seen["output"].isascii() and seen["output"] != str(output_dir)
+    assert not os.path.exists(seen["output"])
+    assert sorted(os.listdir(output_dir)) == ["hierarchy.bin", "metadata.json", "octree.bin"]
+    assert seen["kwargs"]["errors"] == "replace"

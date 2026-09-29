@@ -173,3 +173,12 @@ def test_validate_upload_dialog_state_preserves_optional_model_inputs(dialog_mod
     )
 
     assert request.model_inputs == (model_input,)
+
+
+def test_validate_upload_dialog_state_rejects_customer_without_path_characters():
+    import pytest
+
+    from dronautix_uploader.qt_app.upload_dialog_models import UploadDialogState, validate_upload_dialog_state
+
+    with pytest.raises(ValueError, match="Kunde"):
+        validate_upload_dialog_state(UploadDialogState(customer="Москва", project="Projekt", source_paths=("a/potree",)))

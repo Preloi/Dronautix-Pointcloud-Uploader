@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "scenario_id": "rename_project",
+  "event_count": 4,
+  "events": [
+    {
+      "sequence": 1,
+      "type": "get_object",
+      "key": "projects_index.json",
+      "found": true,
+      "purpose": "read_projects_index",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 2,
+      "type": "get_object",
+      "key": "pointclouds/golden/rename_target/cloud_a/metadata.json",
+      "found": false,
+      "purpose": "read_object",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 3,
+      "type": "get_object",
+      "key": "pointclouds/golden/rename_target/cloud_b/metadata.json",
+      "found": false,
+      "purpose": "read_object",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 4,
+      "type": "put_object",
+      "key": "projects_index.json",
+      "content_type": "application/json",
+      "cache_control": "no-cache",
+      "purpose": "save_projects_index",
+      "bucket": "potreedronautix"
+    }
+  ],
+  "summary": {
+    "uploaded_keys": [],
+    "copied_keys": [],
+    "deleted_keys": [],
+    "put_object_keys": [
+      "projects_index.json"
+    ]
+  },
+  "uploaded_keys": [],
+  "copied_keys": [],
+  "deleted_keys": [],
+  "put_object_keys": [
+    "projects_index.json"
+  ]
+}

@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "scenario_id": "duplicate_project",
+  "event_count": 7,
+  "events": [
+    {
+      "sequence": 1,
+      "type": "get_object",
+      "key": "projects_index.json",
+      "found": true,
+      "purpose": "read_projects_index",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 2,
+      "type": "list_objects_v2",
+      "prefix": "pointclouds/golden/dup_source/original/",
+      "keys": [
+        "pointclouds/golden/dup_source/original/cloud_a/cloud.js",
+        "pointclouds/golden/dup_source/original/cloud_a/metadata.json",
+        "pointclouds/golden/dup_source/original/cloud_b/cloud.js",
+        "pointclouds/golden/dup_source/original/cloud_b/metadata.json"
+      ],
+      "purpose": "duplicate_source_scan"
+    },
+    {
+      "sequence": 3,
+      "type": "copy_object",
+      "source_key": "pointclouds/golden/dup_source/original/cloud_a/cloud.js",
+      "key": "pointclouds/golden_kunde/abc12d01/duplicate_clone/cloud_a/cloud.js",
+      "cache_control": "public, max-age=31536000, immutable",
+      "metadata_directive": "REPLACE",
+      "purpose": "duplicate_copy",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 4,
+      "type": "copy_object",
+      "source_key": "pointclouds/golden/dup_source/original/cloud_a/metadata.json",
+      "key": "pointclouds/golden_kunde/abc12d01/duplicate_clone/cloud_a/metadata.json",
+      "cache_control": "public, max-age=31536000, immutable",
+      "metadata_directive": "REPLACE",
+      "purpose": "duplicate_copy",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 5,
+      "type": "copy_object",
+      "source_key": "pointclouds/golden/dup_source/original/cloud_b/cloud.js",
+      "key": "pointclouds/golden_kunde/abc12d01/duplicate_clone/cloud_b/cloud.js",
+      "cache_control": "public, max-age=31536000, immutable",
+      "metadata_directive": "REPLACE",
+      "purpose": "duplicate_copy",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 6,
+      "type": "copy_object",
+      "source_key": "pointclouds/golden/dup_source/original/cloud_b/metadata.json",
+      "key": "pointclouds/golden_kunde/abc12d01/duplicate_clone/cloud_b/metadata.json",
+      "cache_control": "public, max-age=31536000, immutable",
+      "metadata_directive": "REPLACE",
+      "purpose": "duplicate_copy",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 7,
+      "type": "put_object",
+      "key": "projects_index.json",
+      "content_type": "application/json",
+      "cache_control": "no-cache",
+      "purpose": "save_projects_index",
+      "bucket": "potreedronautix"
+    }
+  ],
+  "summary": {
+    "uploaded_keys": [],
+    "copied_keys": [
+      "pointclouds/golden_kunde/abc12d01/duplicate_clone/cloud_a/cloud.js",
+      "pointclouds/golden_kunde/abc12d01/duplicate_clone/cloud_a/metadata.json",
+      "pointclouds/golden_kunde/abc12d01/duplicate_clone/cloud_b/cloud.js",
+      "pointclouds/golden_kunde/abc12d01/duplicate_clone/cloud_b/metadata.json"
+    ],
+    "deleted_keys": [],
+    "put_object_keys": [
+      "projects_index.json"
+    ]
+  },
+  "uploaded_keys": [],
+  "copied_keys": [
+    "pointclouds/golden_kunde/abc12d01/duplicate_clone/cloud_a/cloud.js",
+    "pointclouds/golden_kunde/abc12d01/duplicate_clone/cloud_a/metadata.json",
+    "pointclouds/golden_kunde/abc12d01/duplicate_clone/cloud_b/cloud.js",
+    "pointclouds/golden_kunde/abc12d01/duplicate_clone/cloud_b/metadata.json"
+  ],
+  "deleted_keys": [],
+  "put_object_keys": [
+    "projects_index.json"
+  ]
+}

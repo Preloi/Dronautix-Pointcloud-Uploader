@@ -38,18 +38,18 @@ def build_local_output_dir(source_path: str, output_base_dir: str, unique_name: 
 
 def validate_local_conversion_request(request: LocalConversionRequest) -> None:
     if not request.source_file or not os.path.isfile(request.source_file):
-        raise ValueError("Bitte eine gueltige LAS/LAZ Datei auswaehlen.")
+        raise ValueError("Bitte eine gültige LAS/LAZ Datei auswählen.")
 
     file_name = os.path.basename(request.source_file).lower()
     file_ext = os.path.splitext(file_name)[1].lower()
     if file_name.endswith(".copc.laz") or file_ext not in {".las", ".laz"}:
-        raise ValueError("Es koennen nur .las oder .laz Dateien lokal konvertiert werden.")
+        raise ValueError("Es können nur .las oder .laz Dateien lokal konvertiert werden.")
 
     if not request.output_dir:
-        raise ValueError("Bitte einen lokalen Zielordner auswaehlen.")
+        raise ValueError("Bitte einen lokalen Zielordner auswählen.")
 
     if not request.converter_path or not os.path.exists(request.converter_path):
-        raise ValueError("Kein Potree Converter verfuegbar.")
+        raise ValueError("Kein Potree Converter verfügbar.")
 
     output_dir = os.path.abspath(request.output_dir)
     output_parent_dir = os.path.dirname(output_dir) or output_dir
@@ -108,7 +108,7 @@ def run_local_conversion(
         else:
             converter_runner(request.source_file, request.converter_path, staging_dir, on_progress)
 
-        _emit(on_progress, ProgressEvent(kind="step", step=3, total_steps=5, message="Pruefe Ergebnis...", phase="conversion"))
+        _emit(on_progress, ProgressEvent(kind="step", step=3, total_steps=5, message="Prüfe Ergebnis...", phase="conversion"))
         _emit(on_progress, ProgressEvent(kind="detail", detail="Die konvertierten Daten werden lokal bereitgestellt", phase="conversion"))
         validate_potree_output(staging_dir)
 

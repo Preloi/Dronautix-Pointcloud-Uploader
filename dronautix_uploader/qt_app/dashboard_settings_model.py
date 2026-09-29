@@ -29,42 +29,6 @@ class SettingsStatusItem:
 
 
 @dataclass(frozen=True)
-class CutoverChecklistItem:
-    name: str
-    complete: bool
-    detail: str
-    required: bool = True
-
-
-@dataclass(frozen=True)
-class CutoverReadiness:
-    items: tuple[CutoverChecklistItem, ...]
-
-    @property
-    def required_items(self) -> tuple[CutoverChecklistItem, ...]:
-        return tuple(item for item in self.items if item.required)
-
-    @property
-    def completed_required_count(self) -> int:
-        return sum(1 for item in self.required_items if item.complete)
-
-    @property
-    def required_count(self) -> int:
-        return len(self.required_items)
-
-    @property
-    def ready(self) -> bool:
-        return bool(self.required_items) and self.completed_required_count == self.required_count
-
-    @property
-    def first_open_item(self) -> CutoverChecklistItem | None:
-        for item in self.required_items:
-            if not item.complete:
-                return item
-        return None
-
-
-@dataclass(frozen=True)
 class SettingsPreview:
     settings_status: tuple[SettingsStatusItem, ...]
     update_channel: str
@@ -111,13 +75,13 @@ def converter_status(bundle_available: bool) -> SettingsStatusItem:
 
 
 def output_folder_status(path: str, writable: bool) -> SettingsStatusItem:
-    """Status des lokalen Ausgabeordners für 'Nur konvertieren'."""
+    """Status des lokalen Ausgabeordners für „Nur lokal konvertieren“."""
 
     if not path.strip():
         return SettingsStatusItem(
             "Output-Ordner",
             "Nicht gesetzt",
-            "Für 'Nur konvertieren' wird ein lokaler Ausgabeordner benötigt.",
+            "Für „Nur lokal konvertieren“ wird ein lokaler Ausgabeordner benötigt.",
             STATUS_WARNING,
             "Ordner wählen",
         )
@@ -152,65 +116,6 @@ def update_channel_status(channel: str, manifest_version: str = "") -> SettingsS
     if manifest_version:
         detail = f"{detail} Manifest: {manifest_version}."
     return SettingsStatusItem("Updates", normalized, detail, level, "Update prüfen")
-
-
-def build_cutover_readiness(
-    *,
-    runtime_connected: bool = False,
-    golden_ready: bool = False,
-    v2_golden_comparison_ready: bool = False,
-    preview_packaging_ready: bool = True,
-    final_packaging_ready: bool = False,
-    real_s3_acceptance_passed: bool = False,
-    github_asset_sha_verified: bool = False,
-    altversion_update_verified: bool = False,
-) -> CutoverReadiness:
-    """Explizite V2-Release-Checkliste für die Cutover-Werkzeuge."""
-
-    return CutoverReadiness(
-        items=(
-            CutoverChecklistItem(
-                "Runtime verbunden",
-                runtime_connected,
-                "Qt-Runtime hat echte S3-Service-Controller geladen.",
-            ),
-            CutoverChecklistItem(
-                "Golden Masters",
-                golden_ready,
-                "Alle Legacy-Outputs sind gecaptured und normalisiert.",
-            ),
-            CutoverChecklistItem(
-                "V2-Golden-Vergleich",
-                v2_golden_comparison_ready,
-                "V2-Ausgaben matchen die normalisierten Legacy-Golden-Masters.",
-            ),
-            CutoverChecklistItem(
-                "Preview-Paket getrennt",
-                preview_packaging_ready,
-                "Preview-Build nutzt keinen produktiven Update-Kanal.",
-            ),
-            CutoverChecklistItem(
-                "Final-V2-Packaging",
-                final_packaging_ready,
-                "Finaler V2-Installer übernimmt AppId, Namen und Manifest-Vertrag.",
-            ),
-            CutoverChecklistItem(
-                "Echter S3-Akzeptanztest",
-                real_s3_acceptance_passed,
-                "LAS/LAZ, Potree, Multi-Projekt und Projektverwaltung wurden gegen S3 getestet.",
-            ),
-            CutoverChecklistItem(
-                "GitHub Asset SHA",
-                github_asset_sha_verified,
-                "Release-Asset und installer_sha256 wurden remote verifiziert.",
-            ),
-            CutoverChecklistItem(
-                "Altversions-Update",
-                altversion_update_verified,
-                "Update von einer installierten Altversion auf Final V2 wurde getestet.",
-            ),
-        )
-    )
 
 
 def settings_status_action_id(item: SettingsStatusItem) -> str:
@@ -259,8 +164,6 @@ def status_level_label(level: str) -> str:
 
 
 __all__ = [
-    "CutoverChecklistItem",
-    "CutoverReadiness",
     "SettingsPreview",
     "SettingsStatusItem",
     "SETTINGS_ACTION_CHECK_UPDATE",
@@ -273,7 +176,6 @@ __all__ = [
     "UPDATE_CHANNELS",
     "UPDATE_CHANNEL_MANUAL",
     "UPDATE_CHANNEL_STABLE",
-    "build_cutover_readiness",
     "converter_status",
     "credential_status",
     "example_settings_preview",

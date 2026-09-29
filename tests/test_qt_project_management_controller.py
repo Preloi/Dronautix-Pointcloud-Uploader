@@ -1,5 +1,5 @@
+from _import_isolation import loaded_forbidden_modules
 from dataclasses import dataclass
-import sys
 
 import pytest
 
@@ -54,7 +54,7 @@ class FakeService:
         self.calls.append(("rename_project", project_id, new_kunde, new_projekt, tuple(pointcloud_names)))
         return self.result
 
-    def duplicate_project(self, project_id, new_kunde, new_projekt, on_progress=None):
+    def duplicate_project(self, project_id, new_kunde, new_projekt, on_progress=None, cancel_requested=None):
         self.calls.append(("duplicate_project", project_id, new_kunde, new_projekt))
         return self.result
 
@@ -70,7 +70,7 @@ class FakeService:
         self.calls.append(("set_project_link_state", project_id, disabled))
         return self.result
 
-    def replace_project_pointclouds(self, project_id, prepared_clouds, on_progress=None):
+    def replace_project_pointclouds(self, project_id, prepared_clouds, on_progress=None, cancel_requested=None):
         self.calls.append(("replace_project_pointclouds", project_id, tuple(prepared_clouds), on_progress))
         return self.result
 
@@ -82,6 +82,7 @@ class FakeService:
         output_base_dir="",
         overwrite=False,
         on_progress=None,
+        cancel_requested=None,
         crs_info_by_source_path=None,
     ):
         self.calls.append(
@@ -98,7 +99,7 @@ class FakeService:
         )
         return self.result
 
-    def replace_single_project_pointcloud(self, project_id, target_pointcloud_s3_path, prepared_cloud, on_progress=None):
+    def replace_single_project_pointcloud(self, project_id, target_pointcloud_s3_path, prepared_cloud, on_progress=None, cancel_requested=None):
         self.calls.append(
             ("replace_single_project_pointcloud", project_id, target_pointcloud_s3_path, prepared_cloud, on_progress)
         )
@@ -113,6 +114,7 @@ class FakeService:
         output_base_dir="",
         overwrite=False,
         on_progress=None,
+        cancel_requested=None,
         crs_info=None,
     ):
         self.calls.append(
@@ -138,6 +140,7 @@ class FakeService:
         *,
         model_json_path="",
         on_progress=None,
+        cancel_requested=None,
         confirm_spatial_warning=None,
         confirm_crs_repair=None,
     ):
@@ -162,6 +165,7 @@ class FakeService:
         *,
         model_json_by_source_path=None,
         on_progress=None,
+        cancel_requested=None,
         confirm_spatial_warning=None,
         confirm_crs_repair=None,
     ):
@@ -184,7 +188,7 @@ class FakeService:
         )
         return self.result
 
-    def add_project_pointclouds(self, project_id, prepared_clouds, on_progress=None):
+    def add_project_pointclouds(self, project_id, prepared_clouds, on_progress=None, cancel_requested=None):
         self.calls.append(("add_project_pointclouds", project_id, tuple(prepared_clouds), on_progress))
         return self.result
 
@@ -196,6 +200,7 @@ class FakeService:
         output_base_dir="",
         overwrite=False,
         on_progress=None,
+        cancel_requested=None,
         crs_info_by_source_path=None,
     ):
         self.calls.append(
@@ -222,7 +227,7 @@ class FakeService:
 
 
 def test_controller_imports_without_qt_bindings():
-    assert "PySide6" not in sys.modules
+    assert loaded_forbidden_modules("dronautix_uploader.qt_app.project_management_controller") == []
 
 
 def test_rename_project_routes_preview_id_and_request_to_service():
@@ -796,3 +801,30 @@ def _model(name: str) -> ModelPreview:
         crs="EPSG:25833",
         vertical_crs="EPSG:7837",
     )
+
+
+def test_long_actions_forward_cancel_callback_and_report_cancellation_as_cancelled():
+    from dronautix_uploader.core.contracts import OperationCancelledError
+
+    class CancellingService(FakeService):
+        def __init__(self):
+            super().__init__()
+            self.cancel_callbacks = []
+
+        def duplicate_project(self, project_id, new_kunde, new_projekt, on_progress=None, cancel_requested=None):
+            self.cancel_callbacks.append(cancel_requested)
+            raise OperationCancelledError()
+
+    service = CancellingService()
+    controller = ProjectManagementController(service)
+    cancel = lambda: True
+
+    summary = controller.duplicate_project(
+        _project(),
+        DuplicateProjectInput(customer="Kunde", project="Kopie"),
+        cancel_requested=cancel,
+    )
+
+    assert summary.status == "cancelled"
+    assert "abgebrochen" in summary.message
+    assert service.cancel_callbacks == [cancel]

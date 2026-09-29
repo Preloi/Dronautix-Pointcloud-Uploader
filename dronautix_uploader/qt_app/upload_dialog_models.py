@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from dronautix_uploader.core.contracts import ModelUploadInput
+from dronautix_uploader.core.naming_service import require_folder_name
 from dronautix_uploader.core.upload_workflow_service import NewProjectUploadWorkflowRequest
 
 
@@ -34,6 +35,8 @@ def validate_upload_dialog_state(state: UploadDialogState) -> NewProjectUploadWo
         raise ValueError("Kunde darf nicht leer sein.")
     if not project:
         raise ValueError("Projektname darf nicht leer sein.")
+    require_folder_name(customer, "Kunde")
+    require_folder_name(project, "Projektname")
     if not source_paths:
         raise ValueError("Mindestens eine Punktwolkenquelle auswählen.")
     if any(path.lower().endswith(".copc.laz") for path in source_paths):

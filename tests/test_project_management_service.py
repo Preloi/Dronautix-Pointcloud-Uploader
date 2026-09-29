@@ -149,6 +149,7 @@ class FakeGLBService:
         project_s3_prefix,
         used_slugs=None,
         on_progress=None,
+        cancel_requested=None,
     ):
         self.calls.append(
             (
@@ -216,7 +217,7 @@ def test_list_projects_for_management_returns_active_and_disabled_with_status():
     ]
 
 
-def test_replace_single_model_from_source_keeps_model_identity_and_cleans_staging(tmp_path, monkeypatch):
+def test_replace_single_model_from_source_keeps_model_identity_takes_file_name_and_cleans_staging(tmp_path, monkeypatch):
     old_prefix = "pointclouds/kunde/project/projekt/models/fassade/versions/old"
     repository = FakeRepository(
         {
@@ -281,14 +282,14 @@ def test_replace_single_model_from_source_keeps_model_identity_and_cleans_stagin
     model = repository.index_data["projects"][0]["models"][0]
     assert result.status == "success"
     assert prepared_input.source_path == str(source)
-    assert prepared_input.name == "Fassade Bestand"
+    assert prepared_input.name == ""  # the pipeline names the model after the new file
     assert prepared_input.slug == "fassade"
     assert prepared_input.model_json_path == "C:/input/model.json"
     assert project_crs["value"] == "EPSG:25833"
     assert viewer_root == "kunde/project/projekt"
     assert s3_root == "pointclouds/kunde/project/projekt"
-    assert model["id"] == "fassade"
-    assert model["name"] == "Fassade Bestand"
+    assert model["id"] == "fassade"  # id and paths stay stable for links
+    assert model["name"] == "replacement"
     assert model["s3_path"].endswith(f"/models/fassade/versions/{'e' * 64}")
     assert source.read_bytes() == b"user-original"
     assert staging_root.exists()
@@ -469,7 +470,7 @@ def test_replace_project_model_rejects_unsupported_pointcloud_format_without_rea
         lambda: str(staging_root),
     )
 
-    with pytest.raises(ValueError, match="nicht unterstuetztes Punktwolkenformat"):
+    with pytest.raises(ValueError, match="nicht unterstütztes Punktwolkenformat"):
         ProjectManagementService(
             repository=repository,
             s3_client=s3_client,
@@ -779,7 +780,7 @@ def test_crs_repair_uses_javascript_mime_for_cloud_js_without_existing_header():
     assert result.status == "success"
     assert len(s3_client.puts) == 1
     assert s3_client.puts[0][1] == f"{cloud_path}/cloud.js"
-    assert s3_client.puts[0][3] == "application/javascript"
+    assert s3_client.puts[0][3] == "text/javascript"
 
 
 def test_uncertain_index_commit_does_not_roll_back_repaired_potree_crs():
@@ -889,7 +890,7 @@ def test_unsupported_pointcloud_format_blocks_sibling_crs_repair_without_writes(
         "dronautix_uploader.core.project_management_service.get_glb_upload_staging_root",
         lambda: str(tmp_path / "app-glb-staging"),
     )
-    with pytest.raises(ValueError, match="nicht unterstuetztes Punktwolkenformat"):
+    with pytest.raises(ValueError, match="nicht unterstütztes Punktwolkenformat"):
         ProjectManagementService(repository=repository, s3_client=s3_client, glb_service=FakeGLBService()).add_project_models_from_sources(
             "project", (str(source),)
         )
@@ -1005,6 +1006,38 @@ def test_rename_project_updates_active_project_without_changing_paths():
     ]
     assert repository.index_data["projects"][0] == renamed
     assert repository.saved_indexes[-1]["projects"][0] == renamed
+
+
+def test_rename_retries_on_a_concurrent_change_of_another_project():
+    from dronautix_uploader.core.project_repository import ProjectMetadataConflictError
+
+    index = {
+        "projects": [
+            {"id": "mine", "kunde": "K", "projekt": "Alt", "pointclouds": [{"name": "A"}]},
+            {"id": "other", "kunde": "K", "projekt": "Fremd"},
+        ],
+        S3_DISABLED_PROJECTS_KEY: [],
+    }
+
+    class ConcurrentOtherEditRepository(FakeRepository):
+        def save_projects_index(self, index_data):
+            if not self.saved_indexes and not getattr(self, "conflicted", False):
+                self.conflicted = True
+                fresh = copy.deepcopy(index)
+                fresh["projects"][1]["projekt"] = "Fremd geändert"  # another PC edited another project
+                conflict = ProjectMetadataConflictError("projects_index.json", current_data=fresh)
+                conflict.current_snapshot = fresh
+                raise conflict
+            super().save_projects_index(index_data)
+
+    repository = ConcurrentOtherEditRepository(index)
+
+    result = make_service(repository).rename_project("mine", "K", "Neu", ("A",))
+
+    assert result.status == "success"
+    saved = repository.saved_indexes[-1]["projects"]
+    assert saved[0]["projekt"] == "Neu"
+    assert saved[1]["projekt"] == "Fremd geändert"  # the concurrent winner is kept
 
 
 def test_rename_project_stores_legacy_cloud_name_and_updates_existing_potree_metadata():
@@ -1466,9 +1499,9 @@ def test_cleanup_pending_project_blocks_activation_and_replacement_without_s3_wr
     s3_client = FakeS3Client()
     service = make_service(repository, s3_client=s3_client)
 
-    with pytest.raises(RuntimeError, match="Loeschversuch"):
+    with pytest.raises(RuntimeError, match="Löschversuch"):
         service.set_project_link_state("pending", False)
-    with pytest.raises(RuntimeError, match="Loeschversuch"):
+    with pytest.raises(RuntimeError, match="Löschversuch"):
         service.replace_project_pointclouds("pending", ())
 
     assert repository.saved_indexes == []
@@ -1585,3 +1618,26 @@ def test_pointcloud_change_rejects_unknown_model_reference(model_cloud_change):
         run("replace_single_source", {"value": "EPSG:25832", "vertical_crs": "EPSG:7837"})
     assert repository.saved_indexes == []
     assert client.uploads == client.puts == client.deleted == []
+
+
+def test_manual_crs_repair_rewrites_potree_metadata_without_immutable_cache():
+    cloud_path = "pointclouds/kunde/project/projekt/cloud"
+    repository = FakeRepository(
+        {"projects": [{
+            "id": "project", "viewer_path": "kunde/project/projekt", "s3_path": "pointclouds/kunde/project/projekt",
+            "pointclouds": [{"name": "Cloud", "format": "potree", "s3_path": cloud_path}],
+        }]}
+    )
+    s3_client = FakeS3Client()
+    s3_client.read_objects[f"{cloud_path}/metadata.json"] = b'{"name":"unchanged"}'
+    service = ProjectManagementService(repository=repository, s3_client=s3_client)
+
+    repaired = service.repair_project_crs_metadata(
+        "project",
+        {"value": "EPSG:31255", "vertical_crs": "EPSG:5778"},
+        confirm_repair=lambda _message: True,
+    )
+
+    assert repaired.status == "success"
+    metadata_puts = [put for put in s3_client.puts if put[1] == f"{cloud_path}/metadata.json"]
+    assert metadata_puts and all(put[4].get("CacheControl") == "no-cache" for put in metadata_puts)

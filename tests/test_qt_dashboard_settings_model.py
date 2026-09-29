@@ -6,7 +6,6 @@ from dronautix_uploader.qt_app.dashboard_settings_model import (
     UPDATE_CHANNELS,
     UPDATE_CHANNEL_MANUAL,
     UPDATE_CHANNEL_STABLE,
-    build_cutover_readiness,
     converter_status,
     credential_status,
     example_settings_preview,
@@ -76,28 +75,6 @@ def test_example_settings_preview_covers_all_status_rows():
         "Updates",
     }
     assert settings.output_folder
-
-
-def test_cutover_readiness_requires_explicit_gates_not_only_credentials():
-    blocked = build_cutover_readiness(runtime_connected=True, golden_ready=False)
-
-    assert not blocked.ready
-    assert blocked.completed_required_count == 2
-    assert blocked.required_count == 8
-    assert blocked.first_open_item.name == "Golden Masters"
-
-    ready = build_cutover_readiness(
-        runtime_connected=True,
-        golden_ready=True,
-        v2_golden_comparison_ready=True,
-        preview_packaging_ready=True,
-        final_packaging_ready=True,
-        real_s3_acceptance_passed=True,
-        github_asset_sha_verified=True,
-        altversion_update_verified=True,
-    )
-
-    assert ready.ready
 
 
 def test_status_level_label_falls_back_to_info():

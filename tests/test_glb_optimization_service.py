@@ -900,7 +900,8 @@ def test_bundled_optimizer_offers_conservative_visura_then_each_explicit_codec(t
     source.write_bytes(b"source")
     seen = []
 
-    def run(_root, runner, arguments, _cancel):
+    def run(_root, runner, arguments, _cancel, timeout_seconds=None):
+        assert timeout_seconds and timeout_seconds > 0
         assert runner == "optimizer"
         seen.append(arguments[0])
         Path(arguments[-1]).write_bytes(arguments[0].encode("ascii"))
@@ -920,7 +921,8 @@ def test_bundled_decoder_passes_extensions_to_local_decoder_runner(tmp_path, mon
     runner.write_text("// local runner", encoding="utf-8")
     seen = []
 
-    def run(_root, runner_id, arguments, _cancel):
+    def run(_root, runner_id, arguments, _cancel, timeout_seconds=None):
+        assert timeout_seconds and timeout_seconds > 0
         assert runner_id == "decoder"
         seen.append(arguments)
         Path(arguments[-1]).write_bytes(b"decoded")
@@ -1058,8 +1060,8 @@ def test_bundled_adapter_resolves_relative_source_and_output_paths(monkeypatch, 
     Path("out").mkdir()
     recorded = []
 
-    def runner(resource_root, runner_id, arguments, cancel_requested):
-        del resource_root, runner_id, cancel_requested
+    def runner(resource_root, runner_id, arguments, cancel_requested, timeout_seconds=None):
+        del resource_root, runner_id, cancel_requested, timeout_seconds
         recorded.append(arguments)
         Path(arguments[-1]).write_bytes(b"output")
 

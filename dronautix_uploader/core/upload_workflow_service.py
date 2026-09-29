@@ -29,7 +29,7 @@ from .local_conversion_service import ConverterRunner
 from .glb_optimization_service import GLBOptimizationService
 from .metadata_service import get_common_crs_info
 from .metadata_service import stage_potree_metadata_crs_for_sources
-from .naming_service import build_project_paths
+from .naming_service import build_project_paths, require_folder_name
 from .pointcloud_preparation_service import (
     PointcloudPreparationRequest,
     prepare_pointcloud_sources,
@@ -159,9 +159,11 @@ class UploadWorkflowService:
         confirm_spatial_warning: Callable[[str], bool] | None = None,
     ):
         if not request.kunde.strip():
-            raise ValueError("Kunde ist fuer den Upload erforderlich.")
+            raise ValueError("Kunde ist für den Upload erforderlich.")
         if not request.projekt.strip():
-            raise ValueError("Projektname ist fuer den Upload erforderlich.")
+            raise ValueError("Projektname ist für den Upload erforderlich.")
+        require_folder_name(request.kunde, "Kunde")
+        require_folder_name(request.projekt, "Projektname")
 
         guarded_progress = make_cancel_guarded_progress(on_progress, cancel_requested)
         prepared_models = ()

@@ -8,7 +8,15 @@ from typing import Callable
 
 
 MUTEX_NAME = r"Local\DronautixPointcloudUploader"
+PREVIEW_MUTEX_NAME = r"Local\DronautixPointcloudUploaderV2Preview"
 ERROR_ALREADY_EXISTS = 183
+SW_RESTORE = 9
+
+
+def mutex_name_for_mode(uses_preview_config: bool) -> str:
+    """Preview and installed app use separate config, so they may run side by side."""
+
+    return PREVIEW_MUTEX_NAME if uses_preview_config else MUTEX_NAME
 
 
 def _create_named_mutex(name: str):
@@ -32,11 +40,12 @@ def _create_named_mutex(name: str):
 class SingleInstanceGuard:
     handle: object | None = None
     close_handle: Callable[[object], object] | None = None
+    mutex_name: str = MUTEX_NAME
 
     def acquire(self) -> bool:
         if os.name != "nt":
             return True
-        handle, error_code, close_handle = _create_named_mutex(MUTEX_NAME)
+        handle, error_code, close_handle = _create_named_mutex(self.mutex_name)
         if error_code == ERROR_ALREADY_EXISTS:
             close_handle(handle)
             return False
@@ -51,6 +60,23 @@ class SingleInstanceGuard:
         self.close_handle = None
 
 
+def activate_existing_window(window_title: str) -> bool:
+    """Bring the already running instance to the front instead of only warning."""
+
+    if os.name != "nt" or not window_title:
+        return False
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    user32.FindWindowW.restype = ctypes.c_void_p
+    user32.FindWindowW.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p)
+    hwnd = user32.FindWindowW(None, window_title)
+    if not hwnd:
+        return False
+    user32.ShowWindow(ctypes.c_void_p(hwnd), SW_RESTORE)
+    return bool(user32.SetForegroundWindow(ctypes.c_void_p(hwnd)))
+
+
 def show_single_instance_message(title: str, message: str) -> None:
     if os.name != "nt":
         return
@@ -59,4 +85,11 @@ def show_single_instance_message(title: str, message: str) -> None:
     ctypes.windll.user32.MessageBoxW(None, message, title, 0x00000040 | 0x00010000)
 
 
-__all__ = ["MUTEX_NAME", "SingleInstanceGuard", "show_single_instance_message"]
+__all__ = [
+    "MUTEX_NAME",
+    "PREVIEW_MUTEX_NAME",
+    "SingleInstanceGuard",
+    "activate_existing_window",
+    "mutex_name_for_mode",
+    "show_single_instance_message",
+]

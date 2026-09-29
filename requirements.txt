@@ -1,6 +1,5 @@
+PySide6
 boto3
 botocore
-customtkinter
 keyring
 pyinstaller
-tkinterdnd2

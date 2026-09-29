@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from dronautix_uploader.core.contracts import CancelCallback, ProgressCallback
+import functools
+
+from dronautix_uploader.core.contracts import CancelCallback, OperationCancelledError, ProgressCallback
 
 from .project_management import ModelPreview, PointcloudPreview, ProjectPreview
 from .project_management_actions import (
@@ -95,6 +97,22 @@ class RepairProjectCrsInput:
     allow_conflicting_overwrite: bool = False
 
 
+CANCELLED_OPERATION_MESSAGE = "Vorgang abgebrochen. Bereits übertragene Daten wurden wieder entfernt."
+
+
+def _summarize_cancellation(method):
+    """Report a user cancellation as a regular 'cancelled' summary, not an error."""
+
+    @functools.wraps(method)
+    def wrapper(*args, **kwargs):
+        try:
+            return method(*args, **kwargs)
+        except OperationCancelledError:
+            return ProjectOperationSummary(status="cancelled", message=CANCELLED_OPERATION_MESSAGE)
+
+    return wrapper
+
+
 class ProjectManagementController:
     """Route UI action IDs to the service-oriented project management core."""
 
@@ -117,11 +135,13 @@ class ProjectManagementController:
         )
         return summarize_project_operation_result(result)
 
+    @_summarize_cancellation
     def duplicate_project(
         self,
         project_preview: ProjectPreview | None,
         request: DuplicateProjectInput,
         on_progress: ProgressCallback | None = None,
+        cancel_requested: CancelCallback | None = None,
     ) -> ProjectOperationSummary:
         project = _require_project(project_preview)
         if not request.customer.strip() or not request.project.strip():
@@ -131,6 +151,7 @@ class ProjectManagementController:
             request.customer,
             request.project,
             on_progress=on_progress,
+            cancel_requested=cancel_requested,
         )
         return summarize_project_operation_result(result)
 
@@ -167,11 +188,13 @@ class ProjectManagementController:
         result = self.service.set_project_link_state(project.project_id, False)
         return summarize_project_operation_result(result)
 
+    @_summarize_cancellation
     def replace_all_pointclouds(
         self,
         project_preview: ProjectPreview | None,
         request: ReplaceAllPointcloudsInput,
         on_progress: ProgressCallback | None = None,
+        cancel_requested: CancelCallback | None = None,
     ) -> ProjectOperationSummary:
         project = _require_project(project_preview)
         if request.source_paths:
@@ -182,6 +205,7 @@ class ProjectManagementController:
                 output_base_dir=request.output_base_dir,
                 overwrite=request.overwrite,
                 on_progress=on_progress,
+                cancel_requested=cancel_requested,
                 crs_info_by_source_path=request.crs_info_by_source_path,
             )
             return summarize_project_operation_result(result)
@@ -191,15 +215,18 @@ class ProjectManagementController:
             project.project_id,
             request.prepared_clouds,
             on_progress=on_progress,
+            cancel_requested=cancel_requested,
         )
         return summarize_project_operation_result(result)
 
+    @_summarize_cancellation
     def replace_single_pointcloud(
         self,
         project_preview: ProjectPreview | None,
         pointcloud_preview: PointcloudPreview | None,
         request: ReplaceSinglePointcloudInput,
         on_progress: ProgressCallback | None = None,
+        cancel_requested: CancelCallback | None = None,
     ) -> ProjectOperationSummary:
         project = _require_project(project_preview)
         pointcloud = _require_pointcloud(pointcloud_preview)
@@ -214,6 +241,7 @@ class ProjectManagementController:
                 output_base_dir=request.output_base_dir,
                 overwrite=request.overwrite,
                 on_progress=on_progress,
+                cancel_requested=cancel_requested,
                 crs_info=request.crs_info,
             )
             return summarize_project_operation_result(result)
@@ -224,9 +252,11 @@ class ProjectManagementController:
             pointcloud.s3_path,
             request.prepared_cloud,
             on_progress=on_progress,
+            cancel_requested=cancel_requested,
         )
         return summarize_project_operation_result(result)
 
+    @_summarize_cancellation
     def replace_single_model(
         self,
         project_preview: ProjectPreview | None,
@@ -235,6 +265,7 @@ class ProjectManagementController:
         on_progress: ProgressCallback | None = None,
         confirm_spatial_warning: Callable[[str], bool] | None = None,
         confirm_crs_repair: Callable[[str], bool] | None = None,
+        cancel_requested: CancelCallback | None = None,
     ) -> ProjectOperationSummary:
         project = _require_project(project_preview)
         model = _require_model(model_preview)
@@ -247,16 +278,19 @@ class ProjectManagementController:
             source_path,
             model_json_path=request.model_json_path.strip(),
             on_progress=on_progress,
+            cancel_requested=cancel_requested,
             confirm_spatial_warning=confirm_spatial_warning,
             confirm_crs_repair=confirm_crs_repair,
         )
         return summarize_project_operation_result(result)
 
+    @_summarize_cancellation
     def add_pointclouds(
         self,
         project_preview: ProjectPreview | None,
         request: AddPointcloudsInput,
         on_progress: ProgressCallback | None = None,
+        cancel_requested: CancelCallback | None = None,
     ) -> ProjectOperationSummary:
         project = _require_project(project_preview)
         if request.source_paths:
@@ -267,6 +301,7 @@ class ProjectManagementController:
                 output_base_dir=request.output_base_dir,
                 overwrite=request.overwrite,
                 on_progress=on_progress,
+                cancel_requested=cancel_requested,
                 crs_info_by_source_path=request.crs_info_by_source_path,
             )
             return summarize_project_operation_result(result)
@@ -276,9 +311,11 @@ class ProjectManagementController:
             project.project_id,
             request.prepared_clouds,
             on_progress=on_progress,
+            cancel_requested=cancel_requested,
         )
         return summarize_project_operation_result(result)
 
+    @_summarize_cancellation
     def add_models(
         self,
         project_preview: ProjectPreview | None,
@@ -286,6 +323,7 @@ class ProjectManagementController:
         on_progress: ProgressCallback | None = None,
         confirm_spatial_warning: Callable[[str], bool] | None = None,
         confirm_crs_repair: Callable[[str], bool] | None = None,
+        cancel_requested: CancelCallback | None = None,
     ) -> ProjectOperationSummary:
         project = _require_project(project_preview)
         source_paths = tuple(path.strip() for path in request.source_paths if path.strip())
@@ -296,6 +334,7 @@ class ProjectManagementController:
             source_paths,
             model_json_by_source_path=request.model_json_by_source_path,
             on_progress=on_progress,
+            cancel_requested=cancel_requested,
             confirm_spatial_warning=confirm_spatial_warning,
             confirm_crs_repair=confirm_crs_repair,
         )

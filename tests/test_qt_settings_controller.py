@@ -262,6 +262,18 @@ def test_settings_controller_rejects_missing_region_or_bucket(tmp_path):
         controller.save_state(SettingsFormState(region_name="eu-central-1", bucket_name=""))
 
 
+def test_settings_controller_rejects_malformed_region_or_bucket_without_saving(tmp_path):
+    config_path = tmp_path / "config.json"
+    controller = SettingsController(config_path=config_path)
+
+    for region in ("eu central 1", "eu_central_1", "EU-CENTRAL-1"):
+        with pytest.raises(ValueError, match="Region"):
+            controller.save_state(SettingsFormState(region_name=region, bucket_name="bucket"))
+    with pytest.raises(ValueError, match="Bucket"):
+        controller.save_state(SettingsFormState(region_name="eu-central-1", bucket_name="Mein Bucket"))
+    assert not config_path.exists()
+
+
 def test_settings_controller_tests_connection_success_and_failure(tmp_path):
     calls = []
     controller = SettingsController(
@@ -319,3 +331,96 @@ def test_settings_controller_preview_reflects_loaded_state(tmp_path):
     assert preview.aws_profile == "Direkte Keys"
     assert preview.output_folder == str(output_dir)
     assert any(item.name == "AWS Credentials" and item.status == "Bereit" for item in preview.settings_status)
+
+
+def test_settings_controller_clear_credentials_removes_keyring_entries_and_config_keys(tmp_path):
+    from dronautix_uploader.core.config_service import load_config_file, save_config_file
+
+    config_path = tmp_path / "config.json"
+    save_config_file(config_path, {"aws_access_key_id": "AKIA", "aws_secret": "plain", "region_name": "eu-central-1"})
+    deleted = []
+    controller = SettingsController(
+        config_path=config_path,
+        credential_loader=lambda *_: "",
+        credential_deleter=lambda service, user: deleted.append((service, user)),
+    )
+
+    summary = controller.clear_credentials()
+
+    assert summary.status == "success"
+    assert sorted(user for _service, user in deleted) == ["aws_access", "aws_secret"]
+    assert load_config_file(config_path) == {"region_name": "eu-central-1", "keyring_fallback": False}
+
+
+def test_default_connection_test_reads_project_index_instead_of_head_bucket(monkeypatch):
+    import sys
+    import types
+
+    from dronautix_uploader.qt_app import settings_controller as module
+
+    calls = []
+
+    class NoSuchKey(Exception):
+        response = {"Error": {"Code": "NoSuchKey"}}
+
+    class Client:
+        def __init__(self, missing):
+            self.missing = missing
+
+        def head_bucket(self, **_kwargs):
+            raise AssertionError("HeadBucket needs s3:ListBucket, which the app never uses")
+
+        def get_object(self, Bucket, Key):
+            calls.append((Bucket, Key))
+            if self.missing:
+                raise NoSuchKey()
+            return {"Body": types.SimpleNamespace(close=lambda: None)}
+
+    clients = [Client(False), Client(True)]
+    fake_boto3 = types.SimpleNamespace(
+        Session=lambda **_kwargs: types.SimpleNamespace(client=lambda *_a, **_k: clients.pop(0))
+    )
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+    state = SettingsFormState(aws_access_key_id="AKIA", aws_secret_access_key="s", region_name="eu-central-1", bucket_name="b")
+
+    module._test_s3_connection(state)
+    module._test_s3_connection(state)  # an empty bucket without index is still reachable
+
+    assert calls == [("b", "projects_index.json"), ("b", "projects_index.json")]
+
+
+def test_clear_credentials_in_preview_stops_fallback_to_installed_app_keyring(tmp_path):
+    from dronautix_uploader.adapters.runtime_services import load_project_management_runtime_config
+    from dronautix_uploader.core.config_service import (
+        KEYRING_SERVICE,
+        PREVIEW_KEYRING_SERVICE,
+        get_config_locations,
+        load_config_file,
+        save_config_file,
+    )
+
+    environ = {"APPDATA": str(tmp_path)}
+    keyring = {
+        (KEYRING_SERVICE, "aws_access"): "AKIA_PROD",
+        (KEYRING_SERVICE, "aws_secret"): "prod-secret",
+        (PREVIEW_KEYRING_SERVICE, "aws_access"): "AKIA_PREVIEW",
+        (PREVIEW_KEYRING_SERVICE, "aws_secret"): "preview-secret",
+    }
+    loader = lambda service, user: keyring.get((service, user), "")
+    config_path = get_config_locations(preview=True, environ=environ).current_config
+    save_config_file(config_path, {"region_name": "eu-central-1"})
+    controller = SettingsController(
+        preview=True,
+        environ=environ,
+        credential_loader=loader,
+        credential_deleter=lambda service, user: keyring.pop((service, user), None),
+    )
+
+    assert controller.clear_credentials().status == "success"
+
+    state = controller.load_state()
+    runtime = load_project_management_runtime_config(preview=True, environ=environ, credential_loader=loader)
+    assert (state.aws_access_key_id, state.aws_secret_access_key) == ("", "")
+    assert runtime.ready is False
+    assert (KEYRING_SERVICE, "aws_secret") in keyring  # the installed app keeps its own credentials
+    assert load_config_file(config_path)["region_name"] == "eu-central-1"

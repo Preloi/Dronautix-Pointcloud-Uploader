@@ -1,8 +1,8 @@
+from _import_isolation import loaded_forbidden_modules
 import json
 import os
 from pathlib import Path
 import struct
-import sys
 
 import pytest
 
@@ -34,9 +34,7 @@ def _write_potree_output(output_dir):
 
 
 def test_local_conversion_controller_imports_without_qt_or_tk_bindings():
-    assert "PySide6" not in sys.modules
-    assert "tkinter" not in sys.modules
-    assert "customtkinter" not in sys.modules
+    assert loaded_forbidden_modules("dronautix_uploader.qt_app.local_conversion_controller") == []
 
 
 def test_local_conversion_controller_accepts_core_request_and_forwards_progress(tmp_path):
