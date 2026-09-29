@@ -82,6 +82,11 @@ All actions must support single-cloud and multi-cloud projects. Multi-cloud
 projects need a detail panel for individual pointclouds plus an operation to
 replace the complete `pointclouds` list.
 
+The viewer labels each cloud with its `name`. Multi-cloud entries carry it per
+`pointclouds` item; a single-cloud entry is the cloud itself and carries a
+top-level `name` (the source file stem or Potree folder name). Without it the
+viewer falls back to "Kunde - Projekt".
+
 Replace workflows must reuse the same convert/upload/metadata pipeline as new
 uploads. They must not implement a parallel converter or upload path.
 
