@@ -503,13 +503,20 @@ def create_upload_page(
         manual_horizontal = horizontal_crs_input.text().strip()
         manual_vertical = vertical_crs_input.text().strip()
         if manual_horizontal:
+            for key in ("value", "projection", "crs", "epsg", "auth", "code", "name", "crs_name"):
+                info.pop(key, None)
             manual_info = normalize_crs_value(manual_horizontal, source="manual") or {}
             info.update(manual_info)
         if manual_vertical:
+            for key in ("vertical_name", "vertical_datum", "vertical_wkt"):
+                info.pop(key, None)
             vertical_value = f"EPSG:{manual_vertical}" if manual_vertical.isdigit() else manual_vertical
             info["vertical_crs"] = vertical_value
             info["vertical_epsg"] = vertical_value
             info["vertical_projection"] = vertical_value
+        if manual_horizontal or manual_vertical:
+            # An embedded compound WKT may still describe the overridden CRS.
+            info.pop("wkt", None)
         return info or None
 
     def crs_info_by_source_path():
@@ -698,7 +705,6 @@ def create_upload_page(
         is_convert = mode == UPLOAD_MODE_CONVERT
         customer_input.setEnabled(not is_convert)
         project_input.setEnabled(not is_convert)
-        vertical_crs_input.setEnabled(not is_convert)
         set_output_row_visible(is_convert)
         start_button.setText("Konvertieren" if is_convert else "Hochladen")
         advanced_toggle.setText("Erweitert (CRS, Ausgabeordner)" if is_convert else "Erweitert (CRS)")

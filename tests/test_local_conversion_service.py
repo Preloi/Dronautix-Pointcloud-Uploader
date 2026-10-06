@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import struct
@@ -128,3 +129,88 @@ def test_failed_conversion_preserves_previous_output(tmp_path):
         )
 
     assert original.read_bytes() == b"old"
+
+
+@pytest.mark.parametrize("vertical", [None, "EPSG:5778"])
+def test_local_conversion_writes_crs_without_changing_pointcloud_data(tmp_path, vertical):
+    source = tmp_path / "scan.las"
+    converter = tmp_path / "PotreeConverter.exe"
+    output = tmp_path / "out"
+    source.write_bytes(b"source remains unchanged")
+    converter.write_bytes(b"exe")
+    crs_info = {"value": "EPSG:31254", "name": "MGI / Austria GK West"}
+    if vertical:
+        crs_info.update(vertical_crs=vertical, vertical_name="GHA height")
+    generated = {}
+
+    def fake_runner(_source, _converter, staging_dir, _progress):
+        staging = Path(staging_dir)
+        write_valid_potree(staging)
+        generated.update({path.name: path.read_bytes() for path in staging.iterdir()})
+
+    run_local_conversion(
+        LocalConversionRequest(str(source), str(output), str(converter), crs_info=crs_info),
+        converter_runner=fake_runner,
+    )
+
+    metadata = json.loads((output / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["projection"] == metadata["crs"] == "EPSG:31254"
+    assert metadata["srs"]["horizontal"] == "31254"
+    assert metadata.get("vertical_crs") == vertical
+    if vertical:
+        assert metadata["vertical_datum"] == "GHA height"
+        assert metadata["srs"]["vertical"] == "5778"
+    for key, value in json.loads(generated["metadata.json"]).items():
+        assert metadata[key] == value
+    for name in ("octree.bin", "hierarchy.bin"):
+        assert (output / name).read_bytes() == generated[name]
+    assert source.read_bytes() == b"source remains unchanged"
+
+
+def test_local_conversion_without_crs_keeps_converter_metadata(tmp_path):
+    source = tmp_path / "scan.las"
+    converter = tmp_path / "PotreeConverter.exe"
+    output = tmp_path / "out"
+    source.write_bytes(b"las")
+    converter.write_bytes(b"exe")
+    generated = []
+
+    def fake_runner(_source, _converter, staging_dir, _progress):
+        write_valid_potree(Path(staging_dir))
+        generated.append((Path(staging_dir) / "metadata.json").read_bytes())
+
+    run_local_conversion(
+        LocalConversionRequest(str(source), str(output), str(converter)),
+        converter_runner=fake_runner,
+    )
+
+    assert (output / "metadata.json").read_bytes() == generated[0]
+
+
+def test_crs_write_failure_preserves_existing_local_output(tmp_path, monkeypatch):
+    from dronautix_uploader.core import local_conversion_service
+
+    source = tmp_path / "scan.las"
+    converter = tmp_path / "PotreeConverter.exe"
+    output = tmp_path / "out"
+    source.write_bytes(b"las")
+    converter.write_bytes(b"exe")
+    output.mkdir()
+    original = output / "metadata.json"
+    original.write_bytes(b"existing project")
+
+    def fail_write(*_args):
+        raise OSError("metadata write failed")
+
+    monkeypatch.setattr(local_conversion_service, "write_potree_metadata_crs", fail_write)
+    with pytest.raises(OSError, match="metadata write failed"):
+        run_local_conversion(
+            LocalConversionRequest(
+                str(source), str(output), str(converter), overwrite=True,
+                crs_info={"value": "EPSG:31254", "vertical_crs": "EPSG:5778"},
+            ),
+            converter_runner=lambda _source, _converter, staging, _progress: write_valid_potree(Path(staging)),
+        )
+
+    assert original.read_bytes() == b"existing project"
+    assert not list(tmp_path.glob(".out.tmp-*"))
