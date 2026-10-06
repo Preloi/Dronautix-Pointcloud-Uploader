@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from dronautix_uploader.core.local_conversion_service import (
     LocalConversionRequest,
@@ -16,6 +17,7 @@ class LocalConversionDialogState:
     output_dir: str = ""
     converter_path: str = ""
     overwrite: bool = False
+    crs_info: dict[str, Any] | None = None
 
 
 def validate_local_conversion_dialog_state(state: LocalConversionDialogState) -> LocalConversionRequest:
@@ -24,6 +26,7 @@ def validate_local_conversion_dialog_state(state: LocalConversionDialogState) ->
         output_dir=str(state.output_dir or "").strip(),
         converter_path=str(state.converter_path or "").strip(),
         overwrite=bool(state.overwrite),
+        crs_info=dict(state.crs_info) if state.crs_info else None,
     )
     validate_local_conversion_request(request)
     return request

@@ -142,24 +142,18 @@ class UploadMixin:
             self._upload_page.show_error("Konvertierung ist in dieser Umgebung nicht verfügbar.")
             self.statusBar().showMessage("Konvertierung nicht verfügbar.")
             return
-        from ..local_conversion_dialog_models import (
-            LocalConversionDialogState,
-            validate_local_conversion_dialog_state,
-        )
+        from ..local_conversion_dialog_models import LocalConversionDialogState
 
         source_file = form.source_paths[0] if form.source_paths else ""
-        try:
-            request = validate_local_conversion_dialog_state(
-                LocalConversionDialogState(
-                    source_file=source_file,
-                    output_dir=form.output_base_dir,
-                    converter_path=form.converter_path,
-                    overwrite=form.overwrite,
-                )
-            )
-        except (ValueError, FileExistsError) as error:
-            self._upload_page.show_error(str(error))
-            return
+        # Snapshot the cached detection/manual overrides on the GUI thread.
+        # The controller validates paths in the worker; even stat can hang on NAS.
+        request = LocalConversionDialogState(
+            source_file=source_file,
+            output_dir=form.output_base_dir,
+            converter_path=form.converter_path,
+            overwrite=form.overwrite,
+            crs_info=self._upload_page.crs_info_by_source_path().get(source_file),
+        )
 
         self._upload_page.set_running(True)
         cancel_event = threading.Event()

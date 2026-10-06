@@ -20,6 +20,7 @@ def test_local_conversion_dialog_state_validates_to_core_request(tmp_path):
             output_dir=f" {output} ",
             converter_path=f" {converter} ",
             overwrite=True,
+            crs_info={"value": "EPSG:31254", "vertical_crs": "EPSG:5778"},
         )
     )
 
@@ -28,6 +29,7 @@ def test_local_conversion_dialog_state_validates_to_core_request(tmp_path):
         output_dir=str(output),
         converter_path=str(converter),
         overwrite=True,
+        crs_info={"value": "EPSG:31254", "vertical_crs": "EPSG:5778"},
     )
 
 

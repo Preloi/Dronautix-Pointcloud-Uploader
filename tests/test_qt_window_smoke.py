@@ -37,6 +37,100 @@ def _app(QtWidgets):
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
+@pytest.mark.parametrize(
+    ("manual_horizontal", "manual_vertical", "expected_horizontal", "expected_vertical"),
+    [("", "", "EPSG:31254", "EPSG:5778"),
+     ("25832", "", "EPSG:25832", "EPSG:5778"),
+     ("", "7837", "EPSG:31254", "EPSG:7837")],
+)
+def test_local_conversion_from_window_preserves_crs_in_worker(
+    tmp_path, monkeypatch, manual_horizontal, manual_vertical, expected_horizontal, expected_vertical,
+):
+    from pathlib import Path
+    from types import SimpleNamespace
+    from test_crs_detection import MGI_GK_EAST_WKT1, _las_with_vlrs
+    from test_local_conversion_service import write_valid_potree
+    from dronautix_uploader.core import local_conversion_service
+    from dronautix_uploader.qt_app.dashboard_settings_model import example_settings_preview
+    from dronautix_uploader.qt_app.local_conversion_controller import LocalConversionController
+    from dronautix_uploader.qt_app.main_window import create_main_window
+    from dronautix_uploader.qt_app.settings_controller import SettingsFormState
+
+    QtCore, QtGui, QtWidgets = _import_qt()
+    app = _app(QtWidgets)
+    horizontal_wkt = MGI_GK_EAST_WKT1.format(authority=',AUTHORITY["EPSG","31254"]').replace("East", "West")
+    wkt = ('COMPD_CS["MGI GK West + GHA",' + horizontal_wkt
+           + ',VERT_CS["GHA height",VERT_DATUM["Gebrauchshoehen ADRIA",2005],'
+           'UNIT["metre",1],AUTHORITY["EPSG","5778"]]]')
+    source = _las_with_vlrs(tmp_path, [(2112, wkt.encode() + b"\0")])
+    converter = tmp_path / "PotreeConverter.exe"
+    converter.write_bytes(b"exe")
+    output = tmp_path / "out"
+    settings = SettingsFormState(converter_path=str(converter), output_base_dir=str(output))
+    io_threads = []
+    real_isfile = os.path.isfile
+    real_write = local_conversion_service.write_potree_metadata_crs
+
+    def checked_isfile(path):
+        if str(path) == str(source):
+            io_threads.append(threading.current_thread())
+            assert threading.current_thread() is not threading.main_thread()
+        return real_isfile(path)
+
+    def checked_write(*args):
+        io_threads.append(threading.current_thread())
+        assert threading.current_thread() is not threading.main_thread()
+        return real_write(*args)
+
+    def fake_runner(_source, _converter, staging, _progress):
+        assert threading.current_thread() is not threading.main_thread()
+        write_valid_potree(Path(staging))
+
+    monkeypatch.setattr(os.path, "isfile", checked_isfile)
+    monkeypatch.setattr(local_conversion_service, "write_potree_metadata_crs", checked_write)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information", lambda *_args: None)
+    errors = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "critical", lambda *args: errors.append(args))
+    window = create_main_window(
+        QtCore, QtGui, QtWidgets,
+        settings_controller=SimpleNamespace(load_state=lambda: settings, preview=example_settings_preview),
+        local_conversion_controller=LocalConversionController(converter_runner=fake_runner),
+    )
+    try:
+        page = window._upload_page
+        next(b for b in page.findChildren(QtWidgets.QPushButton) if b.text() == "Nur lokal konvertieren").click()
+        page.add_source_paths((str(source),))
+        assert _process_until(app, lambda: not page.crs_detection_pending())
+        horizontal = next(f for f in page.findChildren(QtWidgets.QLineEdit) if f.placeholderText() == "automatisch erkennen")
+        vertical = next(f for f in page.findChildren(QtWidgets.QLineEdit) if f.placeholderText() == "optional")
+        assert vertical.isEnabled()
+        horizontal.setText(manual_horizontal)
+        vertical.setText(manual_vertical)
+        window._handle_upload_action()
+        assert _process_until(app, lambda: not window._has_active_background_tasks())
+        assert not errors
+
+        metadata = json.loads((output / "metadata.json").read_text(encoding="utf-8"))
+        assert metadata["projection"] == metadata["crs"] == expected_horizontal
+        assert metadata["vertical_crs"] == expected_vertical
+        assert metadata["srs"]["horizontal"] == expected_horizontal.split(":")[1]
+        assert metadata["srs"]["vertical"] == expected_vertical.split(":")[1]
+        if manual_horizontal or manual_vertical:
+            assert "wkt" not in metadata["srs"]
+            assert "wkt" not in metadata["crs_info"]
+        else:
+            assert metadata["srs"]["wkt"] == wkt
+            assert metadata["vertical_datum"] == "GHA height"
+        if manual_horizontal:
+            assert "crs_name" not in metadata
+        if manual_vertical:
+            assert "vertical_datum" not in metadata
+        assert io_threads and all(thread is not threading.main_thread() for thread in io_threads)
+    finally:
+        _process_until(app, lambda: not window._has_active_background_tasks())
+        window.deleteLater()
+
+
 def test_startup_cleanup_removes_only_dedicated_glb_stages_older_than_24_hours(tmp_path, monkeypatch):
     from dronautix_uploader.qt_app import main_window
 

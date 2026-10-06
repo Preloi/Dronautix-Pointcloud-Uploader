@@ -6,10 +6,11 @@ import os
 import shutil
 import tempfile
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 from .contracts import CancelCallback, ProgressCallback, ProgressEvent
 from .converter_service import run_potree_conversion, validate_potree_output
+from .metadata_service import write_potree_metadata_crs
 from .naming_service import sanitize_folder_name
 
 
@@ -19,6 +20,7 @@ class LocalConversionRequest:
     output_dir: str
     converter_path: str
     overwrite: bool = False
+    crs_info: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +113,9 @@ def run_local_conversion(
         _emit(on_progress, ProgressEvent(kind="step", step=3, total_steps=5, message="Prüfe Ergebnis...", phase="conversion"))
         _emit(on_progress, ProgressEvent(kind="detail", detail="Die konvertierten Daten werden lokal bereitgestellt", phase="conversion"))
         validate_potree_output(staging_dir)
+        # Complete metadata before promoting the staged output, so a write
+        # failure leaves any existing project intact.
+        write_potree_metadata_crs(staging_dir, request.crs_info)
 
         backup_dir = ""
         if os.path.isdir(output_dir):
