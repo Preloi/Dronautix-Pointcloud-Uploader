@@ -16,6 +16,7 @@ from .constants import (
     S3_INDEX_CACHE_CONTROL,
     S3_INDEX_JSON,
 )
+from .project_index_schema import IndexSaveContext, compact_project_entry
 from .project_index_service import PROJECTS_KEY, strip_project_ui_state
 
 JsonObject = dict[str, Any]
@@ -105,12 +106,28 @@ def _read_response_body(response: dict[str, Any], key: str) -> str:
     raise RuntimeError(f"S3 object {key} has unsupported JSON body type: {type(raw_data).__name__}")
 
 
-def prepare_projects_index_for_save(index_data: JsonObject, last_updated: str | None = None) -> JsonObject:
-    """Return the persistable project index without transient UI state."""
+def prepare_projects_index_for_save(
+    index_data: JsonObject,
+    last_updated: str | None = None,
+    context: IndexSaveContext | None = None,
+) -> JsonObject:
+    """Return the persistable project index without transient UI state.
+
+    With a context, only the named target project is written in its compact
+    schema-2 form (if it is a schema-2 entry); all other entries are passed on
+    unchanged. Without a context nothing is compacted.
+    """
 
     persisted_index = copy.deepcopy(index_data) if isinstance(index_data, dict) else {"projects": []}
     if last_updated is not None:
         persisted_index["last_updated"] = last_updated
+    target_id = str(context.project_id or "").strip() if context is not None else ""
+
+    def persisted_project(project: dict[str, Any]) -> dict[str, Any]:
+        cleaned = strip_project_ui_state(project)
+        if target_id and str(cleaned.get("id", "")).strip() == target_id:
+            return compact_project_entry(cleaned, context.evidence)
+        return cleaned
 
     for key in (PROJECTS_KEY, S3_DISABLED_PROJECTS_KEY):
         projects = persisted_index.get(key, [])
@@ -119,7 +136,7 @@ def prepare_projects_index_for_save(index_data: JsonObject, last_updated: str | 
                 persisted_index[key] = []
             continue
         persisted_index[key] = [
-            strip_project_ui_state(project) if isinstance(project, dict) else project
+            persisted_project(project) if isinstance(project, dict) else project
             for project in projects
         ]
     return persisted_index
@@ -149,10 +166,12 @@ class ProjectMetadataRepository:
     def load_projects_index(self) -> JsonObject:
         return self.load_json(self.projects_index_key, PROJECTS_INDEX_DEFAULT)
 
-    def save_projects_index(self, index_data: JsonObject) -> None:
+    def save_projects_index(self, index_data: JsonObject, context: IndexSaveContext | None = None) -> None:
+        # The compacted copy is only the body; the IfMatch condition always
+        # comes from the loaded snapshot handed in here (after a rebase: the fresh one).
         self.save_json(
             self.projects_index_key,
-            prepare_projects_index_for_save(index_data, self.timestamp_factory()),
+            prepare_projects_index_for_save(index_data, self.timestamp_factory(), context),
             cache_control=self.cache_control,
             source_snapshot=index_data,
         )

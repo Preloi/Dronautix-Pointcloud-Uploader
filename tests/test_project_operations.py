@@ -156,7 +156,10 @@ def test_build_new_project_upload_single_potree_uses_legacy_project_shape(tmp_pa
         project_s3_prefix="pointclouds/kunde/abc123ef/projekt",
     )
 
+    # New projects carry the index schema 2 marker; the builder still produces the
+    # full CRS fields, only the repository writes the compact form.
     assert upload.project_metadata == {
+        "index_schema_version": 2,
         "datum": "2026-06-21T12:00:00",
         "kunde": "Kunde",
         "id": "abc123ef",

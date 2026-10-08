@@ -8,13 +8,129 @@ CustomTkinter app (V1) and the one-off V2 cutover tooling have been removed.
 
 `tests/snapshots/<scenario>/` holds the exact viewer files (`projects_index.json`,
 `metadata.json`, `cloud.js`, `deleted_projects.json`) plus `side_effects.json`
-(S3 calls with keys, content types, cache headers and order) for ten scenarios:
-single/multi/vertical-CRS/existing-Potree uploads, duplicate, delete, rename,
-single and multi replace, and disabled link state. `core/output_snapshots.py`
+(S3 calls with keys, content types, cache headers and order) for fourteen
+scenarios: single/multi/vertical-CRS/existing-Potree uploads, duplicate, delete,
+rename, single and multi replace, disabled link state, and four scenarios seeded
+with index schema 2 entries (`schema2_single_replace`, `schema2_multi_replace`,
+`schema2_add_pointcloud`, `schema2_link_rename`). The uploads and the duplicate
+create new projects and therefore write schema 2; the other legacy scenarios
+start from unmarked entries and protect the legacy output. `core/output_snapshots.py`
 generates them deterministically against an in-memory S3 double;
 `tests/test_output_snapshots.py` requires byte identity. An intended change is
 applied with `python tools/update_output_snapshots.py --write` and reviewed in
 the git diff.
+
+## Project Index Schema Contract
+
+Each `projects_index.json` entry carries its own index schema. It describes only
+the index representation and is independent of `model.json.schema_version`.
+
+| `index_schema_version` | Meaning |
+| --- | --- |
+| absent | Legacy schema. Read and written as before; never migrated or marked. |
+| `2` (JSON integer) | Compact schema 2. Kept by every later action. |
+| anything else, including `"2"`, `2.0`, `true`, `null`, `1` | Unknown. Listing, preview and download keep working; every writing action on this entry (rename, link state, delete, duplicate as source, cloud/model upload, replace, remove, CRS repair) fails before its first side effect, also for direct operation calls with prepared data. |
+
+Which entries get schema 2:
+
+- New projects in both branches of `build_new_project_upload()` (single cloud;
+  several clouds and/or GLB models). The marker is the first key.
+- A duplicate is a new project and gets schema 2 whatever its source used. The
+  source entry and its S3 objects are not changed.
+- Rebuilding a single-cloud entry on replace keeps an existing marker and never
+  adds one. The shared builders (`build_single_project_metadata()`,
+  `build_multi_project_metadata()`) do not set it.
+
+Shape: the viewer shapes stay unchanged. A single cloud without models is the
+project entry itself (with `name`); several clouds or a new project with GLB
+models use `format: "multi"`, `pointclouds[]` and `models[]`. Project fields
+(`id`, `kunde`, `projekt`, `datum`, `link`, `format`, `viewer_path`, `s3_path`),
+cloud fields (`name`, `format`, `viewer_path`, `s3_path`, `visible`, other
+display parameters), model fields (`id`, `name`, `format: "glb"`, `viewer_path`
+to `model.json`, `s3_path` to the model prefix), `pointcloud_count`, sizes,
+`history`, `disabled_at` and cleanup state are kept as before. CRS is written as
+`crs`, `crs_name`, `vertical_crs`, `vertical_name`, each only with a known
+value. Unknown other fields are not removed.
+
+Compaction (`core/project_index_schema.compact_project_entry`) is pure,
+idempotent, works on a copy and only touches CRS duplicates of a schema-2 entry,
+of each of its `pointclouds[]` and of each of its `models[]`:
+
+- The aliases `projection`, `epsg` (same reference as `crs`), `vertical_epsg`,
+  `vertical_projection` (same as `vertical_crs`) and `vertical_datum` (same text
+  as `vertical_name`) are removed. A WKT is never treated as equal to its EPSG
+  code; only identical text counts.
+- `crs_info` is removed only as a whole and only if every key is in the fixed
+  list below and proven; otherwise the whole block stays (documented exception
+  of schema 2, not a separate marker). For the listed keys empty strings and
+  `null` carry no value. Any other key keeps the block whatever its value
+  (including `null` and `""`), as does any non-string or unresolvable value.
+
+  | Keys in `crs_info` | Removable when |
+  | --- | --- |
+  | `value`, `projection`, `crs`, `epsg`, `horizontal` | same interpreted reference as `crs` |
+  | `code`, `auth` | derived exactly from an `EPSG:<n>` `crs` (`<n>`, `EPSG`) |
+  | `name`, `crs_name` | same name as `crs_name`; lifted into `crs_name` if that key is absent |
+  | `vertical_crs`, `vertical_epsg`, `vertical_projection` | same interpreted reference as `vertical_crs` |
+  | `vertical_name`, `vertical_datum` | same name as `vertical_name`; lifted if absent |
+  | `wkt`, `vertical_wkt`, `source` | the identical value is proven by the dataset's metadata documents |
+
+  Conflicting names are never resolved silently. In addition the flat fields
+  must give the uploader's readers the same horizontal/vertical reference and
+  names as the block did (readers prefer `crs_info` over flat fields).
+- Proof (`CrsDetailEvidence`) binds a dataset `s3_path` to raw values stored in
+  that dataset's `metadata.json`/`cloud.js` (`crs_info.wkt`,
+  `crs_info.vertical_wkt`, `crs_info.source`, `srs.wkt`; the top-level Potree
+  `source` is the input file name and never counts). A multi project's summary
+  is proven by the first active cloud it is taken from. A GLB manifest proves
+  nothing. Proof comes from: the staged metadata files actually uploaded (new
+  upload, replace/add from sources); the documents copied into the new,
+  unpublished prefix of a duplicate (unreadable copies only withhold proof; a
+  user cancel, also one set while a response is read, stays a cancel and the
+  copy is not published); the documents a CRS repair read or wrote. Prepared
+  clouds handed in directly carry no proof, so their details stay. The output of
+  `detect_crs_from_metadata_dict()` (normalized, `source: "auto"`) is never proof.
+
+Save boundary: `ProjectMetadataRepository.save_projects_index(index, context)`
+with an `IndexSaveContext(project_id, evidence)` compacts only the named target
+in `projects` and `disabled_projects`, and only if it is schema 2. Without a
+context nothing is compacted; all other entries keep their content and relative
+order (only the existing UI-flag stripping applies). A missing target (delete)
+is fine. The context lives only in the call; it holds no ETag. The compacted
+copy is only the request body: the `IfMatch` condition always comes from the
+loaded snapshot handed to save, after a rebase the fresh one. Conflict rebase,
+uncertain-write handling and rollbacks are unchanged; rollbacks restore the
+index in memory and add no index write.
+
+The context is passed for new uploads, duplicates, rename, link state, delete
+(both index saves), cloud replace/add/remove, GLB add/replace/remove and CRS
+repair. Reading, download, foreign entries and rollback get none. Ordinary
+actions do no extra S3 reads only for compaction; an already compact entry stays
+compact, an entry re-inflated by an older uploader loses its safe duplicates.
+
+Structure changes in schema 2: adding clouds to a single-cloud entry moves the
+entry's raw `crs_info` unchanged to the original cloud (the normalized view
+would drop unknown keys); the legacy flow keeps its behaviour. Before a
+schema-2 multi project's summary is recomputed (add, remove, replace), every
+non-reconstructible detail of the project `crs_info` (an unknown key also with
+an empty value) must be held by one of its clouds; otherwise only that action is rejected before any upload, naming the
+field. Explicitly removed or replaced clouds may lose their old metadata; it is
+not moved to the replacement.
+
+CRS repair keeps the candidate order and the resulting common CRS (project
+index, then per cloud its index entry and documents). It backfills copies of the
+target documents and keeps their WKT, source and unknown fields; no details are
+moved between clouds and GLB names are unaffected. The Potree writers,
+`model.json`, its hash and `data_version` keep their contracts.
+
+Writer compatibility: version 2.2.2 introduces this contract. Use 2.2.2 for all
+later writes to schema-2 projects; future versions must preserve this contract.
+The unchanged 2.2.1 writer was checked against local compact fixtures: replacing
+a single-cloud project removes the schema marker and reintroduces CRS aliases;
+replacing all clouds in a multi project keeps the marker but reintroduces the
+aliases. A missing marker is never inferred or restored automatically. Older
+writers are therefore not a supported rollback for continued compact writes.
+There is no migration of existing projects.
 
 ## Converter Contract
 

@@ -30,6 +30,7 @@ from .naming_service import sanitize_folder_name
 from .naming_service import build_project_paths
 from .metadata_service import stage_potree_metadata_crs_for_sources
 from .pointcloud_preparation_service import PointcloudPreparationRequest, prepare_pointcloud_sources
+from .project_index_schema import IndexSaveContext, crs_detail_evidence_from_documents, ensure_writable_index_schema
 from .project_index_service import (
     append_project_history,
     get_all_projects_for_management,
@@ -49,6 +50,7 @@ from .project_operations import (
     pointcloud_object_list_prefix,
     prepare_cloud_uploads,
     prepare_single_project_upload,
+    read_staged_crs_detail_evidence,
     rebase_prepared_cloud_upload,
     ProjectDownloadCancelledError,
     remove_project_model as remove_project_model_operation,
@@ -57,6 +59,7 @@ from .project_operations import (
     replace_single_project_pointcloud as replace_single_project_pointcloud_operation,
     replace_single_project_model as replace_single_project_model_operation,
     resolve_unique_multi_project_child,
+    staged_metadata_paths,
     strip_data_version,
     validate_project_pointcloud_add_target,
 )
@@ -115,7 +118,7 @@ class ProjectManagementService:
     ) -> ProjectOperationResult:
         index_data = self.repository.load_projects_index()
         original_index = copy.deepcopy(index_data)
-        project_info, _is_disabled = self._find_project(index_data, project_id)
+        project_info, _is_disabled = self._find_writable_project(index_data, project_id)
         metadata_updates = _prepare_potree_name_updates(
             self.s3_client,
             self._bucket_name,
@@ -179,6 +182,7 @@ class ProjectManagementService:
                 self._save_projects_index,
                 reapply=lambda fresh: update_project_in_index(fresh, project_id, apply_rename),
                 project_id=project_id,
+                index_context=IndexSaveContext(project_id),
             )
         except Exception as error:
             index_data.clear()
@@ -212,7 +216,7 @@ class ProjectManagementService:
 
     def delete_project(self, project_id: str):
         index_data = self.repository.load_projects_index()
-        project_info, _is_disabled = self._find_project(index_data, project_id, allow_cleanup_pending=True)
+        project_info, _is_disabled = self._find_writable_project(index_data, project_id, allow_cleanup_pending=True)
         deleted_data = self.repository.load_deleted_projects()
 
         return delete_project_operation(
@@ -224,6 +228,7 @@ class ProjectManagementService:
             save_index=self._save_projects_index,
             save_deleted=self._save_deleted_projects,
             bucket_name=self._bucket_name,
+            index_context=IndexSaveContext(project_id),
         )
 
     def duplicate_project(
@@ -235,7 +240,7 @@ class ProjectManagementService:
         cancel_requested: CancelCallback | None = None,
     ):
         index_data = self.repository.load_projects_index()
-        source_project, _is_disabled = self._find_project(index_data, project_id)
+        source_project, _is_disabled = self._find_writable_project(index_data, project_id)
         new_project_id = self.id_factory()
         paths = build_project_paths(new_kunde, new_projekt, new_project_id)
 
@@ -255,6 +260,7 @@ class ProjectManagementService:
             bucket_name=self._bucket_name,
             on_progress=on_progress,
             cancel_requested=cancel_requested,
+            index_context=IndexSaveContext(new_project_id),
         )
 
     def download_project(
@@ -292,7 +298,7 @@ class ProjectManagementService:
 
     def set_project_link_state(self, project_id: str, disabled: bool):
         index_data = self.repository.load_projects_index()
-        _project_info, is_disabled = self._find_project(index_data, project_id)
+        _project_info, is_disabled = self._find_writable_project(index_data, project_id)
         if is_disabled == disabled:
             state_text = "deaktiviert" if disabled else "aktiv"
             return ProjectOperationResult(
@@ -319,7 +325,7 @@ class ProjectManagementService:
                 "Projekt wurde inaktiv geschaltet." if disabled else "Projekt wurde aktiv geschaltet.",
             ),
         )
-        if not self._save_projects_index(index_data):
+        if not self._save_projects_index(index_data, IndexSaveContext(project_id)):
             raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
         action_text = "deaktiviert" if disabled else "aktiviert"
         return ProjectOperationResult(
@@ -336,7 +342,7 @@ class ProjectManagementService:
         cancel_requested: CancelCallback | None = None,
     ):
         index_data = self.repository.load_projects_index()
-        project_info, _is_disabled = self._find_project(index_data, project_id)
+        project_info, _is_disabled = self._find_writable_project(index_data, project_id)
         project_viewer_root, project_s3_prefix = self._stable_project_roots(project_info)
         if not project_s3_prefix:
             raise ValueError(f"Projekt mit ID '{project_id}' hat keinen S3-Pfad.")
@@ -365,6 +371,8 @@ class ProjectManagementService:
             bucket_name=self._bucket_name,
             timestamp=self.timestamp_factory(),
             cancel_requested=cancel_requested,
+            # Prepared clouds bring no staging proof: their CRS details stay in the index.
+            index_context=IndexSaveContext(project_id),
         )
 
     def replace_project_pointclouds_from_sources(
@@ -381,7 +389,7 @@ class ProjectManagementService:
         source_overrides=None,
     ):
         index_data = self.repository.load_projects_index()
-        project_info, _is_disabled = self._find_project(index_data, project_id)
+        project_info, _is_disabled = self._find_writable_project(index_data, project_id)
         project_viewer_root, project_s3_prefix = self._stable_project_roots(project_info)
         version_viewer_root, version_s3_prefix = self._versioned_roots(project_info)
         prepared_sources = prepare_pointcloud_sources(
@@ -399,6 +407,7 @@ class ProjectManagementService:
         prepared_sources = _attach_crs_info(prepared_sources, tuple(source_paths), crs_info_by_source_path)
         with _staged_source_metadata(prepared_sources) as staged_sources:
             prepared_clouds = prepare_cloud_uploads(staged_sources, version_viewer_root, version_s3_prefix)
+            index_context = _staged_index_context(project_id, staged_sources, prepared_clouds)
             existing_keys = collect_project_objects(
                 self.s3_client,
                 project_s3_prefix,
@@ -418,6 +427,7 @@ class ProjectManagementService:
                 bucket_name=self._bucket_name,
                 timestamp=self.timestamp_factory(),
                 cancel_requested=cancel_requested,
+                index_context=index_context,
             )
 
     def add_project_pointclouds(
@@ -428,7 +438,7 @@ class ProjectManagementService:
         cancel_requested: CancelCallback | None = None,
     ):
         index_data = self.repository.load_projects_index()
-        project_info, _is_disabled = self._find_project(index_data, project_id)
+        project_info, _is_disabled = self._find_writable_project(index_data, project_id)
         project_viewer_root, project_s3_prefix = self._stable_project_roots(project_info)
         validate_project_pointcloud_add_target(project_info, project_viewer_root, project_s3_prefix)
         version_viewer_root, version_s3_prefix = self._versioned_roots(project_info)
@@ -449,6 +459,7 @@ class ProjectManagementService:
             bucket_name=self._bucket_name,
             timestamp=self.timestamp_factory(),
             cancel_requested=cancel_requested,
+            index_context=IndexSaveContext(project_id),
         )
 
     def add_project_pointclouds_from_sources(
@@ -465,7 +476,7 @@ class ProjectManagementService:
         source_overrides=None,
     ):
         index_data = self.repository.load_projects_index()
-        project_info, _is_disabled = self._find_project(index_data, project_id)
+        project_info, _is_disabled = self._find_writable_project(index_data, project_id)
         project_viewer_root, project_s3_prefix = self._stable_project_roots(project_info)
         validate_project_pointcloud_add_target(project_info, project_viewer_root, project_s3_prefix)
         prepared_sources = prepare_pointcloud_sources(
@@ -497,6 +508,7 @@ class ProjectManagementService:
                 bucket_name=self._bucket_name,
                 timestamp=self.timestamp_factory(),
                 cancel_requested=cancel_requested,
+                index_context=_staged_index_context(project_id, staged_sources, prepared_clouds),
             )
 
     def remove_project_pointcloud(
@@ -505,7 +517,7 @@ class ProjectManagementService:
         target_pointcloud_s3_path: str,
     ):
         index_data = self.repository.load_projects_index()
-        project_info, _is_disabled = self._find_project(index_data, project_id)
+        project_info, _is_disabled = self._find_writable_project(index_data, project_id)
         project_viewer_root, project_s3_prefix = self._stable_project_roots(project_info)
         target = resolve_unique_multi_project_child(
             project_info,
@@ -535,11 +547,12 @@ class ProjectManagementService:
             save_index=self._save_projects_index,
             delete_keys=lambda keys: delete_s3_objects(self.s3_client, keys, bucket_name=self._bucket_name),
             timestamp=self.timestamp_factory(),
+            index_context=IndexSaveContext(project_id),
         )
 
     def remove_project_model(self, project_id: str, target_model_s3_path: str):
         index_data = self.repository.load_projects_index()
-        project_info, _is_disabled = self._find_project(index_data, project_id)
+        project_info, _is_disabled = self._find_writable_project(index_data, project_id)
         _ensure_potree_project(project_info)
         target_path = str(target_model_s3_path or "").strip().rstrip("/")
         models = project_info.get("models")
@@ -561,6 +574,7 @@ class ProjectManagementService:
             save_index=self._save_projects_index,
             delete_keys=lambda keys: delete_s3_objects(self.s3_client, keys, bucket_name=self._bucket_name),
             timestamp=self.timestamp_factory(),
+            index_context=IndexSaveContext(project_id),
         )
 
     def replace_single_project_pointcloud(
@@ -572,7 +586,7 @@ class ProjectManagementService:
         cancel_requested: CancelCallback | None = None,
     ):
         index_data = self.repository.load_projects_index()
-        project_info, _is_disabled = self._find_project(index_data, project_id)
+        project_info, _is_disabled = self._find_writable_project(index_data, project_id)
         target_path = str(target_pointcloud_s3_path or "").strip().rstrip("/")
         if not self._has_pointcloud_s3_path(project_info, target_path):
             raise ValueError(f"Punktwolke mit S3-Pfad '{target_pointcloud_s3_path}' wurde nicht gefunden.")
@@ -607,6 +621,7 @@ class ProjectManagementService:
             bucket_name=self._bucket_name,
             timestamp=self.timestamp_factory(),
             cancel_requested=cancel_requested,
+            index_context=IndexSaveContext(project_id),
         )
 
     def replace_single_project_pointcloud_from_source(
@@ -623,7 +638,7 @@ class ProjectManagementService:
         crs_info: dict[str, Any] | None = None,
     ):
         index_data = self.repository.load_projects_index()
-        project_info, _is_disabled = self._find_project(index_data, project_id)
+        project_info, _is_disabled = self._find_writable_project(index_data, project_id)
         target_path = str(target_pointcloud_s3_path or "").strip().rstrip("/")
         if not self._has_pointcloud_s3_path(project_info, target_path):
             raise ValueError(f"Punktwolke mit S3-Pfad '{target_pointcloud_s3_path}' wurde nicht gefunden.")
@@ -680,6 +695,7 @@ class ProjectManagementService:
                 bucket_name=self._bucket_name,
                 timestamp=self.timestamp_factory(),
                 cancel_requested=cancel_requested,
+                index_context=_staged_index_context(project_id, staged_sources, (prepared_cloud,)),
             )
 
     def replace_single_project_model_from_source(
@@ -695,7 +711,7 @@ class ProjectManagementService:
         confirm_crs_repair: Callable[[str], bool] | None = None,
     ):
         index_data = self.repository.load_projects_index()
-        project_info, _is_disabled = self._find_project(index_data, project_id)
+        project_info, _is_disabled = self._find_writable_project(index_data, project_id)
         _ensure_potree_project(project_info)
         target_path = str(target_model_s3_path or "").strip().rstrip("/")
         models = project_info.get("models")
@@ -755,6 +771,7 @@ class ProjectManagementService:
                 bucket_name=self._bucket_name,
             )
             original_index_data = copy.deepcopy(index_data)
+            stored_documents: dict[str, list[dict[str, Any]]] = {}
             try:
                 remote_backups = _repair_s3_potree_crs_metadata(
                     project_info,
@@ -762,6 +779,7 @@ class ProjectManagementService:
                     bucket_name=self._bucket_name,
                     crs_info=project_crs_info,
                     children=crs_repair_plan["children"],
+                    stored_documents=stored_documents,
                 ) if crs_repair_plan else ()
                 _apply_crs_repair_plan(index_data, project_id, crs_repair_plan, timestamp=self.timestamp_factory())
                 result = replace_single_project_model_operation(
@@ -777,6 +795,7 @@ class ProjectManagementService:
                     bucket_name=self._bucket_name,
                     timestamp=self.timestamp_factory(),
                     cancel_requested=cancel_requested,
+                    index_context=_repair_index_context(project_id, stored_documents),
                 )
             except Exception as error:
                 _restore_index_data(index_data, original_index_data)
@@ -825,7 +844,7 @@ class ProjectManagementService:
             raise ValueError("Dasselbe GLB-Modell wurde mehrfach ausgewählt.")
 
         index_data = self.repository.load_projects_index()
-        project_info, _is_disabled = self._find_project(index_data, project_id)
+        project_info, _is_disabled = self._find_writable_project(index_data, project_id)
         _ensure_potree_project(project_info)
         project_crs_info, crs_repair_plan = _resolve_project_model_crs(
             project_info, self.s3_client, bucket_name=self._bucket_name
@@ -877,6 +896,7 @@ class ProjectManagementService:
             ):
                 return _spatial_warning_cancelled_result(project_id, spatial_warning)
             original_index_data = copy.deepcopy(index_data)
+            stored_documents: dict[str, list[dict[str, Any]]] = {}
             try:
                 remote_backups = _repair_s3_potree_crs_metadata(
                     project_info,
@@ -884,6 +904,7 @@ class ProjectManagementService:
                     bucket_name=self._bucket_name,
                     crs_info=project_crs_info,
                     children=crs_repair_plan["children"],
+                    stored_documents=stored_documents,
                 ) if crs_repair_plan else ()
                 _apply_crs_repair_plan(index_data, project_id, crs_repair_plan, timestamp=self.timestamp_factory())
                 result = add_project_models_operation(
@@ -899,6 +920,7 @@ class ProjectManagementService:
                     bucket_name=self._bucket_name,
                     timestamp=self.timestamp_factory(),
                     cancel_requested=cancel_requested,
+                    index_context=_repair_index_context(project_id, stored_documents),
                 )
             except Exception as error:
                 _restore_index_data(index_data, original_index_data)
@@ -942,7 +964,7 @@ class ProjectManagementService:
         if complete_crs is None:
             raise ValueError("Manuelle CRS-Reparatur benötigt ein eindeutiges horizontales und vertikales CRS.")
         index_data = self.repository.load_projects_index()
-        project, _is_disabled = self._find_project(index_data, project_id)
+        project, _is_disabled = self._find_writable_project(index_data, project_id)
         _ensure_potree_project(project)
         plan = _manual_crs_repair_plan(
             project,
@@ -957,6 +979,7 @@ class ProjectManagementService:
             return _crs_repair_cancelled_result(project_id, plan)
         snapshot = copy.deepcopy(index_data)
         remote_backups = ()
+        stored_documents: dict[str, list[dict[str, Any]]] = {}
         try:
             remote_backups = _repair_s3_potree_crs_metadata(
                 project,
@@ -965,6 +988,7 @@ class ProjectManagementService:
                 crs_info=complete_crs,
                 children=plan["children"],
                 overwrite=allow_conflicting_overwrite,
+                stored_documents=stored_documents,
             )
             _apply_crs_repair_plan(
                 index_data,
@@ -973,7 +997,7 @@ class ProjectManagementService:
                 overwrite=allow_conflicting_overwrite,
                 timestamp=self.timestamp_factory(),
             )
-            if not self._save_projects_index(index_data):
+            if not self._save_projects_index(index_data, _repair_index_context(project_id, stored_documents)):
                 raise RuntimeError("Projekt-Index konnte nicht gespeichert werden.")
         except Exception as error:
             _restore_index_data(index_data, snapshot)
@@ -1009,6 +1033,26 @@ class ProjectManagementService:
                 return project, is_disabled
         raise ValueError(f"Projekt mit ID '{project_id}' wurde nicht gefunden.")
 
+    def _find_writable_project(
+        self,
+        index_data: dict[str, Any],
+        project_id: str,
+        *,
+        allow_cleanup_pending: bool = False,
+    ) -> tuple[dict[str, Any], bool]:
+        """Find a project for a writing action; unknown index schemas are rejected.
+
+        Reading (listing, download) keeps using ``_find_project`` unguarded.
+        """
+
+        project, is_disabled = self._find_project(
+            index_data,
+            project_id,
+            allow_cleanup_pending=allow_cleanup_pending,
+        )
+        ensure_writable_index_schema(project)
+        return project, is_disabled
+
     def _project_viewer_root(self, project: dict[str, Any]) -> str:
         return str(project.get("viewer_path", "")).strip().rstrip("/")
 
@@ -1043,8 +1087,8 @@ class ProjectManagementService:
             raise ValueError("Ungültige Datenversion für den Punktwolken-Upload.")
         return f"{viewer_root}/versions/{version}", f"{s3_root}/versions/{version}"
 
-    def _save_projects_index(self, index_data: dict[str, Any]) -> bool:
-        result = self.repository.save_projects_index(index_data)
+    def _save_projects_index(self, index_data: dict[str, Any], context: IndexSaveContext | None = None) -> bool:
+        result = self.repository.save_projects_index(index_data, context=context)
         return True if result is None else bool(result)
 
     def _save_deleted_projects(self, deleted_data: dict[str, Any]) -> bool:
@@ -1061,6 +1105,29 @@ def _staged_source_metadata(sources):
         yield stage_potree_metadata_crs_for_sources(sources, staging_root)
     finally:
         shutil.rmtree(staging_root, ignore_errors=True)
+
+
+def _staged_index_context(project_id: str, staged_sources, prepared_clouds) -> IndexSaveContext:
+    """Target context whose evidence comes from the staged files being uploaded."""
+
+    files_to_upload = [file_to_upload for cloud in prepared_clouds for file_to_upload in cloud.files_to_upload]
+    return IndexSaveContext(
+        project_id,
+        read_staged_crs_detail_evidence(files_to_upload, staged_metadata_paths(staged_sources)),
+    )
+
+
+def _repair_index_context(project_id: str, stored_documents: dict[str, list[dict[str, Any]]]) -> IndexSaveContext:
+    """Target context whose evidence comes from the documents a CRS repair read or wrote."""
+
+    return IndexSaveContext(
+        project_id,
+        tuple(
+            evidence
+            for cloud_path, documents in stored_documents.items()
+            if (evidence := crs_detail_evidence_from_documents(cloud_path, documents)) is not None
+        ),
+    )
 
 
 def _prepare_potree_name_updates(
@@ -1594,8 +1661,20 @@ def _repair_s3_potree_crs_metadata(
     crs_info,
     children: tuple[int, ...] = (),
     overwrite: bool = False,
+    stored_documents: dict[str, list[dict[str, Any]]] | None = None,
 ):
+    """Backfill CRS into the target clouds' S3 documents; return rollback backups.
+
+    ``stored_documents`` receives, per cloud path, each document as it is
+    stored after the repair. Its raw fields can prove index CRS details.
+    """
+
     backups = []
+
+    def remember(entry, document) -> None:
+        if stored_documents is not None:
+            stored_documents.setdefault(str(entry.get("s3_path", "")).strip().rstrip("/"), []).append(document)
+
     try:
         target_indices = set(children)
         for index, entry in enumerate(_cloud_entries(project)):
@@ -1606,6 +1685,7 @@ def _repair_s3_potree_crs_metadata(
             ):
                 existing_crs = detect_crs_from_metadata_dict(document)
                 if _complete_crs_info(existing_crs) is not None and not _crs_conflicts_with(existing_crs, crs_info):
+                    remember(entry, document)
                     continue
                 if _crs_conflicts_with(existing_crs, crs_info) and not overwrite:
                     raise ValueError("Potree-Metadaten widersprechen dem bestätigten CRS; keine CRS-Reparatur durchgeführt.")
@@ -1616,6 +1696,7 @@ def _repair_s3_potree_crs_metadata(
                     if cloudjs else json.dumps(updated, indent=2, ensure_ascii=False).encode("utf-8")
                 )
                 if payload == raw:
+                    remember(entry, document)
                     continue
                 # Potree metadata is uploaded as immutable; a repaired copy under
                 # the same key must not stay cached with the old CRS for a year.
@@ -1630,6 +1711,7 @@ def _repair_s3_potree_crs_metadata(
                     expected_etag=original_etag,
                 )
                 backups.append((key, raw, headers, written_etag))
+                remember(entry, updated)
     except Exception as error:
         try:
             _restore_s3_metadata(s3_client, bucket_name, backups)

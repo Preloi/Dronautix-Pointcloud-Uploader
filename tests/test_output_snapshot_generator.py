@@ -69,12 +69,18 @@ def test_snapshot_generator_vertical_crs_output_includes_index_metadata_and_potr
     metadata = json.loads((result.output_dir / "metadata.json").read_text(encoding="utf-8"))
     cloudjs = _read_cloudjs_json(result.output_dir / "cloud.js")
 
+    # A new upload is written in the compact index schema 2: the viewer fields
+    # stay, the duplicated aliases and crs_info live on in the Potree files.
+    assert project["index_schema_version"] == 2
     assert project["crs"] == "EPSG:25832"
     assert project["vertical_crs"] == "EPSG:7837"
-    assert project["vertical_epsg"] == "EPSG:7837"
-    assert project["vertical_datum"] == "DHHN2016"
-    assert project["crs_info"]["vertical_name"] == "DHHN2016"
+    assert project["vertical_name"] == "DHHN2016"
+    for alias in ("projection", "epsg", "vertical_epsg", "vertical_projection", "vertical_datum", "crs_info"):
+        assert alias not in project
     assert metadata["projection"] == "EPSG:25832"
+    assert metadata["vertical_epsg"] == "EPSG:7837"
+    assert metadata["vertical_datum"] == "DHHN2016"
+    assert metadata["crs_info"]["vertical_name"] == "DHHN2016"
     assert metadata["srs"]["vertical"] == "7837"
     assert cloudjs["vertical_projection"] == "EPSG:7837"
 

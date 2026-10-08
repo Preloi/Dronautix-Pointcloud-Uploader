@@ -6,7 +6,8 @@ import copy
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Callable
 
 from .constants import BUCKET_NAME, S3_DISABLED_PROJECTS_KEY
@@ -25,6 +26,18 @@ from .crs_detection import detect_crs_from_metadata_dict
 from .crs_service import extract_pointcloud_crs_metadata, is_active_pointcloud, normalize_crs_metadata
 from .metadata_service import apply_crs_metadata, create_pointcloud_index_entry, get_common_crs_info
 from .naming_service import get_pointcloud_display_name, make_unique_slug, sanitize_folder_name
+from .project_index_schema import (
+    INDEX_SCHEMA_VERSION_KEY,
+    CrsDetailEvidence,
+    IndexSaveContext,
+    crs_detail_evidence_from_documents,
+    crs_summary_source_path,
+    ensure_writable_index_schema,
+    is_compact_index_project,
+    mark_compact_index_schema,
+    needs_crs_detail_evidence,
+    unsecured_project_crs_details,
+)
 from .project_index_service import append_project_history, apply_common_crs_or_clear, update_project_in_index
 from .project_index_service import remove_project_from_index, strip_project_ui_state
 from .project_repository import ProjectMetadataConflictError, ProjectMetadataWriteUncertainError
@@ -247,6 +260,8 @@ def build_new_project_upload(
     if not source_tuple:
         raise ValueError("Bitte mindestens eine Punktwolke auswählen.")
 
+    # New projects are written in the compact index schema 2. The marker is set
+    # here, not in the single-cloud builder that replacements share.
     if len(source_tuple) == 1 and not model_tuple:
         prepared_cloud = prepare_single_project_upload(
             source_tuple[0],
@@ -254,13 +269,15 @@ def build_new_project_upload(
             project_s3_prefix,
         )
         return PreparedProjectUpload(
-            project_metadata=build_single_project_metadata(
-                timestamp=timestamp,
-                kunde=kunde,
-                projekt=projekt,
-                project_id=project_id,
-                project_url=project_url,
-                prepared_cloud=prepared_cloud,
+            project_metadata=mark_compact_index_schema(
+                build_single_project_metadata(
+                    timestamp=timestamp,
+                    kunde=kunde,
+                    projekt=projekt,
+                    project_id=project_id,
+                    project_url=project_url,
+                    prepared_cloud=prepared_cloud,
+                )
             ),
             files_to_upload=prepared_cloud.files_to_upload,
         )
@@ -268,13 +285,15 @@ def build_new_project_upload(
     prepared_clouds = prepare_cloud_uploads(source_tuple, project_viewer_root, project_s3_prefix)
     pointcloud_entries = [cloud.index_entry for cloud in prepared_clouds]
     project_metadata = build_multi_project_metadata(
-        project={
-            "datum": timestamp,
-            "kunde": kunde,
-            "id": project_id,
-            "projekt": projekt,
-            "link": project_url,
-        },
+        project=mark_compact_index_schema(
+            {
+                "datum": timestamp,
+                "kunde": kunde,
+                "id": project_id,
+                "projekt": projekt,
+                "link": project_url,
+            }
+        ),
         base_viewer_path=project_viewer_root,
         s3_prefix=project_s3_prefix,
         pointcloud_entries=pointcloud_entries,
@@ -435,13 +454,26 @@ def _insert_project(index_data: dict[str, Any], project: dict[str, Any]) -> None
     projects.insert(0, copy.deepcopy(project))
 
 
+def _call_save_index(
+    save_index: Callable[..., bool],
+    index_data: dict[str, Any],
+    index_context: IndexSaveContext | None,
+):
+    """Hand the action's explicit target to the save callback, if there is one."""
+
+    if index_context is None:
+        return save_index(index_data)
+    return save_index(index_data, index_context)
+
+
 def _save_index_with_rebase(
     index_data: dict[str, Any],
     snapshot: dict[str, Any],
-    save_index: Callable[[dict[str, Any]], bool],
+    save_index: Callable[..., bool],
     *,
     reapply: Callable[[dict[str, Any]], None],
     project_id: str,
+    index_context: IndexSaveContext | None = None,
 ) -> None:
     """Save an already applied index change, rebasing it on concurrent edits.
 
@@ -449,13 +481,15 @@ def _save_index_with_rebase(
     by an edit of *another* project is resolved by applying the same change to
     the freshly loaded index. If the own project changed meanwhile (renamed,
     link toggled, deleted, ...) the original conflict is raised and the caller
-    rolls back as before. Uncertain writes are never retried.
+    rolls back as before. Uncertain writes are never retried. Every attempt
+    passes the same target context; the write condition comes from the
+    snapshot being saved, so a rebase uses the fresh snapshot's ETag.
     """
 
     target = index_data
     for attempt in range(1, MAX_INDEX_SAVE_ATTEMPTS + 1):
         try:
-            saved = save_index(target)
+            saved = _call_save_index(save_index, target, index_context)
         except ProjectMetadataWriteUncertainError:
             raise
         except ProjectMetadataConflictError as conflict:
@@ -474,6 +508,120 @@ def _save_index_with_rebase(
         break
     if target is not index_data:
         _restore_index(index_data, target)
+
+
+_METADATA_DOCUMENT_NAMES = ("metadata.json", "cloud.js")
+
+
+def staged_metadata_paths(sources) -> frozenset[str]:
+    """Return the private staged metadata copies the given sources upload."""
+
+    return frozenset(
+        _local_path_key(path)
+        for source in sources or ()
+        for path in (getattr(source, "upload_file_overrides", None) or {}).values()
+    )
+
+
+def read_staged_crs_detail_evidence(
+    files_to_upload,
+    staged_paths: frozenset[str],
+) -> tuple[CrsDetailEvidence, ...]:
+    """Prove index CRS details by the staged metadata files that are uploaded.
+
+    Only files that are both staged copies and part of the upload plan count;
+    the S3 key binds them to their dataset path. Unreadable files prove nothing.
+    """
+
+    documents: dict[str, list[dict[str, Any]]] = {}
+    for local_path, s3_key in files_to_upload:
+        dataset_path, _separator, file_name = str(s3_key).replace("\\", "/").rpartition("/")
+        if file_name not in _METADATA_DOCUMENT_NAMES or _local_path_key(local_path) not in staged_paths:
+            continue
+        try:
+            text = Path(local_path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        document = _parse_metadata_document(text)
+        if document is not None:
+            documents.setdefault(dataset_path, []).append(document)
+    return tuple(
+        evidence
+        for dataset_path, dataset_documents in documents.items()
+        if (evidence := crs_detail_evidence_from_documents(dataset_path, dataset_documents)) is not None
+    )
+
+
+def _read_copied_crs_detail_evidence(
+    s3_client,
+    project: dict[str, Any],
+    *,
+    bucket_name: str,
+    cancel_requested: CancelCallback | None,
+) -> tuple[CrsDetailEvidence, ...]:
+    """Read the copied metadata documents of datasets whose index block needs proof."""
+
+    pointclouds = project.get("pointclouds")
+    paths: list[str] = []
+    if isinstance(pointclouds, list) and pointclouds:
+        paths.extend(
+            str(pointcloud.get("s3_path", ""))
+            for pointcloud in pointclouds
+            if isinstance(pointcloud, dict) and needs_crs_detail_evidence(pointcloud)
+        )
+        if needs_crs_detail_evidence(project):
+            paths.append(crs_summary_source_path(project))
+    elif needs_crs_detail_evidence(project):
+        paths.append(str(project.get("s3_path", "")))
+
+    evidence = []
+    for dataset_path in dict.fromkeys(_normalize_s3_path(path) for path in paths if _normalize_s3_path(path)):
+        documents = []
+        for file_name in _METADATA_DOCUMENT_NAMES:
+            _raise_if_duplicate_cancelled(cancel_requested)
+            try:
+                response = s3_client.get_object(Bucket=bucket_name, Key=f"{dataset_path}/{file_name}")
+                body = response.get("Body")
+                raw = body.read() if hasattr(body, "read") else body
+                text = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+            except OperationCancelledError:
+                raise
+            except Exception:
+                # Missing or unreadable copies only withhold the evidence; the
+                # index then keeps the CRS block.
+                _raise_if_duplicate_cancelled(cancel_requested)
+                continue
+            # A cancel set while the response was being read must not end in
+            # a published copy.
+            _raise_if_duplicate_cancelled(cancel_requested)
+            document = _parse_metadata_document(text)
+            if document is not None:
+                documents.append(document)
+        if (item := crs_detail_evidence_from_documents(dataset_path, documents)) is not None:
+            evidence.append(item)
+    return tuple(evidence)
+
+
+def _raise_if_duplicate_cancelled(cancel_requested: CancelCallback | None) -> None:
+    if cancel_requested is not None and cancel_requested():
+        raise OperationCancelledError("Duplizieren wurde abgebrochen.")
+
+
+def _parse_metadata_document(text: str) -> dict[str, Any] | None:
+    payload = text.strip()
+    if payload.startswith("cloud.js"):
+        payload = payload[len("cloud.js") :].strip()
+    if payload.startswith("="):
+        payload = payload[1:].strip()
+    try:
+        document = json.loads(payload.rstrip(";").strip())
+    except ValueError:
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def _local_path_key(path: str) -> str:
+    return os.path.normcase(os.path.abspath(str(path or "")))
 
 
 def _safe_child_path(path: str, root: str) -> bool:
@@ -672,6 +820,11 @@ def _pointclouds_for_add(
         str(project.get("s3_path", "")).strip(),
         extract_pointcloud_crs_metadata(project),
     )
+    raw_crs_info = project.get("crs_info")
+    if is_compact_index_project(project) and isinstance(raw_crs_info, dict) and raw_crs_info:
+        # The normalized view above drops unknown keys; in schema 2 the block
+        # the index still holds belongs to this very cloud and moves with it.
+        entry["crs_info"] = copy.deepcopy(raw_crs_info)
     if "visible" in project:
         entry["visible"] = project["visible"]
     _pointcloud_storage_boundary(entry, project_viewer_root, project_s3_prefix)
@@ -695,6 +848,26 @@ def _pointcloud_crs_metadata(pointcloud: dict[str, Any]) -> dict[str, Any] | Non
     legacy_pointcloud = dict(pointcloud)
     legacy_pointcloud.pop("crs_info", None)
     return extract_pointcloud_crs_metadata(legacy_pointcloud)
+
+
+def _ensure_summary_details_survive(project: dict[str, Any]) -> None:
+    """Stop a schema-2 summary rebuild that would drop details no cloud holds.
+
+    Adding, removing or replacing clouds recomputes the project-level CRS
+    block from the clouds. Details of that block that none of the current
+    clouds carries cannot be attributed to a dataset and would be lost.
+    """
+
+    pointclouds = project.get("pointclouds")
+    if not is_compact_index_project(project) or not isinstance(pointclouds, list) or not pointclouds:
+        return
+    unsecured = unsecured_project_crs_details(project, pointclouds)
+    if unsecured:
+        raise ValueError(
+            "Die Punktwolkenänderung wurde nicht durchgeführt: Der Projekteintrag enthält "
+            f"CRS-Zusatzangaben ({', '.join(unsecured)}), die keiner Punktwolke eindeutig "
+            "zugeordnet sind und dabei verloren gingen. Es wurden keine S3-Daten geändert."
+        )
 
 
 def _project_from_snapshot(index_data: dict[str, Any], project_id: str) -> dict[str, Any]:
@@ -776,11 +949,13 @@ def add_project_pointclouds(
     bucket_name: str = BUCKET_NAME,
     timestamp: str = "",
     cancel_requested: CancelCallback | None = None,
+    index_context: IndexSaveContext | None = None,
 ) -> ProjectOperationResult:
     """Append child clouds, promoting a legacy single project when necessary."""
 
     snapshot = copy.deepcopy(index_data)
     original_project = _project_from_snapshot(snapshot, project_id)
+    ensure_writable_index_schema(original_project)
     existing_clouds = _pointclouds_for_add(
         original_project,
         project_viewer_root,
@@ -789,6 +964,7 @@ def add_project_pointclouds(
     additions = tuple(prepared_clouds)
     _validate_new_multi_clouds(additions, existing_clouds, project_viewer_root, project_s3_prefix)
     _validate_pointcloud_model_crs(original_project, additions, existing_clouds)
+    _ensure_summary_details_survive(original_project)
     ledger = UploadedKeyLedger()
 
     try:
@@ -821,6 +997,7 @@ def add_project_pointclouds(
             save_index,
             reapply=lambda fresh: _apply_project_update(fresh, project_id, update_project),
             project_id=project_id,
+            index_context=index_context,
         )
     except Exception as operation_error:
         _rollback_failed_operation(
@@ -852,11 +1029,13 @@ def remove_project_pointcloud(
     save_index: Callable[[dict[str, Any]], bool],
     delete_keys: Callable[[tuple[str, ...]], None],
     timestamp: str = "",
+    index_context: IndexSaveContext | None = None,
 ) -> ProjectOperationResult:
     """Remove one unique multi-project child after its index entry is safely saved."""
 
     snapshot = copy.deepcopy(index_data)
     original_project = _project_from_snapshot(snapshot, project_id)
+    ensure_writable_index_schema(original_project)
     existing_clouds = validate_explicit_multi_project(
         original_project,
         project_viewer_root,
@@ -870,6 +1049,7 @@ def remove_project_pointcloud(
     )
     if len(existing_clouds) <= 1:
         raise ValueError("Die letzte Punktwolke eines Multi-Projekts kann nicht entfernt werden.")
+    _ensure_summary_details_survive(original_project)
     target_keys = exclude_model_object_keys(
         filter_pointcloud_object_keys(
             target,
@@ -898,6 +1078,7 @@ def remove_project_pointcloud(
             save_index,
             reapply=lambda fresh: _apply_project_update(fresh, project_id, update_project),
             project_id=project_id,
+            index_context=index_context,
         )
     except Exception:
         _restore_index(index_data, snapshot)
@@ -938,6 +1119,7 @@ def replace_project_pointclouds(
     bucket_name: str = BUCKET_NAME,
     timestamp: str = "",
     cancel_requested: CancelCallback | None = None,
+    index_context: IndexSaveContext | None = None,
 ) -> ProjectOperationResult:
     """Upload replacement clouds, save index, then clean obsolete old keys.
 
@@ -947,7 +1129,10 @@ def replace_project_pointclouds(
     """
 
     snapshot = copy.deepcopy(index_data)
-    _validate_pointcloud_model_crs(_project_from_snapshot(snapshot, project_id), prepared_clouds)
+    original_project = _project_from_snapshot(snapshot, project_id)
+    ensure_writable_index_schema(original_project)
+    _validate_pointcloud_model_crs(original_project, prepared_clouds)
+    _ensure_summary_details_survive(original_project)
     ledger = UploadedKeyLedger()
     files_to_upload = [
         file_to_upload
@@ -987,6 +1172,7 @@ def replace_project_pointclouds(
             save_index,
             reapply=lambda fresh: _apply_project_update(fresh, project_id, update_project),
             project_id=project_id,
+            index_context=index_context,
         )
     except Exception as operation_error:
         _rollback_failed_operation(
@@ -1041,11 +1227,13 @@ def replace_single_project_pointcloud(
     bucket_name: str = BUCKET_NAME,
     timestamp: str = "",
     cancel_requested: CancelCallback | None = None,
+    index_context: IndexSaveContext | None = None,
 ) -> ProjectOperationResult:
     """Replace one child pointcloud while preserving the other children."""
 
     snapshot = copy.deepcopy(index_data)
     original_snapshot_project = _project_from_snapshot(snapshot, project_id)
+    ensure_writable_index_schema(original_snapshot_project)
     snapshot_pointclouds = original_snapshot_project.get("pointclouds")
     is_legacy_single = not isinstance(snapshot_pointclouds, list) or not snapshot_pointclouds
     remaining_clouds = () if is_legacy_single else tuple(
@@ -1053,6 +1241,7 @@ def replace_single_project_pointcloud(
         if isinstance(cloud, dict) and not _pointcloud_matches_s3_path(cloud, target_pointcloud_s3_path)
     )
     _validate_pointcloud_model_crs(original_snapshot_project, (prepared_cloud,), remaining_clouds)
+    _ensure_summary_details_survive(original_snapshot_project)
     cleanup_target_keys = tuple(existing_target_keys)
     if not is_legacy_single and _normalize_s3_path(target_pointcloud_s3_path) == _normalize_s3_path(s3_prefix):
         matches = [
@@ -1111,17 +1300,19 @@ def replace_single_project_pointcloud(
                     )
                     return
                 disabled_at = original_project.get("disabled_at")
-                project.clear()
-                project.update(
-                    build_single_project_metadata(
-                        timestamp=str(original_project.get("datum", "")),
-                        kunde=str(original_project.get("kunde", "")),
-                        projekt=str(original_project.get("projekt", "")),
-                        project_id=str(original_project.get("id", "")),
-                        project_url=str(original_project.get("link", "")),
-                        prepared_cloud=prepared_cloud,
-                    )
+                rebuilt = build_single_project_metadata(
+                    timestamp=str(original_project.get("datum", "")),
+                    kunde=str(original_project.get("kunde", "")),
+                    projekt=str(original_project.get("projekt", "")),
+                    project_id=str(original_project.get("id", "")),
+                    project_url=str(original_project.get("link", "")),
+                    prepared_cloud=prepared_cloud,
                 )
+                # The rebuild starts from scratch: keep a schema-2 marker, never add one.
+                if INDEX_SCHEMA_VERSION_KEY in original_project:
+                    rebuilt = {INDEX_SCHEMA_VERSION_KEY: original_project[INDEX_SCHEMA_VERSION_KEY], **rebuilt}
+                project.clear()
+                project.update(rebuilt)
                 if disabled_at is not None:
                     project["disabled_at"] = disabled_at
                 for key in ("visible", "history"):
@@ -1178,6 +1369,7 @@ def replace_single_project_pointcloud(
             save_index,
             reapply=lambda fresh: _apply_project_update(fresh, project_id, update_project),
             project_id=project_id,
+            index_context=index_context,
         )
     except Exception as operation_error:
         _rollback_failed_operation(
@@ -1230,11 +1422,13 @@ def replace_single_project_model(
     bucket_name: str = BUCKET_NAME,
     timestamp: str = "",
     cancel_requested: CancelCallback | None = None,
+    index_context: IndexSaveContext | None = None,
 ) -> ProjectOperationResult:
     """Replace one immutable GLB package, then switch its models[] entry."""
 
     snapshot = copy.deepcopy(index_data)
     original_project = _project_from_snapshot(snapshot, project_id)
+    ensure_writable_index_schema(original_project)
     models = original_project.get("models")
     if not isinstance(models, list):
         raise ValueError("Projekt enthält keine austauschbaren GLB-Modelle.")
@@ -1313,6 +1507,7 @@ def replace_single_project_model(
             save_index,
             reapply=lambda fresh: _apply_project_update(fresh, project_id, update_project),
             project_id=project_id,
+            index_context=index_context,
         )
     except Exception as operation_error:
         _rollback_failed_operation(
@@ -1369,6 +1564,7 @@ def add_project_models(
     bucket_name: str = BUCKET_NAME,
     timestamp: str = "",
     cancel_requested: CancelCallback | None = None,
+    index_context: IndexSaveContext | None = None,
 ) -> ProjectOperationResult:
     """Upload new immutable GLB packages, then append their models[] entries."""
 
@@ -1377,6 +1573,7 @@ def add_project_models(
         raise ValueError("Mindestens ein vorbereitetes GLB-Modell ist erforderlich.")
     snapshot = copy.deepcopy(index_data)
     original_project = _project_from_snapshot(snapshot, project_id)
+    ensure_writable_index_schema(original_project)
     existing_models = original_project.get("models", [])
     if not isinstance(existing_models, list):
         raise ValueError("Projekt enthält ungültige models[]-Metadaten.")
@@ -1462,6 +1659,7 @@ def add_project_models(
             save_index,
             reapply=lambda fresh: _apply_project_update(fresh, project_id, update_project),
             project_id=project_id,
+            index_context=index_context,
         )
     except Exception as operation_error:
         _rollback_failed_operation(
@@ -1491,11 +1689,13 @@ def remove_project_model(
     save_index: Callable[[dict[str, Any]], bool],
     delete_keys: Callable[[tuple[str, ...]], None],
     timestamp: str = "",
+    index_context: IndexSaveContext | None = None,
 ) -> ProjectOperationResult:
     """Remove one models[] entry before deleting its unreferenced immutable package."""
 
     snapshot = copy.deepcopy(index_data)
     original_project = _project_from_snapshot(snapshot, project_id)
+    ensure_writable_index_schema(original_project)
     models = original_project.get("models")
     if not isinstance(models, list):
         raise ValueError("Projekt enthält keine entfernbaren GLB-Modelle.")
@@ -1535,6 +1735,7 @@ def remove_project_model(
             save_index,
             reapply=lambda fresh: _apply_project_update(fresh, project_id, update_project),
             project_id=project_id,
+            index_context=index_context,
         )
     except Exception:
         _restore_index(index_data, snapshot)
@@ -1577,6 +1778,7 @@ def upload_new_project(
     on_progress: ProgressCallback | None = None,
     bucket_name: str = BUCKET_NAME,
     cancel_requested: CancelCallback | None = None,
+    index_context: IndexSaveContext | None = None,
 ) -> UploadResult:
     """Upload a new project and insert it into projects_index.json.
 
@@ -1585,6 +1787,7 @@ def upload_new_project(
     referenced by that snapshot.
     """
 
+    ensure_writable_index_schema(prepared_upload.project_metadata)
     _validate_prepared_project_model_paths(prepared_upload)
     snapshot = copy.deepcopy(index_data)
     ledger = UploadedKeyLedger()
@@ -1615,6 +1818,7 @@ def upload_new_project(
             save_index,
             reapply=lambda fresh: _insert_project(fresh, new_project),
             project_id=str(new_project.get("id", "")),
+            index_context=index_context,
         )
         _emit(on_progress, ProgressEvent(kind="progress", percent=1.0, message="Projekt wurde gespeichert.", phase="index"))
     except OperationCancelledError:
@@ -1934,7 +2138,8 @@ def build_duplicate_project_metadata(
             new_s3_prefix,
         )
 
-    return duplicated
+    # A duplicate is a new project: it is written in schema 2 whatever the source used.
+    return mark_compact_index_schema(duplicated)
 
 
 def _rollback_keys_preserving_conflict(
@@ -2094,7 +2299,16 @@ def duplicate_project(
     bucket_name: str = BUCKET_NAME,
     on_progress: ProgressCallback | None = None,
     cancel_requested: CancelCallback | None = None,
+    index_context: IndexSaveContext | None = None,
 ) -> ProjectOperationResult:
+    """Copy a project to a new id; with a context the copy is saved compact.
+
+    Detail evidence for the copy comes from the metadata documents actually
+    copied into the new, still unpublished prefix. Unreadable documents only
+    withhold evidence (the CRS block then stays); a cancel stays a cancel.
+    """
+
+    ensure_writable_index_schema(source_project)
     source_s3_path, source_root, _extra_prefixes = project_storage_layout(source_project)
     if not source_s3_path:
         raise ValueError("Quellprojekt hat keinen S3-Pfad.")
@@ -2133,6 +2347,18 @@ def duplicate_project(
             new_viewer_root=new_viewer_root,
             new_s3_prefix=new_s3_prefix,
         )
+        if index_context is not None:
+            index_context = replace(
+                index_context,
+                evidence=_read_copied_crs_detail_evidence(
+                    s3_client,
+                    new_project,
+                    bucket_name=bucket_name,
+                    cancel_requested=cancel_requested,
+                ),
+            )
+        # Last chance before the copy becomes visible in the index.
+        _raise_if_duplicate_cancelled(cancel_requested)
         _insert_project(index_data, new_project)
         _save_index_with_rebase(
             index_data,
@@ -2140,6 +2366,7 @@ def duplicate_project(
             save_index,
             reapply=lambda fresh: _insert_project(fresh, new_project),
             project_id=new_project_id,
+            index_context=index_context,
         )
     except Exception as operation_error:
         copied_keys = tuple(getattr(operation_error, "copied_keys", copied_keys))
@@ -2176,9 +2403,14 @@ def delete_project(
     save_index: Callable[[dict[str, Any]], bool],
     save_deleted: Callable[[dict[str, Any]], bool],
     bucket_name: str = BUCKET_NAME,
+    index_context: IndexSaveContext | None = None,
 ) -> ProjectOperationResult:
+    ensure_writable_index_schema(project_info)
     s3_path, storage_root, _extra_prefixes = project_storage_layout(project_info)
     project_id = str(project_info.get("id", "")).strip()
+    indexed = _find_index_entry(index_data, project_id)
+    if indexed is not None:
+        ensure_writable_index_schema(indexed[1])
     if not s3_path:
         return ProjectOperationResult(status="failed", project_id=project_id, message="S3-Pfad nicht gefunden.")
     # The stable root also holds models and pointclouds stored next to a
@@ -2217,7 +2449,7 @@ def delete_project(
             index_data["disabled_projects"] = disabled_projects
         disabled_projects.insert(0, cleanup_project)
         try:
-            if not save_index(index_data):
+            if not _call_save_index(save_index, index_data, index_context):
                 raise RuntimeError("projects_index.json konnte nicht gespeichert werden.")
         except Exception as error:
             _restore_index(index_data, original_index)
@@ -2264,7 +2496,8 @@ def delete_project(
     tombstone_snapshot = copy.deepcopy(index_data)
     remove_project_from_index(index_data, project_id)
     try:
-        if not save_index(index_data):
+        # The target is gone from this snapshot; its context then compacts nothing.
+        if not _call_save_index(save_index, index_data, index_context):
             raise RuntimeError("Cleanup-Eintrag konnte nicht aus projects_index.json entfernt werden.")
     except Exception as error:
         _restore_index(index_data, tombstone_snapshot)
@@ -2395,6 +2628,7 @@ __all__ = [
     "prepare_cloud_uploads",
     "prepare_single_project_upload",
     "pointcloud_object_list_prefix",
+    "read_staged_crs_detail_evidence",
     "rebase_prepared_cloud_upload",
     "delete_project",
     "download_project",
@@ -2407,6 +2641,7 @@ __all__ = [
     "remove_project_model",
     "remove_project_pointcloud",
     "resolve_unique_multi_project_child",
+    "staged_metadata_paths",
     "upload_new_project",
     "upsert_deleted_project",
     "validate_explicit_multi_project",

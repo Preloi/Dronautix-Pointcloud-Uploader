@@ -39,6 +39,11 @@ SUPPORTED_V2_PROJECT_MANAGEMENT_SCENARIOS = (
     "single_replace",
     "multi_replace",
     "disabled_link_state",
+    # Seeded with entries in the compact index schema 2 (index_schema_version: 2).
+    "schema2_single_replace",
+    "schema2_multi_replace",
+    "schema2_add_pointcloud",
+    "schema2_link_rename",
 )
 
 SUPPORTED_SNAPSHOT_SCENARIOS = SUPPORTED_V2_UPLOAD_SCENARIOS + SUPPORTED_V2_PROJECT_MANAGEMENT_SCENARIOS
@@ -69,7 +74,15 @@ SNAPSHOT_SCENARIOS: dict[str, tuple[str, ...]] = {
     "single_replace": ("projects_index.json", "metadata.json", "cloud.js"),
     "multi_replace": ("projects_index.json", "metadata.json", "cloud.js"),
     "disabled_link_state": ("projects_index.json", "deleted_projects.json"),
+    "schema2_single_replace": ("projects_index.json", "metadata.json", "cloud.js"),
+    "schema2_multi_replace": ("projects_index.json", "metadata.json", "cloud.js"),
+    "schema2_add_pointcloud": ("projects_index.json", "metadata.json", "cloud.js"),
+    "schema2_link_rename": ("projects_index.json",),
 }
+
+_REPLACEMENT_SCENARIOS = frozenset(
+    {"single_replace", "multi_replace", "schema2_single_replace", "schema2_multi_replace"}
+)
 
 
 def snapshot_scenarios(scenario_id: str | None = None) -> tuple[dict[str, Any], ...]:
@@ -508,21 +521,23 @@ def _side_effect_purpose(scenario_id: str, event: dict[str, Any]) -> str:
             return "save_deleted_projects"
         return "save_object"
     if event_type == "upload_file":
-        if scenario_id in {"single_replace", "multi_replace", "disabled_link_state"}:
+        if scenario_id in _REPLACEMENT_SCENARIOS or scenario_id == "disabled_link_state":
             return "replacement_upload"
+        if scenario_id == "schema2_add_pointcloud":
+            return "pointcloud_add_upload"
         return "new_project_upload"
     if event_type == "copy_object":
         return "duplicate_copy"
     if event_type == "delete_objects":
         if scenario_id == "delete_project":
             return "project_delete"
-        if scenario_id in {"single_replace", "multi_replace"}:
+        if scenario_id in _REPLACEMENT_SCENARIOS:
             return "orphan_cleanup"
         return "delete_objects"
     if event_type == "list_objects_v2":
         if scenario_id == "delete_project":
             return "project_delete_scan"
-        if scenario_id in {"single_replace", "multi_replace"} or "replace" in prefix:
+        if scenario_id in _REPLACEMENT_SCENARIOS or "replace" in prefix:
             return "orphan_cleanup_scan"
         if scenario_id == "duplicate_project":
             return "duplicate_source_scan"
@@ -684,6 +699,49 @@ def _run_project_management_scenario(
             str(replacement),
             crs_info={"value": "EPSG:4326", "projection": "EPSG:4326", "epsg": "EPSG:4326"},
         )
+        return
+
+    if scenario_id == "schema2_single_replace":
+        target_path = _seed_schema2_single_replace(fake_s3)
+        source = _write_file(work_dir / "Schema Replacement.laz", b"raw")
+        converter = _write_file(work_dir / "PotreeConverter.exe", b"converter")
+        service.replace_single_project_pointcloud_from_source(
+            "schema2-single",
+            target_path,
+            str(source),
+            converter_path=str(converter),
+            output_base_dir=str(work_dir / "converted"),
+            overwrite=True,
+            converter_runner=_fake_converter_runner,
+            crs_info=dict(_SCHEMA2_CRS_INFO),
+        )
+        return
+
+    if scenario_id == "schema2_multi_replace":
+        _seed_schema2_multi_replace(fake_s3)
+        first = _write_potree_fixture(work_dir / "Schema Scan A")
+        second = _write_potree_fixture(work_dir / "Schema Scan B")
+        service.replace_project_pointclouds_from_sources(
+            "schema2-multi",
+            (str(first), str(second)),
+            crs_info_by_source_path={str(first): dict(_SCHEMA2_CRS_INFO), str(second): dict(_SCHEMA2_CRS_INFO)},
+        )
+        return
+
+    if scenario_id == "schema2_add_pointcloud":
+        _seed_schema2_add_pointcloud(fake_s3)
+        addition = _write_potree_fixture(work_dir / "Schema Ergaenzung")
+        service.add_project_pointclouds_from_sources(
+            "schema2-add",
+            (str(addition),),
+            crs_info_by_source_path={str(addition): dict(_SCHEMA2_CRS_INFO)},
+        )
+        return
+
+    if scenario_id == "schema2_link_rename":
+        _seed_schema2_link_rename(fake_s3)
+        service.set_project_link_state("schema2-link", True)
+        service.rename_project("schema2-link", "Link Kunde Neu", "Link Projekt Neu")
         return
 
     raise ValueError(f"Unsupported V2 project management scenario: {scenario_id}")
@@ -970,6 +1028,235 @@ def _seed_disabled_link_state(fake_s3: _SnapshotFakeS3Client) -> str:
     _seed_s3_object(fake_s3, f"{target_path}/cloud.js", 'cloud.js = {"source":"old-disabled"};')
     _seed_s3_object(fake_s3, f"{target_path}/metadata.json", '{"source":"old-disabled"}')
     return target_path
+
+
+_SCHEMA2_CRS_INFO = {
+    "value": "EPSG:25832",
+    "name": "ETRS89 / UTM zone 32N",
+    "vertical_epsg": "EPSG:7837",
+    "vertical_name": "DHHN2016 height",
+    "source": "manual",
+}
+
+
+def _schema2_foreign_entries() -> list[dict[str, Any]]:
+    """Neighbours every schema-2 scenario must pass on byte-for-byte unchanged."""
+
+    return [
+        {
+            "index_schema_version": 2,
+            "id": "schema2-bloated",
+            "kunde": "Fremd",
+            "projekt": "Von altem Uploader aufgebläht",
+            "format": "potree",
+            "viewer_path": "golden/schema2_bloated",
+            "s3_path": "pointclouds/golden/schema2_bloated",
+            "crs": "EPSG:25832",
+            "projection": "EPSG:25832",
+            "epsg": "EPSG:25832",
+            "crs_info": {"value": "EPSG:25832", "projection": "EPSG:25832", "epsg": "EPSG:25832"},
+        },
+        {
+            "index_schema_version": "3",
+            "id": "schema-unknown",
+            "kunde": "Fremd",
+            "projekt": "Unbekanntes Schema",
+            "format": "potree",
+            "viewer_path": "golden/schema_unknown",
+            "s3_path": "pointclouds/golden/schema_unknown",
+            "crs": "EPSG:4326",
+            "projection": "EPSG:4326",
+        },
+        {
+            "id": "legacy-bloated",
+            "kunde": "Fremd",
+            "projekt": "Altprojekt",
+            "format": "potree",
+            "viewer_path": "golden/legacy_bloated",
+            "s3_path": "pointclouds/golden/legacy_bloated",
+            "crs": "EPSG:25832",
+            "projection": "EPSG:25832",
+            "crs_info": {"value": "EPSG:25832", "projection": "EPSG:25832"},
+        },
+    ]
+
+
+def _seed_schema2_single_replace(fake_s3: _SnapshotFakeS3Client) -> str:
+    project_prefix = "pointclouds/golden/schema2_single"
+    _seed_json(
+        fake_s3,
+        S3_INDEX_JSON,
+        {
+            "projects": [
+                {
+                    "index_schema_version": 2,
+                    "datum": "2026-06-20T09:00:00",
+                    "kunde": "Schema Kunde",
+                    "id": "schema2-single",
+                    "projekt": "Kompakt Einzeln",
+                    "format": "potree",
+                    "link": "https://pointcloud.dronautix.at/index.html?id=schema2-single",
+                    "viewer_path": "golden/schema2_single",
+                    "s3_path": project_prefix,
+                    "name": "Bestand",
+                    "crs": "EPSG:25832",
+                    "crs_name": "ETRS89 / UTM zone 32N",
+                    "vertical_crs": "EPSG:7837",
+                    "vertical_name": "DHHN2016 height",
+                },
+                *_schema2_foreign_entries(),
+            ],
+            S3_DISABLED_PROJECTS_KEY: [],
+            "last_updated": "2026-06-20T12:00:00",
+        },
+    )
+    _seed_s3_object(fake_s3, f"{project_prefix}/cloud.js", 'cloud.js = {"source":"old-single"};')
+    _seed_s3_object(fake_s3, f"{project_prefix}/metadata.json", '{"source":"old-single"}')
+    _seed_s3_object(fake_s3, f"{project_prefix}/hierarchy.bin", b"old-hierarchy")
+    return project_prefix
+
+
+def _seed_schema2_multi_replace(fake_s3: _SnapshotFakeS3Client) -> None:
+    project_prefix = "pointclouds/golden/schema2_multi"
+    viewer_root = "golden/schema2_multi"
+    bloated_crs = {
+        "crs": "EPSG:25832",
+        "projection": "EPSG:25832",
+        "epsg": "EPSG:25832",
+        "crs_info": {"value": "EPSG:25832", "projection": "EPSG:25832", "epsg": "EPSG:25832"},
+    }
+    _seed_json(
+        fake_s3,
+        S3_INDEX_JSON,
+        {
+            "projects": [*_schema2_foreign_entries()],
+            S3_DISABLED_PROJECTS_KEY: [
+                {
+                    "index_schema_version": 2,
+                    "datum": "2026-06-20T09:00:00",
+                    "kunde": "Schema Kunde",
+                    "id": "schema2-multi",
+                    "projekt": "Kompakt Mehrfach",
+                    "format": "multi",
+                    "link": "https://pointcloud.dronautix.at/index.html?id=schema2-multi",
+                    "viewer_path": viewer_root,
+                    "s3_path": project_prefix,
+                    "disabled_at": "2026-06-20T12:00:00",
+                    **bloated_crs,
+                    "pointcloud_count": 2,
+                    "pointclouds": [
+                        {
+                            "name": "Alt A",
+                            "format": "potree",
+                            "viewer_path": f"{viewer_root}/alt_a",
+                            "s3_path": f"{project_prefix}/alt_a",
+                            "visible": True,
+                            **bloated_crs,
+                        },
+                        {
+                            "name": "Alt B",
+                            "format": "potree",
+                            "viewer_path": f"{viewer_root}/alt_b",
+                            "s3_path": f"{project_prefix}/alt_b",
+                            "visible": False,
+                            **bloated_crs,
+                        },
+                    ],
+                }
+            ],
+            "last_updated": "2026-06-20T12:00:00",
+        },
+    )
+    _seed_s3_object(fake_s3, f"{project_prefix}/alt_a/cloud.js", 'cloud.js = {"source":"alt-a"};')
+    _seed_s3_object(fake_s3, f"{project_prefix}/alt_a/metadata.json", '{"source":"alt-a"}')
+    _seed_s3_object(fake_s3, f"{project_prefix}/alt_b/cloud.js", 'cloud.js = {"source":"alt-b"};')
+    _seed_s3_object(fake_s3, f"{project_prefix}/alt_b/metadata.json", '{"source":"alt-b"}')
+
+
+def _seed_schema2_add_pointcloud(fake_s3: _SnapshotFakeS3Client) -> None:
+    project_prefix = "pointclouds/golden/schema2_add"
+    _seed_json(
+        fake_s3,
+        S3_INDEX_JSON,
+        {
+            "projects": [
+                {
+                    "index_schema_version": 2,
+                    "datum": "2026-06-20T09:00:00",
+                    "kunde": "Schema Kunde",
+                    "id": "schema2-add",
+                    "projekt": "Kompakt Erweitert",
+                    "format": "potree",
+                    "link": "https://pointcloud.dronautix.at/index.html?id=schema2-add",
+                    "viewer_path": "golden/schema2_add",
+                    "s3_path": project_prefix,
+                    "name": "Bestand",
+                    "crs": "EPSG:25832",
+                    "crs_name": "ETRS89 / UTM zone 32N",
+                    "vertical_crs": "EPSG:7837",
+                    "vertical_name": "DHHN2016 height",
+                    # Unknown detail: the block stays and must move with the original cloud.
+                    "crs_info": {
+                        "value": "EPSG:25832",
+                        "name": "ETRS89 / UTM zone 32N",
+                        "vertical_crs": "EPSG:7837",
+                        "vertical_name": "DHHN2016 height",
+                        "custom_vendor_detail": "Messkampagne 7",
+                    },
+                },
+                *_schema2_foreign_entries(),
+            ],
+            S3_DISABLED_PROJECTS_KEY: [],
+            "last_updated": "2026-06-20T12:00:00",
+        },
+    )
+    _seed_s3_object(fake_s3, f"{project_prefix}/cloud.js", 'cloud.js = {"source":"bestand"};')
+    _seed_s3_object(fake_s3, f"{project_prefix}/metadata.json", '{"source":"bestand"}')
+
+
+def _seed_schema2_link_rename(fake_s3: _SnapshotFakeS3Client) -> None:
+    _seed_json(
+        fake_s3,
+        S3_INDEX_JSON,
+        {
+            "projects": [
+                {
+                    # Re-inflated by an older uploader: only safe duplicates go.
+                    "index_schema_version": 2,
+                    "datum": "2026-06-20T09:00:00",
+                    "kunde": "Link Kunde",
+                    "id": "schema2-link",
+                    "projekt": "Link Projekt",
+                    "format": "potree",
+                    "link": "https://pointcloud.dronautix.at/index.html?id=schema2-link",
+                    "viewer_path": "golden/schema2_link",
+                    "s3_path": "pointclouds/golden/schema2_link",
+                    "name": "Bestand",
+                    "crs": "EPSG:25832",
+                    "projection": "EPSG:25832",
+                    "epsg": "EPSG:25832",
+                    "crs_name": "ETRS89 / UTM zone 32N",
+                    "vertical_crs": "EPSG:7837",
+                    "vertical_epsg": "EPSG:7837",
+                    "vertical_projection": "EPSG:7837",
+                    "vertical_name": "DHHN2016 height",
+                    "vertical_datum": "DHHN2016 height",
+                    "crs_info": {
+                        "value": "EPSG:25832",
+                        "projection": "EPSG:25832",
+                        "epsg": "EPSG:25832",
+                        "code": "25832",
+                        "name": "ETRS89 / UTM zone 32N",
+                        "vertical_epsg": "EPSG:7837",
+                        "vertical_name": "DHHN2016 height",
+                    },
+                },
+                *_schema2_foreign_entries(),
+            ],
+            S3_DISABLED_PROJECTS_KEY: [],
+            "last_updated": "2026-06-20T12:00:00",
+        },
+    )
 
 
 def _seed_json(fake_s3: _SnapshotFakeS3Client, key: str, data: dict[str, Any]) -> None:

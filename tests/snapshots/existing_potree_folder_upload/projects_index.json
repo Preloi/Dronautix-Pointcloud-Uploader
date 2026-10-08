@@ -1,6 +1,7 @@
 {
   "projects": [
     {
+      "index_schema_version": 2,
       "datum": "2026-06-21T12:00:00",
       "kunde": "Golden Kunde",
       "id": "abc123e4",
@@ -10,14 +11,7 @@
       "viewer_path": "golden_kunde/abc123e4/existing_potree",
       "s3_path": "pointclouds/golden_kunde/abc123e4/existing_potree",
       "name": "Existing Potree",
-      "crs": "EPSG:4326",
-      "projection": "EPSG:4326",
-      "epsg": "EPSG:4326",
-      "crs_info": {
-        "value": "EPSG:4326",
-        "projection": "EPSG:4326",
-        "epsg": "EPSG:4326"
-      }
+      "crs": "EPSG:4326"
     }
   ],
   "last_updated": "2026-06-21T12:30:00",

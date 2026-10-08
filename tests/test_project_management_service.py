@@ -110,7 +110,7 @@ class FakeRepository:
     def load_projects_index(self):
         return self.index_data
 
-    def save_projects_index(self, index_data):
+    def save_projects_index(self, index_data, context=None):
         self.saved_indexes.append(copy.deepcopy(index_data))
 
     def load_deleted_projects(self):
@@ -121,7 +121,7 @@ class FakeRepository:
 
 
 class FailingSaveRepository(FakeRepository):
-    def save_projects_index(self, index_data):
+    def save_projects_index(self, index_data, context=None):
         super().save_projects_index(index_data)
         raise RuntimeError("index write denied")
 
@@ -788,7 +788,7 @@ def test_uncertain_index_commit_does_not_roll_back_repaired_potree_crs():
     metadata_key = f"{cloud_path}/metadata.json"
 
     class UncertainRepository(FakeRepository):
-        def save_projects_index(self, index_data):
+        def save_projects_index(self, index_data, context=None):
             self.saved_indexes.append(copy.deepcopy(index_data))
             raise ProjectMetadataWriteUncertainError("projects_index.json")
 
@@ -1020,7 +1020,7 @@ def test_rename_retries_on_a_concurrent_change_of_another_project():
     }
 
     class ConcurrentOtherEditRepository(FakeRepository):
-        def save_projects_index(self, index_data):
+        def save_projects_index(self, index_data, context=None):
             if not self.saved_indexes and not getattr(self, "conflicted", False):
                 self.conflicted = True
                 fresh = copy.deepcopy(index)
@@ -1085,7 +1085,7 @@ def test_rename_project_rolls_back_potree_metadata_when_index_save_fails():
     s3_client.read_objects[metadata_key] = original_metadata
 
     class FailingRepository(FakeRepository):
-        def save_projects_index(self, index_data):
+        def save_projects_index(self, index_data, context=None):
             self.saved_indexes.append(copy.deepcopy(index_data))
             return False
 
@@ -1157,7 +1157,7 @@ def test_uncertain_index_commit_does_not_roll_back_renamed_potree_metadata():
     s3_client.read_objects[metadata_key] = b'{"name":"Alt","points":123}'
 
     class UncertainRepository(FakeRepository):
-        def save_projects_index(self, index_data):
+        def save_projects_index(self, index_data, context=None):
             self.saved_indexes.append(copy.deepcopy(index_data))
             raise ProjectMetadataWriteUncertainError("projects_index.json")
 

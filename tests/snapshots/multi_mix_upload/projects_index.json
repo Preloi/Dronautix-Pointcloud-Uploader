@@ -1,6 +1,7 @@
 {
   "projects": [
     {
+      "index_schema_version": 2,
       "datum": "2026-06-21T12:00:00",
       "kunde": "Golden Kunde",
       "id": "abc123e2",
@@ -17,12 +18,7 @@
           "viewer_path": "golden_kunde/abc123e2/multi_mix/fassade_potree",
           "s3_path": "pointclouds/golden_kunde/abc123e2/multi_mix/fassade_potree",
           "visible": true,
-          "crs": "EPSG:25832",
-          "projection": "EPSG:25832",
-          "crs_info": {
-            "value": "EPSG:25832",
-            "projection": "EPSG:25832"
-          }
+          "crs": "EPSG:25832"
         },
         {
           "name": "Bestand Potree",
@@ -30,20 +26,10 @@
           "viewer_path": "golden_kunde/abc123e2/multi_mix/bestand_potree",
           "s3_path": "pointclouds/golden_kunde/abc123e2/multi_mix/bestand_potree",
           "visible": true,
-          "crs": "EPSG:25832",
-          "projection": "EPSG:25832",
-          "crs_info": {
-            "value": "EPSG:25832",
-            "projection": "EPSG:25832"
-          }
+          "crs": "EPSG:25832"
         }
       ],
-      "crs": "EPSG:25832",
-      "projection": "EPSG:25832",
-      "crs_info": {
-        "value": "EPSG:25832",
-        "projection": "EPSG:25832"
-      }
+      "crs": "EPSG:25832"
     }
   ],
   "last_updated": "2026-06-21T12:30:00",
