@@ -1,0 +1,73 @@
+{
+  "version": "2.0",
+  "encoding": "BROTLI",
+  "spacing": 0.125,
+  "source": "Schema Replacement",
+  "points": 12345,
+  "offset": [
+    0,
+    0,
+    0
+  ],
+  "scale": [
+    0.001,
+    0.001,
+    0.001
+  ],
+  "hierarchy": {
+    "firstChunkSize": 22,
+    "stepSize": 4,
+    "depth": 0
+  },
+  "attributes": [
+    {
+      "name": "position",
+      "type": "int32",
+      "numElements": 3,
+      "elementSize": 4,
+      "size": 12
+    }
+  ],
+  "boundingBox": {
+    "min": [
+      0,
+      0,
+      0
+    ],
+    "max": [
+      1,
+      1,
+      1
+    ]
+  },
+  "name": "Schema Replacement",
+  "projection": "EPSG:25832",
+  "crs": "EPSG:25832",
+  "epsg": "EPSG:25832",
+  "crs_name": "ETRS89 / UTM zone 32N",
+  "vertical_crs": "EPSG:7837",
+  "vertical_epsg": "EPSG:7837",
+  "vertical_projection": "EPSG:7837",
+  "vertical_name": "DHHN2016 height",
+  "vertical_datum": "DHHN2016 height",
+  "crs_info": {
+    "value": "EPSG:25832",
+    "projection": "EPSG:25832",
+    "epsg": "EPSG:25832",
+    "code": "25832",
+    "name": "ETRS89 / UTM zone 32N",
+    "crs_name": "ETRS89 / UTM zone 32N",
+    "vertical_crs": "EPSG:7837",
+    "vertical_epsg": "EPSG:7837",
+    "vertical_projection": "EPSG:7837",
+    "vertical_name": "DHHN2016 height",
+    "vertical_datum": "DHHN2016 height",
+    "source": "manual"
+  },
+  "srs": {
+    "authority": "EPSG",
+    "horizontal": "25832",
+    "vertical": "7837",
+    "vertical_name": "DHHN2016 height"
+  }
+}

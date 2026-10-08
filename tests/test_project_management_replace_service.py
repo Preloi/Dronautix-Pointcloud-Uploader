@@ -53,7 +53,7 @@ class FakeRepository:
     def load_projects_index(self):
         return self.index_data
 
-    def save_projects_index(self, index_data):
+    def save_projects_index(self, index_data, context=None):
         self.saved_indexes.append(copy.deepcopy(index_data))
         return self.save_result
 

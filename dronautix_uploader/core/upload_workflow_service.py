@@ -34,7 +34,13 @@ from .pointcloud_preparation_service import (
     PointcloudPreparationRequest,
     prepare_pointcloud_sources,
 )
-from .project_operations import build_new_project_upload, upload_new_project as upload_new_project_operation
+from .project_index_schema import IndexSaveContext
+from .project_operations import (
+    build_new_project_upload,
+    read_staged_crs_detail_evidence,
+    staged_metadata_paths,
+    upload_new_project as upload_new_project_operation,
+)
 from .project_repository import ProjectMetadataRepository
 from .s3_service import delete_s3_objects
 
@@ -227,6 +233,10 @@ class UploadWorkflowService:
                 project_s3_prefix=paths.s3_prefix,
                 models=prepared_models,
             )
+            index_context = IndexSaveContext(
+                project_id,
+                read_staged_crs_detail_evidence(prepared_upload.files_to_upload, staged_metadata_paths(prepared_sources)),
+            )
             index_data = self.repository.load_projects_index()
             return upload_new_project_operation(
                 s3_client=self.s3_client,
@@ -237,6 +247,7 @@ class UploadWorkflowService:
                 on_progress=on_progress,
                 bucket_name=self._bucket_name,
                 cancel_requested=cancel_requested,
+                index_context=index_context,
             )
         except OperationCancelledError:
             return UploadResult(status="cancelled", message="Upload abgebrochen.")
@@ -255,8 +266,8 @@ class UploadWorkflowService:
             if metadata_staging_root:
                 shutil.rmtree(metadata_staging_root, ignore_errors=True)
 
-    def _save_projects_index(self, index_data: dict[str, Any]) -> bool:
-        result = self.repository.save_projects_index(index_data)
+    def _save_projects_index(self, index_data: dict[str, Any], context: IndexSaveContext | None = None) -> bool:
+        result = self.repository.save_projects_index(index_data, context=context)
         return True if result is None else bool(result)
 
 

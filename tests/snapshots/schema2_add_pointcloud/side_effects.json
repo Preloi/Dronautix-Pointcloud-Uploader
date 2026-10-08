@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "scenario_id": "schema2_add_pointcloud",
+  "event_count": 6,
+  "events": [
+    {
+      "sequence": 1,
+      "type": "get_object",
+      "key": "projects_index.json",
+      "found": true,
+      "purpose": "read_projects_index",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 2,
+      "type": "upload_file",
+      "key": "pointclouds/golden/schema2_add/versions/golden-data/schema_ergaenzung/cloud.js",
+      "local_name": "cloud.js",
+      "extra_args": {
+        "ContentType": "text/javascript",
+        "CacheControl": "public, max-age=31536000, immutable"
+      },
+      "purpose": "pointcloud_add_upload"
+    },
+    {
+      "sequence": 3,
+      "type": "upload_file",
+      "key": "pointclouds/golden/schema2_add/versions/golden-data/schema_ergaenzung/hierarchy.bin",
+      "local_name": "hierarchy.bin",
+      "extra_args": {
+        "ContentType": "application/octet-stream",
+        "CacheControl": "public, max-age=31536000, immutable"
+      },
+      "purpose": "pointcloud_add_upload"
+    },
+    {
+      "sequence": 4,
+      "type": "upload_file",
+      "key": "pointclouds/golden/schema2_add/versions/golden-data/schema_ergaenzung/octree.bin",
+      "local_name": "octree.bin",
+      "extra_args": {
+        "ContentType": "application/octet-stream",
+        "CacheControl": "public, max-age=31536000, immutable"
+      },
+      "purpose": "pointcloud_add_upload"
+    },
+    {
+      "sequence": 5,
+      "type": "upload_file",
+      "key": "pointclouds/golden/schema2_add/versions/golden-data/schema_ergaenzung/metadata.json",
+      "local_name": "metadata.json",
+      "extra_args": {
+        "ContentType": "application/json",
+        "CacheControl": "public, max-age=31536000, immutable"
+      },
+      "purpose": "pointcloud_add_upload"
+    },
+    {
+      "sequence": 6,
+      "type": "put_object",
+      "key": "projects_index.json",
+      "content_type": "application/json",
+      "cache_control": "no-cache",
+      "purpose": "save_projects_index",
+      "bucket": "potreedronautix"
+    }
+  ],
+  "summary": {
+    "uploaded_keys": [
+      "pointclouds/golden/schema2_add/versions/golden-data/schema_ergaenzung/cloud.js",
+      "pointclouds/golden/schema2_add/versions/golden-data/schema_ergaenzung/hierarchy.bin",
+      "pointclouds/golden/schema2_add/versions/golden-data/schema_ergaenzung/octree.bin",
+      "pointclouds/golden/schema2_add/versions/golden-data/schema_ergaenzung/metadata.json"
+    ],
+    "copied_keys": [],
+    "deleted_keys": [],
+    "put_object_keys": [
+      "projects_index.json"
+    ]
+  },
+  "uploaded_keys": [
+    "pointclouds/golden/schema2_add/versions/golden-data/schema_ergaenzung/cloud.js",
+    "pointclouds/golden/schema2_add/versions/golden-data/schema_ergaenzung/hierarchy.bin",
+    "pointclouds/golden/schema2_add/versions/golden-data/schema_ergaenzung/octree.bin",
+    "pointclouds/golden/schema2_add/versions/golden-data/schema_ergaenzung/metadata.json"
+  ],
+  "copied_keys": [],
+  "deleted_keys": [],
+  "put_object_keys": [
+    "projects_index.json"
+  ]
+}

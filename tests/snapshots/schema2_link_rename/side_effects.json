@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "scenario_id": "schema2_link_rename",
+  "event_count": 4,
+  "events": [
+    {
+      "sequence": 1,
+      "type": "get_object",
+      "key": "projects_index.json",
+      "found": true,
+      "purpose": "read_projects_index",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 2,
+      "type": "put_object",
+      "key": "projects_index.json",
+      "content_type": "application/json",
+      "cache_control": "no-cache",
+      "purpose": "save_projects_index",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 3,
+      "type": "get_object",
+      "key": "projects_index.json",
+      "found": true,
+      "purpose": "read_projects_index",
+      "bucket": "potreedronautix"
+    },
+    {
+      "sequence": 4,
+      "type": "put_object",
+      "key": "projects_index.json",
+      "content_type": "application/json",
+      "cache_control": "no-cache",
+      "purpose": "save_projects_index",
+      "bucket": "potreedronautix"
+    }
+  ],
+  "summary": {
+    "uploaded_keys": [],
+    "copied_keys": [],
+    "deleted_keys": [],
+    "put_object_keys": [
+      "projects_index.json",
+      "projects_index.json"
+    ]
+  },
+  "uploaded_keys": [],
+  "copied_keys": [],
+  "deleted_keys": [],
+  "put_object_keys": [
+    "projects_index.json",
+    "projects_index.json"
+  ]
+}

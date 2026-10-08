@@ -1,0 +1,70 @@
+{
+  "projects": [
+    {
+      "index_schema_version": 2,
+      "datum": "2026-06-20T09:00:00",
+      "kunde": "Schema Kunde",
+      "id": "schema2-single",
+      "projekt": "Kompakt Einzeln",
+      "format": "potree",
+      "link": "https://pointcloud.dronautix.at/index.html?id=schema2-single",
+      "viewer_path": "golden/schema2_single/versions/golden-data",
+      "s3_path": "pointclouds/golden/schema2_single/versions/golden-data",
+      "name": "Schema Replacement",
+      "crs": "EPSG:25832",
+      "crs_name": "ETRS89 / UTM zone 32N",
+      "vertical_crs": "EPSG:7837",
+      "vertical_name": "DHHN2016 height",
+      "history": [
+        {
+          "timestamp": "2026-06-21T12:00:00",
+          "message": "Punktwolke 'Bestand' wurde ausgetauscht."
+        }
+      ]
+    },
+    {
+      "index_schema_version": 2,
+      "id": "schema2-bloated",
+      "kunde": "Fremd",
+      "projekt": "Von altem Uploader aufgebläht",
+      "format": "potree",
+      "viewer_path": "golden/schema2_bloated",
+      "s3_path": "pointclouds/golden/schema2_bloated",
+      "crs": "EPSG:25832",
+      "projection": "EPSG:25832",
+      "epsg": "EPSG:25832",
+      "crs_info": {
+        "value": "EPSG:25832",
+        "projection": "EPSG:25832",
+        "epsg": "EPSG:25832"
+      }
+    },
+    {
+      "index_schema_version": "3",
+      "id": "schema-unknown",
+      "kunde": "Fremd",
+      "projekt": "Unbekanntes Schema",
+      "format": "potree",
+      "viewer_path": "golden/schema_unknown",
+      "s3_path": "pointclouds/golden/schema_unknown",
+      "crs": "EPSG:4326",
+      "projection": "EPSG:4326"
+    },
+    {
+      "id": "legacy-bloated",
+      "kunde": "Fremd",
+      "projekt": "Altprojekt",
+      "format": "potree",
+      "viewer_path": "golden/legacy_bloated",
+      "s3_path": "pointclouds/golden/legacy_bloated",
+      "crs": "EPSG:25832",
+      "projection": "EPSG:25832",
+      "crs_info": {
+        "value": "EPSG:25832",
+        "projection": "EPSG:25832"
+      }
+    }
+  ],
+  "disabled_projects": [],
+  "last_updated": "2026-06-21T12:30:00"
+}

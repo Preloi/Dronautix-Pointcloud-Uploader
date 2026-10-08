@@ -30,7 +30,7 @@ class FakeRepository:
     def load_projects_index(self):
         return self.index_data
 
-    def save_projects_index(self, _index_data):
+    def save_projects_index(self, _index_data, context=None):
         if self.events is not None:
             self.events.append("index")
         return self.save_result
